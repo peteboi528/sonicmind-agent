@@ -76,6 +76,16 @@ def test_delete_asset_removes_user_memory_references(tmp_path):
     assert not agent.media.get_segments(asset.asset_id)
 
 
+def test_generic_music_recommendation_does_not_auto_bind_recent_asset(tmp_path):
+    agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+    asset = agent.ingest_video("https://example.com/recent-asset")
+    agent.analyze_media(asset.asset_id)
+    agent.record_listen("demo-user", asset.asset_id, duration=180, completed=True)
+
+    assert agent._resolve_asset_context("demo-user", "推荐一些 chill 放松歌曲") is None
+    assert agent._resolve_asset_context("demo-user", "推荐当前素材里适合做预告片的片段") == asset.asset_id
+
+
 def test_netease_url_normalization_strips_share_token():
     shared_url = "https://music.163.com/song?id=2700274699&uct2=U2FsdGVkX19mdtaezH9kDfy33am/mSBDHG4wr6X+Ur8="
     canonical = "https://music.163.com/song?id=2700274699"
@@ -99,3 +109,13 @@ def test_netease_enrich_uses_title_artist_hint_when_api_falls_back(tmp_path, mon
 
     assert response.asset.title == "浪人的…"
     assert response.asset.artist == "张震岳"
+
+
+def test_placeholder_metadata_is_not_marked_found(tmp_path):
+    agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+    asset = agent.ingest_video("https://music.163.com/song?id=12345", force_refresh=True)
+
+    metadata = agent.fetch_track_metadata(asset_id=asset.asset_id, use_network=False)
+
+    assert metadata["found"] is False
+    assert metadata["title"].startswith("网易云歌曲")

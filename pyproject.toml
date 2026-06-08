@@ -18,6 +18,9 @@ dependencies = [
 media = [
   "yt-dlp>=2024.8.6",
 ]
+embeddings = [
+  "sentence-transformers>=2.2.0",
+]
 dev = [
   "pytest>=8.0.0",
 ]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -20,6 +21,9 @@ from app.models import (
 from app.prompts import DAILY_RECOMMEND_USER_TEMPLATE, DAILY_SUMMARY_TEMPLATE
 from app.recommend.engine import RecommendEngine
 from app.sources.protocol import ExternalSource
+
+
+logger = logging.getLogger(__name__)
 
 
 class _LLMTrackItem(BaseModel):
@@ -86,7 +90,7 @@ class DailyRecommender:
             bucket=bucket,
         )
 
-        tracks = self._llm_recommend(prompt, count, bucket)
+        tracks = self._llm_recommend(prompt, count, bucket, openness=taste.discovery_openness)
 
         if not tracks:
             # 兜底：用传统引擎
@@ -121,11 +125,14 @@ class DailyRecommender:
             return "暂无数据"
         return f"风格偏好: {genres}, 情绪偏好: {moods}, 能量偏好: {taste.preferred_energy}"
 
-    def _llm_recommend(self, prompt: str, count: int, bucket: str) -> list[RecommendedTrack]:
+    def _llm_recommend(self, prompt: str, count: int, bucket: str, openness: float = 0.3) -> list[RecommendedTrack]:
         try:
             result = self.llm.generate(prompt)
             items = parse_json_list_safe(result, _LLMTrackItem)
             tracks: list[RecommendedTrack] = []
+            # Phase 2：explore/exploit 配比由 discovery_openness 驱动。
+            # openness=0.3 → 前 70% familiar（利用），后 30% discovery（探索）。
+            familiar_cutoff = max(1, round(count * (1 - openness)))
             for i, item in enumerate(items[:count]):
                 track = ExternalTrack(
                     external_id=f"llm-rec-{i:03d}",
@@ -133,9 +140,10 @@ class DailyRecommender:
                     artist=item.artist or "未知",
                     genre=[item.genre],
                     mood=[item.mood],
+                    # source="llm" 标记未核实：这些曲目由 LLM 生成、未经真实回查。
                     source="llm",
                 )
-                cat = "familiar" if i < count * 0.7 else "discovery"
+                cat = "familiar" if i < familiar_cutoff else "discovery"
                 tracks.append(RecommendedTrack(
                     asset=track,
                     score=round(1.0 - i * 0.03, 4),
@@ -144,6 +152,7 @@ class DailyRecommender:
                 ))
             return tracks
         except Exception:
+            logger.debug("LLM recommendation generation failed; using fallback recommender", exc_info=True)
             return []
 
     def _fallback_recommend(self, user: UserMemory, library: list[Asset], taste: TasteProfile, bucket: str, count: int) -> list[RecommendedTrack]:
@@ -151,7 +160,11 @@ class DailyRecommender:
         seed_genres = [g for g, _ in taste.top_genres[:3]] or ["流行"]
         external = self.source.get_recommendations(seed_genres, moods[:2], limit=count)
         recent_ids = {ev.asset_id for ev in user.listening_history[-50:]}
-        ranked = self.engine.rank_tracks(external, taste, moods, recent_ids)
+        # Phase 1：把真实收听行为回灌成排序奖励（Spotify BaRT 思想）
+        from app.memory import compute_behavior_scores
+        asset_durations = {a.asset_id: a.duration_seconds for a in library}
+        behavior_scores = compute_behavior_scores(user.listening_history, asset_durations)
+        ranked = self.engine.rank_tracks(external, taste, moods, recent_ids, behavior_scores)
         tracks: list[RecommendedTrack] = []
         for track, score in ranked[:count]:
             tracks.append(RecommendedTrack(
@@ -173,6 +186,7 @@ class DailyRecommender:
                 DAILY_SUMMARY_TEMPLATE(count=len(tracks), genre_str=genre_str, bucket=bucket)
             )
         except Exception:
+            logger.debug("Daily summary generation failed; using template fallback", exc_info=True)
             return f"今日为你精选{len(tracks)}首{genre_str}音乐，适合{bucket}聆听。"
 
     def _with_reason(

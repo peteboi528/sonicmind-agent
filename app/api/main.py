@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
 from app.agent import AudioVisualAgent
+from app.config import settings
 from app.models import (
     ChatRequest,
     DailyRequest,
@@ -17,6 +21,8 @@ from app.models import (
     SearchRequest,
 )
 
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="智能影音推荐助手 API",
@@ -32,8 +38,24 @@ def root():
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health() -> dict[str, Any]:
+    checks: dict[str, bool] = {}
+    details: dict[str, str] = {}
+
+    try:
+        agent.store.list_keys("assets")
+        checks["store"] = True
+    except Exception:
+        logger.exception("Health check failed for JsonStore")
+        checks["store"] = False
+
+    llm_mode = "mock" if agent.llm.__class__.__name__ == "MockLLM" else "configured"
+    checks["llm"] = llm_mode == "mock" or bool(settings.llm_api_key)
+    details["llm_mode"] = llm_mode
+    details["store_root"] = str(agent.store.root)
+
+    status = "ok" if all(checks.values()) else "degraded"
+    return {"status": status, "checks": checks, "details": details}
 
 
 @app.get("/assets")
@@ -131,6 +153,12 @@ def listen(request: ListenRequest):
 
 @app.post("/chat")
 def chat(request: ChatRequest):
+    history = [{"role": m.role, "content": m.content} for m in request.history]
+    return agent.chat(request.user_id, request.message, history=history or None)
+
+
+@app.post("/agent/run")
+def agent_run(request: ChatRequest):
     history = [{"role": m.role, "content": m.content} for m in request.history]
     return agent.chat(request.user_id, request.message, history=history or None)
 

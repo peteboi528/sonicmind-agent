@@ -7,6 +7,8 @@ from typing import Any
 from app.llm.protocol import LLMResponse, ToolCall
 from app.llm.tools import (
     TOOL_ANALYZE,
+    TOOL_FETCH_METADATA,
+    TOOL_IMPORT_NETEASE_PLAYLIST,
     TOOL_MEMORY_UPDATE,
     TOOL_PLAYLIST,
     TOOL_RECOMMEND,
@@ -16,6 +18,7 @@ from app.llm.tools import (
     TOOL_SIMILAR_CROSS,
     TOOL_SIMILAR_INTRA,
     TOOL_TASTE,
+    TOOL_WEB_MUSIC_SEARCH,
 )
 
 REASON_TEMPLATES = [
@@ -45,12 +48,15 @@ CHAT_TEMPLATES = [
 
 # 工具决策规则（仅用于 MockLLM 第一轮）
 _TOOL_RULES: list[tuple[list[str], str]] = [
+    (["网易云歌单", "netease playlist", "playlist?id", "导入歌单"], TOOL_IMPORT_NETEASE_PLAYLIST),
+    (["联网", "真实", "最新", "网易云", "bilibili", "b站", "线上"], TOOL_WEB_MUSIC_SEARCH),
+    (["metadata", "元数据", "标题", "补全信息"], TOOL_FETCH_METADATA),
     (["similar video", "similar asset", "类似视频", "相似视频"], TOOL_SIMILAR_CROSS),
     (["similar segment", "类似片段", "相似片段", "similar moment"], TOOL_SIMILAR_INTRA),
     (["search", "find songs", "搜索", "找歌"], TOOL_SEARCH),
     (["playlist", "歌单", "合集"], TOOL_PLAYLIST),
     (["taste", "品味", "风格分析", "分析我"], TOOL_TASTE),
-    (["recommend", "suggest", "推荐", "建议", "适合"], TOOL_RECOMMEND),
+    (["recommend", "suggest", "推荐", "建议", "适合", "挑", "跑步"], TOOL_RECOMMEND),
     (["analyze", "分析素材", "index"], TOOL_ANALYZE),
     (["report", "摘要", "报告"], TOOL_REPORT),
     (["remember", "preference", "记住", "我喜欢"], TOOL_MEMORY_UPDATE),
@@ -131,12 +137,16 @@ class MockLLM:
         return None
 
     def _mock_args(self, tool: str, query: str) -> dict[str, Any]:
-        if tool in {TOOL_RECOMMEND, TOOL_SEARCH, TOOL_RETRIEVE}:
+        if tool in {TOOL_RECOMMEND, TOOL_SEARCH, TOOL_RETRIEVE, TOOL_WEB_MUSIC_SEARCH}:
             return {"query": query, "top_k": 5}
         if tool == TOOL_PLAYLIST:
             return {"instruction": query}
         if tool == TOOL_MEMORY_UPDATE:
             return {"event": query}
+        if tool == TOOL_FETCH_METADATA:
+            return {"url": query, "use_network": False}
+        if tool == TOOL_IMPORT_NETEASE_PLAYLIST:
+            return {"playlist_ref": query, "limit": 20}
         return {}
 
     def _final_answer(self, query: str, called: list[str]) -> str:
@@ -144,6 +154,8 @@ class MockLLM:
             return f"已处理你的请求：{query}"
         if TOOL_RECOMMEND in called:
             return random.choice(CHAT_TEMPLATES).format(genre="流行", mood="轻松")
+        if TOOL_IMPORT_NETEASE_PLAYLIST in called or TOOL_WEB_MUSIC_SEARCH in called:
+            return f"我已经根据真实输入工具的 observation 整合了结果：{query}"
         return f"已根据 {len(called)} 个工具的结果整合答案：{query}"
 
     def _intent(self, prompt: str) -> str:

@@ -33,6 +33,8 @@ def test_search(tmp_path):
     assert results.summary
     assert isinstance(results.external, list)
     assert results.agent_trace
+    assert "本地" in results.summary
+    assert "外部候选" in results.summary
 
 
 def test_taste_profile(tmp_path):
@@ -58,3 +60,33 @@ def test_playlist_fallback(tmp_path):
     playlist = agent.generate_playlist("demo-user", "帮我生成一个晚上听的歌单")
     assert playlist.tracks
     assert playlist.generated_by in {"llm", "fallback"}
+
+
+def test_playlist_respects_requested_count_with_external_fill(tmp_path):
+    agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+
+    playlist = agent.generate_playlist("demo-user", "帮我生成50首的chill放松歌单")
+
+    assert len(playlist.tracks) == 50
+    assert any(getattr(track, "source", "") != "local" for track in playlist.tracks)
+
+
+def test_playlist_drops_unverified_llm_tracks(tmp_path):
+    agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+
+    class FakePlaylistLLM:
+        def generate(self, prompt, system=None, temperature=0.7):
+            return '{"name":"x","description":"","tracks":[{"title":"不存在的歌","artist":"不存在的歌手","asset_id":null}]}'
+
+        def chat(self, messages, temperature=0.7):
+            return ""
+
+        def chat_with_tools(self, messages, tools, temperature=0.3, tool_choice="auto"):
+            from app.llm.protocol import LLMResponse
+            return LLMResponse(content="ok", finish_reason="stop")
+
+    agent.llm = FakePlaylistLLM()
+    playlist = agent.generate_playlist("demo-user", "帮我生成5首chill放松歌单", target_count=5)
+
+    assert len(playlist.tracks) == 5
+    assert all(getattr(track, "source", "") != "llm" for track in playlist.tracks)

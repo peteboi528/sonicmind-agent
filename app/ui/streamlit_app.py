@@ -6,7 +6,7 @@ from app.agent import AudioVisualAgent
 from app.models import MemoryUpdateRequest
 
 
-st.set_page_config(page_title="SONICMIND", page_icon="▶", layout="wide")
+st.set_page_config(page_title="SONICMIND", page_icon="♬", layout="wide")
 
 st.markdown("""
 <style>
@@ -152,7 +152,8 @@ section[data-testid="stSidebar"] .stCaption p {
 
 st.markdown("""
 <style>
-.stButton > button {
+.stButton > button,
+.stFormSubmitButton > button {
   background: var(--accent) !important;
   color: #000 !important;
   border: none !important;
@@ -162,7 +163,8 @@ st.markdown("""
   padding: 12px 32px !important;
   letter-spacing: 0.02em;
 }
-.stButton > button:hover {
+.stButton > button:hover,
+.stFormSubmitButton > button:hover {
   background: #1ed760 !important;
   transform: scale(1.02);
 }
@@ -191,6 +193,61 @@ st.markdown("""
   padding: 32px 0 24px;
   border-bottom: 1px solid var(--border);
   margin-bottom: 24px;
+}
+.sm-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.sm-brand-mark {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 50%, #050505 0 16%, transparent 17%),
+    conic-gradient(from 210deg, #1ed760, #1DB954, #8cffb5, #1DB954);
+  box-shadow: 0 0 0 1px rgba(29,185,84,0.32), 0 8px 22px rgba(29,185,84,0.22);
+  flex: 0 0 auto;
+}
+.sm-brand-mark::before,
+.sm-brand-mark::after {
+  content: '';
+  position: absolute;
+  top: 9px;
+  width: 2px;
+  border-radius: 999px;
+  background: #07130c;
+  opacity: 0.85;
+}
+.sm-brand-mark::before {
+  right: 9px;
+  height: 9px;
+  box-shadow: -5px 2px 0 #07130c, -10px 4px 0 #07130c;
+}
+.sm-brand-mark::after {
+  right: 5px;
+  height: 13px;
+}
+.sm-brand-word {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  line-height: 1;
+}
+.sm-brand-sub {
+  color: var(--text-sub);
+  font-size: 11px;
+  margin-top: 5px;
+}
+.sm-brand-small .sm-brand-mark {
+  width: 24px;
+  height: 24px;
+}
+.sm-brand-small .sm-brand-word {
+  color: var(--accent);
+  font-size: 15px;
 }
 .sm-logo {
   font-family: 'Inter', sans-serif;
@@ -289,6 +346,103 @@ st.markdown("""
   margin: 8px 20% 8px 0;
   font-size: 14px;
   border-left: 2px solid var(--accent);
+}
+
+/* Agent markdown reply: keep generated content readable inside chat.
+   Streamlit markdown defaults make ### headings huge and tables too dark on
+   this Spotify-like theme, so scope typography to assistant chat messages. */
+[data-testid="stChatMessage"] {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  border-left: 2px solid var(--accent) !important;
+  border-radius: 12px !important;
+  padding: 14px 16px !important;
+  margin: 10px 12% 14px 0 !important;
+}
+[data-testid="stChatMessageAvatar"] {
+  background:
+    radial-gradient(circle at 50% 50%, #0b0b0b 0 24%, transparent 25%),
+    linear-gradient(135deg, #1ed760, #1DB954) !important;
+  color: #07130c !important;
+  border: 1px solid rgba(29,185,84,0.45) !important;
+  box-shadow: 0 0 0 3px rgba(29,185,84,0.12), 0 10px 24px rgba(0,0,0,0.35) !important;
+  font-size: 17px !important;
+  font-weight: 900 !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] {
+  color: var(--text-sub) !important;
+  font-size: 14px !important;
+  line-height: 1.72 !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] li {
+  color: var(--text-sub) !important;
+  font-size: 14px !important;
+  line-height: 1.72 !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h1,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h2,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h3,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h4 {
+  color: var(--text) !important;
+  font-size: 17px !important;
+  line-height: 1.35 !important;
+  font-weight: 800 !important;
+  margin: 14px 0 8px !important;
+  letter-spacing: 0 !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h1:first-child,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h2:first-child,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] h3:first-child {
+  margin-top: 0 !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] strong {
+  color: var(--text) !important;
+  font-weight: 700 !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] ul,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] ol {
+  margin: 8px 0 10px 18px !important;
+  padding-left: 14px !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] blockquote {
+  border-left: 2px solid var(--accent) !important;
+  color: var(--text-sub) !important;
+  background: rgba(255,255,255,0.035) !important;
+  margin: 12px 0 !important;
+  padding: 10px 14px !important;
+  border-radius: 0 8px 8px 0 !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] hr {
+  border: 0 !important;
+  border-top: 1px solid var(--border) !important;
+  margin: 14px 0 !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] table {
+  width: 100% !important;
+  border-collapse: collapse !important;
+  margin: 12px 0 !important;
+  font-size: 13px !important;
+  color: var(--text-sub) !important;
+  background: transparent !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] th,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] td {
+  border: 1px solid var(--border) !important;
+  padding: 9px 10px !important;
+  color: var(--text-sub) !important;
+  background: rgba(255,255,255,0.015) !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] th {
+  color: var(--text) !important;
+  font-weight: 700 !important;
+  background: rgba(255,255,255,0.045) !important;
+}
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] code {
+  color: var(--accent) !important;
+  background: rgba(29,185,84,0.12) !important;
+  border-radius: 4px !important;
+  padding: 1px 5px !important;
 }
 
 /* Number input - Pitchfork circle style */
@@ -548,8 +702,11 @@ def render_evidences(evidences: list) -> None:
 # --- Sidebar ---
 with st.sidebar:
     st.markdown(
-        "<div style='font-size:18px;font-weight:800;letter-spacing:0.04em;color:var(--accent)'>▶ SONICMIND</div>"
-        "<div style='font-size:11px;color:var(--text-sub);margin:2px 0 4px'>你的音乐智能体</div>",
+        "<div class='sm-brand sm-brand-small'>"
+        "<div class='sm-brand-mark'></div>"
+        "<div><div class='sm-brand-word'>SONICMIND</div>"
+        "<div class='sm-brand-sub'>你的音乐智能体</div></div>"
+        "</div>",
         unsafe_allow_html=True,
     )
     user_id = st.text_input("当前用户", value="demo-user",
@@ -748,7 +905,10 @@ listened_count = len(mem.listening_history)
 
 st.markdown(f"""
 <div class="sm-hero">
-  <div class="sm-logo">SONICMIND</div>
+  <div class="sm-brand">
+    <div class="sm-brand-mark"></div>
+    <div class="sm-brand-word">SONICMIND</div>
+  </div>
   <div class="sm-headline">为你而听</div>
   <div class="sm-sub">AI Agent · 持续学习你的品味 · 每次交互都在进化</div>
   <div class="sm-status">Agent 在线 · 已学习 {listened_count} 次收听 · {rated_count} 条评分 · {len(library)} 首入库</div>
@@ -941,9 +1101,24 @@ with tab5:
           · 记住你的反馈并持续优化
           </p>
         </div>""", unsafe_allow_html=True)
-    for role, txt in st.session_state["ch"]:
-        cls = "sm-chat-user" if role == "u" else "sm-chat-agent"
-        st.markdown(f"<div class='{cls}'>{txt}</div>", unsafe_allow_html=True)
+    for entry in st.session_state["ch"]:
+        role, txt = entry[0], entry[1]
+        if role == "u":
+            st.markdown(f"<div class='sm-chat-user'>{txt}</div>", unsafe_allow_html=True)
+            continue
+        # agent 正文用原生 markdown 渲染（解析 **加粗** / ## 标题 / --- 等 GFM 语法）
+        with st.chat_message("assistant", avatar="🎧"):
+            st.markdown(txt)
+            meta = entry[2] if len(entry) > 2 else {}
+            if meta.get("trace"):
+                with st.expander("🔍 Trace"):
+                    st.code(meta["trace"], language=None)
+            if meta.get("evidence"):
+                with st.expander("📎 Evidence"):
+                    st.text(meta["evidence"])
+            if meta.get("goal"):
+                with st.expander("🎯 Goal"):
+                    st.text(meta["goal"])
     msg = None
     with st.form(key="chat_form", clear_on_submit=True):
         msg = st.text_input("", placeholder="分析我的品味 / 推荐类似的歌手...", key="ci", label_visibility="collapsed")
@@ -952,8 +1127,9 @@ with tab5:
         # 在追加本轮用户输入前，用已有对话构造多轮上下文 history
         # assistant 文本里带 [Trace]/[Evidence] 块，需剥掉只保留正文，避免污染 LLM 上下文
         history = []
-        for _role, _txt in st.session_state["ch"][-10:]:
-            clean = _txt.split("\n\n[Trace]")[0].split("\n\n[Evidence]")[0]
+        for _entry in st.session_state["ch"][-10:]:
+            _role, _txt = _entry[0], _entry[1]
+            clean = _txt.split("\n\n[Trace]")[0].split("\n\n[Evidence]")[0].split("\n\n[Goal]")[0]
             history.append({"role": "user" if _role == "u" else "assistant", "content": clean})
         st.session_state["ch"].append(("u", msg))
         with st.spinner("Agent 思考中..."):
@@ -962,12 +1138,13 @@ with tab5:
         evidence_block = "\n".join(
             [f"{e.timestamp} · {e.metadata.get('asset_title', '')} · {e.content}" for e in ans.evidences[:3]]
         )
-        full_answer = ans.answer
-        if trace_block:
-            full_answer += f"\n\n[Trace]\n{trace_block}"
-        if evidence_block:
-            full_answer += f"\n\n[Evidence]\n{evidence_block}"
-        st.session_state["ch"].append(("a", full_answer))
+        goal_block = "\n".join(ans.goal_progress) if ans.goal_progress else ""
+        # 正文与 Trace/Evidence/Goal 分开存：正文走原生 markdown 渲染，元信息收进折叠区
+        st.session_state["ch"].append(("a", ans.answer, {
+            "trace": trace_block,
+            "evidence": evidence_block,
+            "goal": goal_block,
+        }))
         st.rerun()
 
 # --- 固定底部音频播放器 (Spotify style) ---

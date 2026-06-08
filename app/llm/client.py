@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any
 
 from app.config import settings
 from app.llm.mock import MockLLM
-from app.llm.protocol import LLMProvider, LLMResponse, ToolCall
+from app.llm.protocol import LLMError, LLMProvider, LLMResponse, ToolCall
 from app.prompts import AGENT_SYSTEM_PROMPT
 
 SYSTEM_PROMPT = AGENT_SYSTEM_PROMPT
@@ -46,6 +48,7 @@ class OpenAICompatibleLLM:
             "temperature": temperature,
             "tools": tools,
             "tool_choice": tool_choice,
+            "max_tokens": settings.llm_max_tokens,
         }
         try:
             data = self._post(payload)
@@ -83,12 +86,17 @@ class OpenAICompatibleLLM:
             return LLMResponse(content="", finish_reason="error", error=f"解析响应失败: {exc}")
 
     def _call(self, messages: list[dict[str, Any]], temperature: float) -> str:
-        payload = {"model": self.model, "messages": messages, "temperature": temperature}
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": settings.llm_max_tokens,
+        }
         try:
             data = self._post(payload)
             return data["choices"][0]["message"]["content"]
         except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
-            return f"LLM 请求失败: {exc}"
+            raise LLMError(str(exc)) from exc
 
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
@@ -100,15 +108,30 @@ class OpenAICompatibleLLM:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=60) as response:
+        with urllib.request.urlopen(request, timeout=settings.llm_timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
 
 
 def build_llm() -> LLMProvider:
     if settings.mock_mode:
         return MockLLM()
+    if _local_endpoint_unavailable(settings.llm_base_url):
+        return MockLLM()
     return OpenAICompatibleLLM(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
         model=settings.llm_model,
     )
+
+
+def _local_endpoint_unavailable(base_url: str) -> bool:
+    parsed = urllib.parse.urlparse(base_url)
+    host = parsed.hostname
+    if host not in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        with socket.create_connection((host, port), timeout=0.2):
+            return False
+    except OSError:
+        return True

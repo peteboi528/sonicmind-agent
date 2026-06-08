@@ -19,11 +19,15 @@ TOOL_RETRIEVE = "retrieve_evidence"
 TOOL_ANALYZE = "analyze_media"
 TOOL_REPORT = "generate_report"
 TOOL_MEMORY_UPDATE = "update_user_memory"
+TOOL_WEB_MUSIC_SEARCH = "search_web_music"
+TOOL_FETCH_METADATA = "fetch_track_metadata"
+TOOL_IMPORT_NETEASE_PLAYLIST = "import_netease_playlist"
 
 ALL_TOOL_NAMES = {
     TOOL_RECOMMEND, TOOL_SEARCH, TOOL_PLAYLIST, TOOL_TASTE,
     TOOL_SIMILAR_CROSS, TOOL_SIMILAR_INTRA, TOOL_RETRIEVE,
     TOOL_ANALYZE, TOOL_REPORT, TOOL_MEMORY_UPDATE,
+    TOOL_WEB_MUSIC_SEARCH, TOOL_FETCH_METADATA, TOOL_IMPORT_NETEASE_PLAYLIST,
 }
 
 
@@ -45,7 +49,7 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
 AGENT_TOOLS: list[dict[str, Any]] = [
     _tool(
         TOOL_RECOMMEND,
-        "根据用户的品味档案和当前需求推荐音乐。适用于：用户想要新歌推荐、根据心情/时段推荐、每日推荐。",
+        "根据用户的品味档案和当前需求推荐音乐。适用于：用户想要新歌推荐、根据心情/时段推荐、每日推荐。若用户要求真实线上结果或本地结果不足，应先调用 search_web_music。",
         {
             "query": {
                 "type": "string",
@@ -61,7 +65,7 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     ),
     _tool(
         TOOL_SEARCH,
-        "在本地音乐库和外部曲库中搜索匹配的歌曲。适用于：用户找特定歌曲、特定歌手、特定关键词。",
+        "在本地音乐库和离线候选曲库中搜索匹配歌曲。适用于：用户找特定歌曲、特定歌手、特定关键词。若用户明确要求真实平台结果，应先调用 search_web_music。",
         {
             "query": {
                 "type": "string",
@@ -77,11 +81,15 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     ),
     _tool(
         TOOL_PLAYLIST,
-        "根据用户指令生成一个主题歌单。适用于：用户明确说'做一个歌单'、'帮我整理'等。",
+        "根据用户指令生成一个主题歌单。适用于：用户明确说'做一个歌单'、'帮我整理'等。若用户给的是网易云歌单链接，应先调用 import_netease_playlist。",
         {
             "instruction": {
                 "type": "string",
                 "description": "歌单主题或场景，例如 '深夜专注用'、'跑步歌单'",
+            },
+            "target_count": {
+                "type": "integer",
+                "description": "用户要求的歌单曲目数，例如 50；未指定时由系统从 instruction 推断",
             },
         },
         ["instruction"],
@@ -139,5 +147,33 @@ AGENT_TOOLS: list[dict[str, Any]] = [
             },
         },
         ["event"],
+    ),
+    _tool(
+        TOOL_WEB_MUSIC_SEARCH,
+        "联网搜索真实音乐或视频候选。适用于：用户要求真实曲目、最新内容、指定平台内容，或离线曲库不足。结果不可预知，调用后应根据 observation 决定是否 fetch metadata、推荐或生成歌单。",
+        {
+            "query": {"type": "string", "description": "搜索关键词，可以包含歌曲、歌手、场景或平台"},
+            "top_k": {"type": "integer", "description": "返回数量，默认 5", "default": 5},
+        },
+        ["query"],
+    ),
+    _tool(
+        TOOL_FETCH_METADATA,
+        "抓取真实曲目或素材元数据。适用于：已有 asset_id 或 URL，但标题、歌手、专辑、封面等信息不完整。",
+        {
+            "asset_id": {"type": "string", "description": "已有素材 id，可选"},
+            "url": {"type": "string", "description": "待抓取的音乐或视频 URL，可选"},
+            "use_network": {"type": "boolean", "description": "是否允许联网抓取", "default": True},
+        },
+        [],
+    ),
+    _tool(
+        TOOL_IMPORT_NETEASE_PLAYLIST,
+        "导入网易云歌单。适用于：用户给出网易云歌单链接或 id，希望把歌单作为后续推荐、筛选、建歌单的真实输入。",
+        {
+            "playlist_ref": {"type": "string", "description": "网易云歌单链接或歌单 id"},
+            "limit": {"type": "integer", "description": "最多导入数量，默认 100", "default": 100},
+        },
+        ["playlist_ref"],
     ),
 ]

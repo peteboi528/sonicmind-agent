@@ -5,6 +5,7 @@ import re
 from datetime import datetime, timezone
 
 from app.models import (
+    AgentGoal,
     Asset,
     ListeningEvent,
     MemoryEntry,
@@ -23,6 +24,29 @@ PREFERENCE_PATTERNS = [
     re.compile(r"(?:i\s+)?(?:like|love|prefer)\s+(.+)", re.IGNORECASE),
     re.compile(r"(?:喜欢|偏好|更想要|更喜欢|爱听)(.+)"),
 ]
+
+GOAL_KEYWORDS = ["目标", "任务", "帮我", "导入", "歌单", "先", "然后", "再", "跑步", "整理"]
+
+ACTION_TO_GOAL_STEP = {
+    "search_web_music": "联网搜索真实曲目",
+    "fetch_track_metadata": "抓取真实元数据",
+    "import_netease_playlist": "导入网易云歌单",
+    "search": "搜索候选音乐",
+    "recommend": "挑选推荐内容",
+    "playlist": "生成歌单",
+    "taste": "分析用户品味",
+    "retrieve": "检索证据",
+    "memory_update": "更新记忆",
+    "web_music_search": "联网搜索真实曲目",
+    "fetch_metadata": "抓取真实元数据",
+}
+
+TECHNICAL_ACTIONS = {
+    "finalize",
+    "max_steps_reached",
+    "fallback",
+    "plan",
+}
 
 
 class MemoryManager:
@@ -164,6 +188,50 @@ class MemoryManager:
         parts.extend(memory.common_goals[-3:])
         return " ".join(parts)
 
+    def get_active_goal(self, user_id: str) -> AgentGoal | None:
+        goal = self.store.read_model("goals", user_id, AgentGoal)
+        if goal is None or goal.status != "active":
+            return None
+        return goal
+
+    def ensure_goal(self, user_id: str, query: str) -> AgentGoal | None:
+        goal = self.get_active_goal(user_id)
+        if goal is not None:
+            # 相关性门控：新 query 与旧 goal 无关时，归档旧 goal 而非强行续接，
+            # 避免"50首chill歌单"这种旧任务绑死后续每一轮对话。
+            if _goal_still_relevant(goal, query):
+                return goal
+            goal.status = "completed"
+            goal.updated_at = utc_now_iso()
+            self.store.write_model("goals", user_id, goal)
+        if not should_start_goal(query):
+            return None
+        goal = AgentGoal(goal=query, steps_pending=infer_goal_steps(query))
+        self.store.write_model("goals", user_id, goal)
+        return goal
+
+    def update_goal_progress(self, user_id: str, goal: AgentGoal | None, actions: list[str]) -> AgentGoal | None:
+        if goal is None:
+            return None
+        changed = False
+        for action in actions:
+            if action in TECHNICAL_ACTIONS:
+                continue
+            label = ACTION_TO_GOAL_STEP.get(action, action)
+            if label not in goal.steps_done:
+                goal.steps_done.append(label)
+                changed = True
+            if label in goal.steps_pending:
+                goal.steps_pending.remove(label)
+                changed = True
+        if not goal.steps_pending and goal.steps_done:
+            goal.status = "completed"
+            changed = True
+        if changed:
+            goal.updated_at = utc_now_iso()
+            self.store.write_model("goals", user_id, goal)
+        return goal
+
     def _upsert_entry(self, memory: UserMemory, text: str, source: str) -> bool:
         normalized = text.lower().strip()
         for entry in memory.structured_preferences:
@@ -200,6 +268,42 @@ def score_entries(entries: list[MemoryEntry]) -> list[tuple[MemoryEntry, float]]
     return scored
 
 
+def compute_behavior_scores(
+    listening_history: list[ListeningEvent],
+    asset_durations: dict[str, int] | None = None,
+) -> dict[str, float]:
+    """从收听历史计算每个 asset 的行为分数（Spotify BaRT 的奖励信号思想）。
+
+    听完 (completed) → +1；秒跳（听了不到时长 10% 或绝对 < 15 秒）→ -1；
+    其余部分收听按收听比例线性给分。多次收听按时间指数衰减累加，
+    近期行为权重更高。返回 {asset_id: score}，分数未归一化。
+    """
+    asset_durations = asset_durations or {}
+    now = datetime.now(timezone.utc)
+    scores: dict[str, float] = {}
+    for event in listening_history:
+        if not event.asset_id:
+            continue
+        full = asset_durations.get(event.asset_id, 0)
+        listened = event.duration_listened or 0
+        if event.completed:
+            reward = 1.0
+        elif listened < 15 or (full > 0 and listened < full * 0.1):
+            reward = -1.0
+        elif full > 0:
+            reward = max(-1.0, min(1.0, (listened / full) * 2 - 1))
+        else:
+            reward = 0.0
+        try:
+            ts = datetime.fromisoformat(event.timestamp)
+            age_days = max(0, (now - ts).days)
+        except (ValueError, TypeError):
+            age_days = 0
+        decay = math.exp(-0.05 * age_days)
+        scores[event.asset_id] = scores.get(event.asset_id, 0.0) + reward * decay
+    return scores
+
+
 def extract_preference(event: str) -> str | None:
     normalized = event.strip()
     for pattern in PREFERENCE_PATTERNS:
@@ -222,3 +326,43 @@ def extract_goal(event: str) -> str | None:
 
 def cleanup(value: str) -> str:
     return re.sub(r"\s+", " ", value.strip("。.!? ，,")).strip()
+
+
+def should_start_goal(query: str) -> bool:
+    lowered = query.lower()
+    return any(keyword in lowered for keyword in GOAL_KEYWORDS)
+
+
+def _goal_still_relevant(goal: AgentGoal, query: str) -> bool:
+    """判断新一轮 query 是否还属于旧 goal 的范畴。
+
+    不相关时应归档旧 goal、避免"50首chill歌单"这类任务绑死后续每轮对话。
+    判据：query 与 goal 文本有词汇重叠，或 query 本身不像一个新任务请求
+    （没有 should_start_goal 关键词，视为对旧任务的追问/延续）。
+    """
+    if not should_start_goal(query):
+        return True  # 不是新任务请求 → 当作旧 goal 的延续
+
+    goal_tokens = set(re.findall(r"[\w一-鿿]+", goal.goal.lower()))
+    query_tokens = set(re.findall(r"[\w一-鿿]+", query.lower()))
+    # 去掉通用动词噪声，避免"帮我""生成"等词造成假相关
+    noise = {"帮我", "生成", "一个", "的", "我", "想", "要", "请", "给我", "做", "个"}
+    overlap = (goal_tokens & query_tokens) - noise
+    return bool(overlap)
+
+
+def infer_goal_steps(query: str) -> list[str]:
+    lowered = query.lower()
+    steps: list[str] = []
+    if "导入" in lowered and "歌单" in lowered:
+        steps.append("导入网易云歌单")
+    if any(token in lowered for token in ["联网", "真实", "外部", "网易", "b站", "bilibili"]):
+        steps.append("联网搜索真实曲目")
+    if any(token in lowered for token in ["挑", "推荐", "跑步", "适合"]):
+        steps.append("挑选推荐内容")
+    if any(token in lowered for token in ["建歌单", "生成歌单", "做歌单", "整理", "歌单"]):
+        steps.append("生成歌单")
+    # 不再添加"理解并推进用户目标"这种永远完不成的兜底步骤——
+    # 它会让 goal 永远停留在 active、绑死后续对话。无明确步骤时返回空列表，
+    # goal 在首轮动作后即可正常完成。
+    return steps

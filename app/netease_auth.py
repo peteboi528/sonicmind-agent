@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import http.cookiejar
 import json
+import logging
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -146,6 +149,7 @@ def fetch_account_info(cookie: str) -> dict | None:
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.loads(r.read().decode())
     except Exception:
+        logger.debug("NetEase account info fetch failed", exc_info=True)
         return None
     profile = data.get("profile") or {}
     account = data.get("account") or {}
@@ -179,6 +183,7 @@ def _api_get(url: str, cookie: str = "") -> dict | None:
         with urllib.request.urlopen(req, timeout=12) as r:
             return json.loads(r.read().decode())
     except Exception:
+        logger.debug("NetEase API request failed: %s", url, exc_info=True)
         return None
 
 

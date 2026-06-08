@@ -13,11 +13,16 @@ class Settings:
         self.llm_base_url: str = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
         self.llm_api_key: str = os.getenv("LLM_API_KEY", "")
         self.llm_model: str = os.getenv("LLM_MODEL", "qwen2.5")
+        self.llm_timeout_seconds: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
+        self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "1024"))
         self.external_source: str = os.getenv("EXTERNAL_SOURCE", "mock")
         self.store_root: str = os.getenv("STORE_ROOT", "data/store")
         self.media_root: str = os.getenv("MEDIA_ROOT", "data/media")
         self.daily_rec_count: int = int(os.getenv("DAILY_REC_COUNT", "25"))
         self.enable_online_enrich: bool = os.getenv("ENABLE_ONLINE_ENRICH", "false").lower() == "true"
+        # Phase 3：embedding 检索。默认关闭，缺依赖/加载失败时自动回退 TF cosine。
+        self.enable_embeddings: bool = os.getenv("ENABLE_EMBEDDINGS", "false").lower() == "true"
+        self.embedding_model: str = os.getenv("EMBEDDING_MODEL", "paraphrase-multilingual-MiniLM-L12-v2")
 
     @property
     def mock_mode(self) -> bool:

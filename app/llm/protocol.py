@@ -4,6 +4,10 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 
+class LLMError(Exception):
+    """Raised when a plain LLM completion request fails."""
+
+
 @dataclass
 class ToolCall:
     """LLM 发起的一次工具调用。"""

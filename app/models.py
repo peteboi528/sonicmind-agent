@@ -101,8 +101,8 @@ class ListeningEvent(BaseModel):
 
 
 class TasteProfile(BaseModel):
-    top_genres: list[list[Any]] = Field(default_factory=list)
-    top_moods: list[list[Any]] = Field(default_factory=list)
+    top_genres: list[tuple[str, float]] = Field(default_factory=list)
+    top_moods: list[tuple[str, float]] = Field(default_factory=list)
     preferred_energy: float = 0.5
     preferred_tempo_range: list[int] = Field(default_factory=lambda: [80, 140])
     discovery_openness: float = 0.3
@@ -128,6 +128,8 @@ class AgentAnswer(BaseModel):
     recommended_segments: list[Segment] = Field(default_factory=list)
     memory_updated: bool = False
     agent_trace: list[str] = Field(default_factory=list)
+    pending_goal: str | None = None
+    goal_progress: list[str] = Field(default_factory=list)
 
 
 class IngestRequest(BaseModel):
@@ -178,6 +180,15 @@ class ReActStep(BaseModel):
     observation: str
 
 
+class AgentGoal(BaseModel):
+    goal: str
+    steps_done: list[str] = Field(default_factory=list)
+    steps_pending: list[str] = Field(default_factory=list)
+    status: Literal["active", "completed", "blocked"] = "active"
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
 class FeedbackRequest(BaseModel):
     user_id: str = "demo-user"
     segment_id: str
@@ -207,6 +218,29 @@ class ExternalTrack(BaseModel):
     preview_url: str | None = None
     playback_url: str | None = None
     source: str = "mock"
+
+
+TrackOrigin = Literal["local", "netease", "bilibili", "youtube", "mock", "llm_guess"]
+
+
+class TrackEntity(BaseModel):
+    """候选池契约：只有进入候选池的 TrackEntity 才允许出现在最终答案里。
+
+    verified=True 表示 title/artist 经过真实来源回查（如网易云 song detail API）；
+    verified=False（尤其 origin='llm_guess'）表示由 LLM 生成、未经核实，
+    Answer Guard 默认不允许其出现在面向用户的文本中。
+    """
+    title: str
+    artist: str = ""
+    source: str = "unknown"
+    source_id: str = ""
+    verified: bool = False
+    origin: TrackOrigin = "llm_guess"
+    evidence_ref: str | None = None
+
+    def display_key(self) -> str:
+        """用于 Answer Guard 去重/白名单比对的归一化键。"""
+        return f"{self.title.strip().lower()}|{self.artist.strip().lower()}"
 
 
 class RecommendedTrack(BaseModel):

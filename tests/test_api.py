@@ -42,6 +42,11 @@ def test_api_flow():
     assert chat.json()["answer"]
     assert chat.json()["agent_trace"]
 
+    agent_run = client.post("/agent/run", json={"user_id": "api-user", "message": "分析我的品味"})
+    assert agent_run.status_code == 200
+    assert agent_run.json()["answer"]
+    assert agent_run.json()["agent_trace"]
+
     enrich = client.post(f"/assets/{asset_id}/enrich", json={"use_network": False})
     assert enrich.status_code == 200
     assert enrich.json()["mode"] == "offline"

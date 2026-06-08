@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from pathlib import Path
 
@@ -9,6 +10,9 @@ from app.models import Asset, AssetStatus, Segment, utc_now_iso
 from app.storage import JsonStore
 
 import random
+
+
+logger = logging.getLogger(__name__)
 
 
 class MediaPipeline:
@@ -112,7 +116,7 @@ def normalize_url(url: str) -> str:
             normalized = parsed._replace(query=clean_query, fragment="").geturl()
             return normalized
     except Exception:
-        pass
+        logger.debug("URL normalization failed; using original URL", exc_info=True)
     return url
 
 

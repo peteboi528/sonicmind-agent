@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 from typing import TypeVar
@@ -25,7 +26,7 @@ class JsonStore:
     def write_model(self, collection: str, key: str, value: BaseModel) -> None:
         path = self._path(collection, key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(value.model_dump_json(indent=2), encoding="utf-8")
+        self._atomic_write(path, value.model_dump_json(indent=2))
 
     def read_models(self, collection: str, key: str, model: type[T]) -> list[T]:
         path = self._path(collection, key)
@@ -38,7 +39,7 @@ class JsonStore:
         path = self._path(collection, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         raw = [value.model_dump(mode="json") for value in values]
-        path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+        self._atomic_write(path, json.dumps(raw, ensure_ascii=False, indent=2))
 
     def delete_key(self, collection: str, key: str) -> bool:
         path = self._path(collection, key)
@@ -65,3 +66,9 @@ class JsonStore:
     def _path(self, collection: str, key: str) -> Path:
         safe_key = key.replace("/", "_")
         return self.root / collection / f"{safe_key}.json"
+
+    @staticmethod
+    def _atomic_write(path: Path, text: str) -> None:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)

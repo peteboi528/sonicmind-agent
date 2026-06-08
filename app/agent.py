@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
+import logging
 import random
-import urllib.parse
+import re
 from typing import Any
 
 from app.config import settings
 from app.llm.client import build_llm
-from app.llm.protocol import LLMProvider
+from app.llm.protocol import LLMError, LLMProvider
 from app.llm.structured import extract_json_dict, extract_json_list
 from app.media.pipeline import MediaPipeline, netease_song_id
 from app.memory import MemoryManager
@@ -44,8 +44,14 @@ from app.recommend.engine import RecommendEngine
 from app.retrieval.vector_store import HybridRetriever
 from app.similarity import AssetSimilarity
 from app.sources.mock_source import MockSource
+from app.sources import bilibili as bilibili_source
+from app.sources import netease as netease_source
+from app.sources import youtube as youtube_source
 from app.sources.protocol import ExternalSource
 from app.storage import JsonStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class AudioVisualAgent:
@@ -101,66 +107,21 @@ class AudioVisualAgent:
         )
 
     def _fetch_video_title(self, url: str) -> str | None:
-        import json as _json
-        import re as _re
-        import urllib.parse as _parse
-        import urllib.request as _req
-
-        _headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
-
-        # YouTube oEmbed
         if "youtube.com" in url or "youtu.be" in url:
-            try:
-                oembed = f"https://www.youtube.com/oembed?url={_parse.quote(url, safe='')}&format=json"
-                with _req.urlopen(_req.Request(oembed, headers=_headers), timeout=10) as r:
-                    return _json.loads(r.read().decode()).get("title")
-            except Exception:
-                pass
+            title = youtube_source.fetch_youtube_title(url)
+            if title:
+                return title
 
-        # 网易云音乐 —— 优先调官方 API，退回 HTML <title>
         if "163.com" in url or "163cn.tv" in url:
             song_id = _netease_song_id(url)
-            if song_id:
-                # 方式 A：官方 API（无需登录，返回结构化 JSON）
-                try:
-                    api = f"https://music.163.com/api/song/detail/?id={song_id}&ids=[{song_id}]"
-                    req = _req.Request(api, headers={**_headers, "Referer": "https://music.163.com/"})
-                    with _req.urlopen(req, timeout=10) as r:
-                        data = _json.loads(r.read().decode())
-                    songs = data.get("songs") or []
-                    if songs:
-                        name = songs[0].get("name", "")
-                        artists = "/".join(a.get("name", "") for a in songs[0].get("artists", []))
-                        return f"{name} - {artists}" if artists else name
-                except Exception:
-                    pass
-            # 方式 B：抓 HTML <title>
-            try:
-                page_url = f"https://music.163.com/song?id={song_id}" if song_id else url
-                with _req.urlopen(_req.Request(page_url, headers=_headers), timeout=10) as r:
-                    html = r.read().decode("utf-8", errors="ignore")[:20000]
-                m = _re.search(r"<title[^>]*>(.+?)</title>", html, _re.IGNORECASE | _re.DOTALL)
-                if m:
-                    title = m.group(1).strip()
-                    for suffix in [" - 单曲 - 网易云音乐", " - 网易云音乐"]:
-                        title = title.replace(suffix, "")
-                    return title.strip()
-            except Exception:
-                pass
+            title = netease_source.fetch_netease_title(url, song_id)
+            if title:
+                return title
 
-        # B 站 HTML <title>
         if "bilibili.com" in url:
-            try:
-                with _req.urlopen(_req.Request(url, headers=_headers), timeout=10) as r:
-                    html = r.read().decode("utf-8", errors="ignore")[:20000]
-                m = _re.search(r"<title[^>]*>(.+?)</title>", html, _re.IGNORECASE | _re.DOTALL)
-                if m:
-                    title = m.group(1).strip()
-                    for suffix in ["_哔哩哔哩_bilibili", " - 哔哩哔哩"]:
-                        title = title.replace(suffix, "")
-                    return title.strip()
-            except Exception:
-                pass
+            title = bilibili_source.fetch_bilibili_title(url)
+            if title:
+                return title
 
         # 通用兜底：yt-dlp（不强依赖 Chrome cookies）
         try:
@@ -172,26 +133,17 @@ class AudioVisualAgent:
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
         except Exception:
-            pass
+            logger.debug("yt-dlp title fallback failed for url=%s", url, exc_info=True)
         return None
 
     def _enrich_from_netease(self, asset: Asset, song_id: str) -> bool:
         """从网易云 API 直接获取 title/artist，不走 LLM 猜测，再用 LLM 补 genre/mood。"""
-        import json as _json
-        import urllib.request as _req
-        _headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-            "Referer": "https://music.163.com/",
-        }
         try:
-            api = f"https://music.163.com/api/song/detail/?id={song_id}&ids=[{song_id}]"
-            with _req.urlopen(_req.Request(api, headers=_headers), timeout=10) as r:
-                data = _json.loads(r.read().decode())
-            songs = data.get("songs") or []
-            if not songs:
+            detail = netease_source.fetch_netease_song_detail(song_id)
+            if not detail:
                 return False
-            song = songs[0]
-            name = song.get("name", "").strip()
+            song = detail.get("raw") or {}
+            name = (detail.get("title") or "").strip()
             if not name:
                 return False
 
@@ -208,18 +160,16 @@ class AudioVisualAgent:
                     extras.append(t)
             full_title = f"{name}（{'、'.join(extras)}）" if extras else name
 
-            artist_items = song.get("artists") or song.get("ar") or []
-            artists = [a.get("name", "").strip() for a in artist_items if a.get("name")]
+            artists = [a.strip() for a in (detail.get("artist") or "").split("、") if a.strip()]
 
             # 直接写入，不经过 LLM（保证准确性）
             asset.title = full_title
             if artists:
                 asset.artist = "、".join(artists)
-            album = song.get("album") or song.get("al") or {}
-            if album.get("name"):
-                asset.album = album["name"].strip()
-            if album.get("picUrl"):
-                asset.cover_url = album["picUrl"]
+            if detail.get("album"):
+                asset.album = detail["album"]
+            if detail.get("cover"):
+                asset.cover_url = detail["cover"]
             duration_ms = song.get("duration") or song.get("dt")
             if duration_ms:
                 asset.duration_seconds = max(1, int(duration_ms) // 1000)
@@ -244,9 +194,10 @@ class AudioVisualAgent:
                             if mood and mood != "未知":
                                 asset.mood = [m.strip() for m in mood.replace("、", ",").split(",") if m.strip()]
                 except Exception:
-                    pass
+                    logger.debug("LLM genre/mood inference failed for song_id=%s", song_id, exc_info=True)
             return True
         except Exception:
+            logger.debug("NetEase enrichment failed for song_id=%s", song_id, exc_info=True)
             return False
 
     def _apply_title_artist_hint(self, asset: Asset, video_title: str | None) -> None:
@@ -296,7 +247,7 @@ class AudioVisualAgent:
                         asset.mood = [m.strip() for m in mood.replace("、", ",").split(",") if m.strip()]
             self.store.write_model("assets", asset.asset_id, asset)
         except Exception:
-            pass
+            logger.debug("URL identity inference failed for asset_id=%s", asset.asset_id, exc_info=True)
 
     def analyze_media(self, asset_id: str, force_refresh: bool = False) -> tuple[Asset, list[Segment]]:
         return self.media.analyze_media(asset_id, force_refresh=force_refresh)
@@ -329,7 +280,7 @@ class AudioVisualAgent:
                     "mood": [x.strip() for x in m.replace("、", ",").split(",") if x.strip()],
                 }
         except Exception:
-            pass
+            logger.debug("Batch track classification failed for %s tracks", len(pairs), exc_info=True)
         return out
 
     def import_netease_playlist(
@@ -503,9 +454,11 @@ class AudioVisualAgent:
                 llm_results = self._llm_search(query, top_k - len(external_results))
                 external_results.extend(llm_results)
 
-        summary = self._safe_llm(
-            f"搜索：{query}。结合用户记忆查询扩展为：{memory_query or '无'}。找到本地{len(local_by_id)}首，外部{len(external_results)}首。用中文简要总结搜索结果。",
-            fallback=f"搜索完成：本地 {len(local_by_id)} 首，外部 {len(external_results)} 首。",
+        summary = _format_search_summary(
+            query=query,
+            local=list(local_by_id.values())[:top_k],
+            external=external_results[:top_k],
+            memory_query=memory_query,
         )
         return SearchResponse(
             local=list(local_by_id.values())[:top_k],
@@ -519,6 +472,106 @@ class AudioVisualAgent:
                 f"external_hits={len(external_results)}",
             ],
         )
+
+    def search_web_music(self, query: str, top_k: int = 5) -> list[ExternalTrack]:
+        """Agent tool wrapper for explicit online search.
+
+        The default product flow remains offline-first. This method is only
+        called when the ReAct loop decides the user needs real platform data.
+        每个候选都必须回查到真实曲目元数据；回查失败的候选直接丢弃，
+        绝不把搜索词 query 当成歌名返回（这是幻觉的主要来源之一）。
+        """
+        tracks: list[ExternalTrack] = []
+
+        try:
+            meta = self._search_netease_detail(query)
+            if meta and meta.get("title"):
+                tracks.append(ExternalTrack(
+                    external_id=meta["song_id"],
+                    title=meta["title"],
+                    artist=meta.get("artist", ""),
+                    album=meta.get("album"),
+                    cover_url=meta.get("cover"),
+                    source="netease",
+                    playback_url=f"https://music.163.com/song?id={meta['song_id']}",
+                ))
+        except Exception:
+            logger.debug("NetEase web music search failed for query=%s", query, exc_info=True)
+
+        try:
+            bili = self._search_bilibili_detail(query)
+            if bili and bili.get("title"):
+                tracks.append(ExternalTrack(
+                    external_id=bili["bvid"],
+                    title=bili["title"],
+                    artist=bili.get("author", ""),
+                    source="bilibili",
+                    playback_url=f"https://player.bilibili.com/player.html?bvid={bili['bvid']}&autoplay=0&high_quality=1&danmaku=0",
+                ))
+        except Exception:
+            logger.debug("Bilibili web music search failed for query=%s", query, exc_info=True)
+
+        # 离线 mock 曲库本身带真实结构化元数据，可安全补充
+        if len(tracks) < top_k:
+            for candidate in self.source.search(query, limit=top_k - len(tracks)):
+                tracks.append(candidate.model_copy(update={"source": f"{candidate.source}-fallback"}))
+
+        seen: set[tuple[str, str]] = set()
+        unique: list[ExternalTrack] = []
+        for track in tracks:
+            key = (track.source, track.external_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(track)
+        return unique[:top_k]
+
+    def fetch_track_metadata(
+        self,
+        asset_id: str | None = None,
+        url: str | None = None,
+        use_network: bool = True,
+    ) -> dict[str, Any]:
+        """Agent tool wrapper for metadata fetch/enrich with graceful fallback."""
+        if asset_id:
+            asset = self.store.read_model("assets", asset_id, Asset)
+            if asset is None:
+                return {"found": False, "asset_id": asset_id, "error": "unknown asset"}
+            if use_network:
+                try:
+                    enriched = self.enrich_asset(asset_id, use_network=True)
+                    asset = enriched.asset
+                except Exception as exc:
+                    return {
+                        "found": _has_reliable_metadata(asset),
+                        "asset_id": asset_id,
+                        "title": asset.title,
+                        "artist": asset.artist,
+                        "source_url": asset.source_url,
+                        "error": str(exc),
+                    }
+            found = _has_reliable_metadata(asset)
+            return {
+                "found": found,
+                "asset_id": asset.asset_id,
+                "title": asset.title,
+                "artist": asset.artist,
+                "album": asset.album,
+                "genre": asset.genre,
+                "mood": asset.mood,
+                "source_url": asset.source_url,
+            }
+
+        if url:
+            title = self._fetch_video_title(url) if use_network else None
+            return {
+                "found": bool(title and not _generic_metadata_title(title)),
+                "url": url,
+                "title": title,
+                "mode": "online" if use_network else "offline",
+            }
+
+        return {"found": False, "error": "asset_id or url is required"}
 
     def _llm_search(self, query: str, limit: int) -> list[ExternalTrack]:
         prompt = LLM_SEARCH_TEMPLATE(query=query, limit=limit)
@@ -537,10 +590,13 @@ class AudioVisualAgent:
                     artist=item.get("artist", ""),
                     genre=[item.get("genre", "")] if item.get("genre") else [],
                     mood=[item.get("mood", "")] if item.get("mood") else [],
+                    # source="llm" 是"未核实"标记：这些曲目由 LLM 生成、未经真实回查，
+                    # Answer Guard 不会把它们放进面向用户答案的白名单（除非显式标注未核实）。
                     source="llm",
                 ))
             return tracks
         except Exception:
+            logger.debug("LLM search failed; returning no unverified candidates", exc_info=True)
             return []
 
     # --- 收听记录 ---
@@ -685,183 +741,98 @@ class AudioVisualAgent:
         return None
 
     def _extract_youtube_id(self, url: str) -> str | None:
-        import re
-        patterns = [
-            r"(?:v=|/embed/|youtu\.be/)([a-zA-Z0-9_-]{11})",
-        ]
-        for p in patterns:
-            m = re.search(p, url)
-            if m:
-                return m.group(1)
-        return None
+        return youtube_source.extract_youtube_id(url)
 
     def _extract_bilibili_id(self, url: str) -> tuple[str, str] | None:
-        import re
-        m = re.search(r"(BV[a-zA-Z0-9]+)", url)
-        if m:
-            return ("bvid", m.group(1))
-        m = re.search(r"av(\d+)", url, re.IGNORECASE)
-        if m:
-            return ("aid", m.group(1))
-        return None
+        return bilibili_source.extract_bilibili_id(url)
 
     def _search_youtube_video(self, query: str) -> str | None:
-        import json
-        import re
-        import urllib.parse
-        import urllib.request
-        search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
-        }
-        try:
-            req = urllib.request.Request(search_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=8) as r:
-                html = r.read().decode("utf-8")
-        except Exception:
-            return None
-        m = re.search(r"var ytInitialData\s*=\s*(\{.+?\});\s*</script>", html, re.DOTALL)
-        if m:
-            try:
-                data = json.loads(m.group(1))
-                tabs = (
-                    data.get("contents", {})
-                    .get("twoColumnSearchResultsRenderer", {})
-                    .get("primaryContents", {})
-                    .get("sectionListRenderer", {})
-                    .get("contents", [])
-                )
-                for tab in tabs:
-                    for item in tab.get("itemSectionRenderer", {}).get("contents", []):
-                        vid = item.get("videoRenderer", {}).get("videoId")
-                        if vid:
-                            return vid
-            except (KeyError, IndexError, TypeError, json.JSONDecodeError):
-                pass
-        ids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
-        return ids[0] if ids else None
+        return youtube_source.search_youtube_video(query)
 
     def _search_bilibili_video(self, query: str) -> str | None:
         """搜 B 站视频，返回 bvid。华语 MV 命中率高，嵌入不弹机器人验证。"""
-        import json
-        import urllib.parse
-        import urllib.request
-        search_url = (
-            "https://api.bilibili.com/x/web-interface/search/type"
-            f"?search_type=video&keyword={urllib.parse.quote(query)}"
-        )
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://www.bilibili.com/",
-            "Cookie": "buvid3=infoc;",  # B 站搜索需要一个种子 cookie
-        }
-        try:
-            req = urllib.request.Request(search_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=8) as r:
-                data = json.loads(r.read().decode())
-            if data.get("code") != 0:
-                return None
-            results = data.get("data", {}).get("result", []) or []
-            for item in results:
-                bvid = item.get("bvid")
-                if bvid:
-                    return bvid
-        except Exception:
-            pass
-        return None
+        return bilibili_source.search_bilibili_video(query)
 
     def _search_netease(self, query: str) -> str | None:
-        import json
-        import urllib.parse
-        import urllib.request
-        search_url = (
-            f"https://music.163.com/api/search/get/web"
-            f"?s={urllib.parse.quote(query)}&type=1&limit=1&offset=0"
-        )
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-            "Referer": "https://music.163.com/",
-        }
-        try:
-            req = urllib.request.Request(search_url, headers=headers)
-            with urllib.request.urlopen(req, timeout=8) as r:
-                data = json.loads(r.read().decode())
-            songs = data.get("result", {}).get("songs", [])
-            if songs:
-                return str(songs[0]["id"])
-        except Exception:
-            pass
-        return None
+        return netease_source.search_netease(query)
+
+    def _search_netease_detail(self, query: str) -> dict[str, Any] | None:
+        """搜网易云并回查真实曲目元数据。
+
+        返回 {"song_id","title","artist","album","cover"}，
+        拿不到真实歌名则返回 None（绝不用 query 当歌名兜底）。
+        """
+        return netease_source.search_netease_detail(query)
+
+    def _search_bilibili_detail(self, query: str) -> dict[str, Any] | None:
+        """搜 B 站并回查真实视频标题/作者。
+
+        返回 {"bvid","title","author"}，拿不到真实标题则返回 None。
+        """
+        return bilibili_source.search_bilibili_detail(query)
 
     def _get_netease_audio_url(self, song_id: str, cookie: str = "") -> str | None:
-        import json
-        import urllib.request
-        from app.netease_auth import _cookie_header
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-            "Referer": "https://music.163.com/",
-        }
-        cookie_header = _cookie_header(cookie) if cookie else ""
-        if cookie_header:
-            headers["Cookie"] = cookie_header
-        # 登录用户优先走 level 接口（支持会员音质 / 解锁 VIP 歌曲），
-        # 未登录回退到旧的 enhance/player/url 接口。
-        apis = []
-        if cookie_header:
-            apis.append(
-                f"https://music.163.com/api/song/enhance/player/url/v1"
-                f"?ids=[{song_id}]&level=exhigh&encodeType=aac"
-            )
-        apis.append(
-            f"https://music.163.com/api/song/enhance/player/url"
-            f"?id={song_id}&ids=[{song_id}]&br=320000"
-        )
-        for api in apis:
-            try:
-                req = urllib.request.Request(api, headers=headers)
-                with urllib.request.urlopen(req, timeout=8) as r:
-                    data = json.loads(r.read().decode())
-                items = data.get("data", [])
-                if items and items[0].get("url"):
-                    return items[0]["url"].replace("http://", "https://", 1)
-            except Exception:
-                continue
-        return None
+        return netease_source.get_netease_audio_url(song_id, cookie)
 
     # --- 歌单 ---
 
-    def generate_playlist(self, user_id: str, instruction: str) -> Playlist:
+    def generate_playlist(
+        self,
+        user_id: str,
+        instruction: str,
+        seed_tracks: list[Asset | ExternalTrack] | None = None,
+        target_count: int | None = None,
+    ) -> Playlist:
         import hashlib
+        target_count = target_count or _infer_playlist_count(instruction) or 12
+        target_count = max(1, min(target_count, 100))
+        seed_tracks = seed_tracks or []
         library = self.list_assets()
-        lib_desc = "\n".join([f"- {a.asset_id}: {a.title} - {a.artist or '?'} ({', '.join(a.genre)}, {', '.join(a.mood)}, energy={a.energy_level})" for a in library])
+        candidates = self._playlist_candidates(instruction, library, seed_tracks, target_count)
+        lib_desc = "\n".join([f"- {a.asset_id}: {a.title} - {a.artist or '?'} ({', '.join(a.genre)}, {', '.join(a.mood)}, energy={a.energy_level})" for a in library[:120]])
+        candidate_desc = "\n".join(
+            f"- {track.title} - {getattr(track, 'artist', '') or '?'} ({getattr(track, 'source', 'local')})"
+            for track in candidates[:120]
+        )
 
         prompt = GENERATE_PLAYLIST_TEMPLATE(
-            instruction=instruction, library_size=len(library), lib_desc=lib_desc,
+            instruction=instruction,
+            library_size=len(library),
+            lib_desc=lib_desc,
+            target_count=target_count,
+            candidate_desc=candidate_desc,
         )
-        result = self.llm.generate(prompt)
-        data = extract_json_dict(result)
+        try:
+            result = self.llm.generate(prompt)
+            data = extract_json_dict(result)
+        except LLMError:
+            logger.debug("Playlist generation LLM call failed; using fallback", exc_info=True)
+            data = None
         if not data:
-            return self._fallback_playlist(user_id, instruction, library)
+            return self._fallback_playlist(user_id, instruction, library, target_count, candidates)
         asset_map = {a.asset_id: a for a in library}
+        candidate_map = {
+            _track_key(track): track
+            for track in candidates
+        }
         tracks: list[Asset | ExternalTrack] = []
         for item in data.get("tracks", []):
             aid = item.get("asset_id")
             if aid and aid in asset_map:
                 tracks.append(asset_map[aid])
+            elif _track_key(item) in candidate_map:
+                tracks.append(candidate_map[_track_key(item)])
+            # LLM 输出但不在本地库/候选池中的曲目不进入歌单。
+            # 这些曲目未经回查，不能被后续 Answer Guard 当作白名单证据。
             else:
-                tracks.append(ExternalTrack(
-                    external_id=hashlib.sha1(f"{item['title']}-{item['artist']}".encode()).hexdigest()[:10],
-                    title=item.get("title", ""), artist=item.get("artist", ""),
-                    genre=[], mood=[], source="llm",
-                    playback_url=None,
-                ))
+                continue
+        tracks = _dedupe_tracks(tracks)
+        tracks = _fill_tracks(tracks, candidates, target_count)
 
         playlist = Playlist(
             playlist_id=hashlib.sha1(f"{user_id}-{instruction}".encode()).hexdigest()[:8],
             user_id=user_id, name=data.get("name", instruction),
-            description=data.get("description", ""), tracks=tracks, generated_by="llm",
+            description=data.get("description", ""), tracks=tracks[:target_count], generated_by="llm",
         )
         self.save_playlist(user_id, playlist)
         return playlist
@@ -874,8 +845,12 @@ class AudioVisualAgent:
         lib_desc = "\n".join([f"- {a.asset_id}: {a.title} - {a.artist or '?'} ({', '.join(a.genre)}, {', '.join(a.mood)})" for a in library])
 
         prompt = AUTO_PLAYLIST_TEMPLATE(library_size=len(library), lib_desc=lib_desc)
-        result = self.llm.generate(prompt)
-        raw = extract_json_list(result)
+        try:
+            result = self.llm.generate(prompt)
+            raw = extract_json_list(result)
+        except LLMError:
+            logger.debug("Auto playlist LLM call failed; using fallback", exc_info=True)
+            raw = None
         if not raw:
             return self._fallback_auto_playlists(user_id, library)
         asset_map = {a.asset_id: a for a in library}
@@ -908,7 +883,49 @@ class AudioVisualAgent:
     def delete_playlist(self, user_id: str, playlist_id: str) -> bool:
         return self.store.delete_key("playlists", f"{user_id}_{playlist_id}")
 
-    def _fallback_playlist(self, user_id: str, instruction: str, library: list[Asset]) -> Playlist:
+    def _playlist_candidates(
+        self,
+        instruction: str,
+        library: list[Asset],
+        seed_tracks: list[Asset | ExternalTrack],
+        target_count: int,
+    ) -> list[Asset | ExternalTrack]:
+        search_terms = _playlist_search_terms(instruction)
+        online_preferred = bool(seed_tracks) or target_count > max(len(library), 12) or any(
+            token in instruction.lower()
+            for token in ["联网", "外部", "新作品", "真实", "online", "web"]
+        )
+        external = self.source.search(search_terms, limit=max(target_count * 2, 40))
+        if len(external) < target_count:
+            external.extend(
+                self.source.get_recommendations(
+                    seed_genres=["流行", "民谣", "R&B", "说唱", "电子"],
+                    seed_moods=["放松", "治愈", "浪漫", "伤感"],
+                    limit=max(target_count * 2, 40),
+                )
+            )
+
+        library_ranked = sorted(
+            library,
+            key=lambda asset: _playlist_match_score(asset, search_terms),
+            reverse=True,
+        )
+        ordered: list[Asset | ExternalTrack]
+        if online_preferred:
+            ordered = [*seed_tracks, *external, *library_ranked]
+        else:
+            ordered = [*library_ranked, *seed_tracks, *external]
+        return _dedupe_tracks(ordered)
+
+    def _fallback_playlist(
+        self,
+        user_id: str,
+        instruction: str,
+        library: list[Asset],
+        target_count: int | None = None,
+        candidates: list[Asset | ExternalTrack] | None = None,
+    ) -> Playlist:
+        target_count = target_count or _infer_playlist_count(instruction) or 12
         keywords = instruction.lower().split()
         matched = [
             asset
@@ -923,13 +940,14 @@ class AudioVisualAgent:
                 library,
                 key=lambda asset: (asset.energy_level or 0.0, asset.updated_at),
                 reverse=True,
-            )[:8]
+            )
+        tracks = _fill_tracks(matched, candidates or [], target_count)
         playlist = Playlist(
             playlist_id=hashlib.sha1(f"{user_id}-{instruction}".encode()).hexdigest()[:8],
             user_id=user_id,
             name=instruction or "Agent 歌单",
             description="离线回退歌单：根据你的音乐库和指令自动整理。",
-            tracks=matched[:12],
+            tracks=tracks[:target_count],
             generated_by="fallback",
         )
         self.save_playlist(user_id, playlist)
@@ -1046,18 +1064,18 @@ class AudioVisualAgent:
         return self.daily_recommend(user_id, time_of_day=time_bucket, count=top_k)
 
     def _resolve_asset_context(self, user_id: str, query: str) -> str | None:
-        lowered = query.lower()
-        asset_sensitive = any(token in lowered for token in ["片段", "segment", "video", "素材", "场景", "镜头", "similar"])
+        # Keep only explicit/recent media context. Tool selection itself is now
+        # delegated to the ReAct loop, so this method no longer tries to infer
+        # broad intent from keywords.
+        if not _query_needs_asset_context(query):
+            return None
         memory = self.memory.get_memory(user_id)
         if memory.listening_history:
             recent_asset_id = memory.listening_history[-1].asset_id
             if recent_asset_id:
-                return recent_asset_id if asset_sensitive else None
+                return recent_asset_id
         assets = self.list_assets()
-        if asset_sensitive and assets:
-            assets.sort(key=lambda asset: asset.updated_at, reverse=True)
-            return assets[0].asset_id
-        if len(assets) == 1 and asset_sensitive:
+        if len(assets) == 1:
             return assets[0].asset_id
         return None
 
@@ -1076,10 +1094,11 @@ class AudioVisualAgent:
         return None
 
     def _safe_llm(self, prompt: str, fallback: str) -> str:
-        result = self.llm.generate(prompt)
-        if result.startswith("LLM 请求失败"):
+        try:
+            return self.llm.generate(prompt)
+        except LLMError:
+            logger.debug("LLM safe call failed; using fallback", exc_info=True)
             return fallback
-        return result
 
     def _require_segments(self, asset_id: str) -> list[Segment]:
         segments = self.media.get_segments(asset_id)
@@ -1098,6 +1117,133 @@ def _netease_song_id(url: str) -> str | None:
       https://163cn.tv/AbCdEf  （短链，无法直接解析 id，返回 None）
     """
     return netease_song_id(url)
+
+
+def _infer_playlist_count(text: str) -> int | None:
+    match = re.search(r"(\d{1,3})\s*(?:首|个|tracks?|songs?)?", text, re.IGNORECASE)
+    if not match:
+        return None
+    return max(1, min(int(match.group(1)), 100))
+
+
+def _playlist_search_terms(instruction: str) -> str:
+    terms = [instruction]
+    lowered = instruction.lower()
+    if "chill" in lowered or "lofi" in lowered:
+        terms.extend(["放松", "治愈", "浪漫", "民谣", "R&B"])
+    if "跑步" in instruction or "运动" in instruction:
+        terms.extend(["激昂", "热血", "电子", "摇滚"])
+    if "工作" in instruction or "专注" in instruction:
+        terms.extend(["放松", "宁静", "电子", "爵士"])
+    return " ".join(terms)
+
+
+def _format_search_summary(
+    query: str,
+    local: list[Asset],
+    external: list[ExternalTrack],
+    memory_query: str,
+) -> str:
+    parts = [f"搜索「{query}」完成：本地 {len(local)} 首，外部候选 {len(external)} 首。"]
+    if memory_query:
+        parts.append(f"已结合记忆扩展：{memory_query[:80]}。")
+    if local:
+        parts.append("本地命中：" + "、".join(track.title for track in local[:5]) + "。")
+    if external:
+        verified = [track for track in external if track.source != "llm"]
+        unverified = len(external) - len(verified)
+        parts.append("外部候选：" + "、".join(track.title for track in external[:5]) + "。")
+        if unverified:
+            parts.append(f"其中 {unverified} 首为 LLM 补充候选，尚未真实回查。")
+    return " ".join(parts)
+
+
+def _generic_metadata_title(title: str | None) -> bool:
+    if not title:
+        return True
+    normalized = title.strip().lower()
+    generic = {
+        "网易云音乐",
+        "qq音乐",
+        "bilibili",
+        "哔哩哔哩",
+        "youtube",
+        "cinesonic demo asset",
+    }
+    return normalized in {item.lower() for item in generic} or normalized.startswith("网易云音乐 -")
+
+
+def _has_reliable_metadata(asset: Asset) -> bool:
+    if _generic_metadata_title(asset.title):
+        return False
+    if asset.title.startswith("网易云歌曲 ") or asset.title == "CineSonic Demo Asset":
+        return False
+    return bool(asset.artist or asset.album or asset.genre or asset.mood)
+
+
+def _query_needs_asset_context(query: str) -> bool:
+    lowered = query.lower()
+    media_terms = [
+        "片段", "segment", "video", "素材", "场景", "镜头", "画面",
+        "当前视频", "当前素材", "这个视频", "这个素材", "相似片段",
+    ]
+    return any(term in lowered for term in media_terms)
+
+
+def _playlist_match_score(track: Asset | ExternalTrack, query: str) -> int:
+    searchable = (
+        f"{track.title} {getattr(track, 'artist', '') or ''} "
+        f"{' '.join(getattr(track, 'genre', []) or [])} "
+        f"{' '.join(getattr(track, 'mood', []) or [])}"
+    ).lower()
+    score = 0
+    for term in query.lower().split():
+        if term and term in searchable:
+            score += 1
+    return score
+
+
+def _track_key(track: Asset | ExternalTrack | dict[str, Any]) -> str:
+    if isinstance(track, Asset):
+        return f"asset:{track.asset_id}"
+    if isinstance(track, ExternalTrack):
+        if track.external_id:
+            return f"{track.source}:{track.external_id}"
+        return f"title:{track.title.lower()}:{track.artist.lower()}"
+    title = str(track.get("title", "")).lower().strip()
+    artist = str(track.get("artist", "")).lower().strip()
+    aid = str(track.get("asset_id", "")).strip()
+    return f"asset:{aid}" if aid else f"title:{title}:{artist}"
+
+
+def _dedupe_tracks(tracks: list[Asset | ExternalTrack]) -> list[Asset | ExternalTrack]:
+    seen: set[str] = set()
+    unique: list[Asset | ExternalTrack] = []
+    for track in tracks:
+        key = _track_key(track)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(track)
+    return unique
+
+
+def _fill_tracks(
+    tracks: list[Asset | ExternalTrack],
+    candidates: list[Asset | ExternalTrack],
+    target_count: int,
+) -> list[Asset | ExternalTrack]:
+    merged = _dedupe_tracks(tracks)
+    seen = {_track_key(track) for track in merged}
+    for candidate in candidates:
+        if len(merged) >= target_count:
+            break
+        key = _track_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(candidate)
+    return merged[:target_count]
 
 
 # 向后兼容别名

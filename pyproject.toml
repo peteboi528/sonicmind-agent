@@ -1,0 +1,31 @@
+[project]
+name = "av-recommend-agent"
+version = "0.3.0"
+description = "智能影音推荐助手 - 个性化音乐推荐、每日歌单、LLM 语义搜索"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "pydantic>=2.8.0",
+  "uvicorn>=0.30.0",
+  "streamlit>=1.36.0",
+  "httpx>=0.27.0",
+  "python-dotenv>=1.0.0",
+  "qrcode>=7.0",
+]
+
+[project.optional-dependencies]
+media = [
+  "yt-dlp>=2024.8.6",
+]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+

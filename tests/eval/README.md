@@ -22,10 +22,33 @@ python -m tests.eval.run --case recommend_basic
 JUDGE_MODEL=gpt-4o python -m tests.eval.run
 ```
 
+## Case 集（10 个）
+
+| case_id | 覆盖能力 |
+|---|---|
+| recommend_basic | 新用户冷启动推荐 |
+| recommend_with_taste | 基于品味档案的推荐 |
+| playlist_specific | 歌单生成 |
+| multi_turn_context | 多轮上下文指代 |
+| search_specific | 具体歌曲搜索 |
+| taste_query | 品味分析 |
+| **anti_hallucination** | 反幻觉：虚构查询不得编造歌名 |
+| **scenario_diversity** | MMR 多样性：场景推荐不堆砌同质曲目 |
+| **journey_multi_phase** | 多阶段音乐旅程编排 |
+| **multi_intent_goal** | 复合目标跟踪（导入→推荐） |
+
+> 加粗的是升级后新增 case，针对反幻觉、三锚精排+MMR、目标跟踪等新能力。
+
+## 结构化冒烟测试（无需 LLM key）
+
+`tests/test_eval_cases.py` 把全部 case 在 mock 模式跑一遍，验证不崩、答案非空、
+`must_not_mention` 禁词不泄漏、反幻觉 case 输出诚实。这部分进 CI 防退化；
+完整主观打分仍走 `python -m tests.eval.run`。
+
 ## 输出示例
 
 ```
-[1/6] recommend_basic: 新用户首次请求推荐
+[1/10] recommend_basic: 新用户首次请求推荐
   query: '给我推荐几首适合工作时听的歌'
   answer (3.2s, 4 steps):
     根据你目前的情况，我推荐这几首适合专注工作的轻音乐...
@@ -35,7 +58,7 @@ JUDGE_MODEL=gpt-4o python -m tests.eval.run
 ============================================================
 汇总:
   平均分: 3.85/5.0
-  通过率: 5/6
+  通过率: 8/10
 ```
 
 ## 评分逻辑

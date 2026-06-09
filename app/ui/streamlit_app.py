@@ -679,6 +679,121 @@ def play_mv(t) -> None:
         st.toast("没找到 MV，试试只听歌", icon="⚠️")
 
 
+def _card_to_obj(card: dict):
+    """把流式 candidates 事件里的卡片 dict 适配成 play_audio/play_mv 需要的对象。"""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        title=card.get("title", ""),
+        artist=card.get("artist", "") or "",
+        source=card.get("source", "local"),
+        source_id=card.get("source_id", "") or "",
+        external_id=card.get("source_id", "") or "",
+        playback_url=card.get("playback_url"),
+        source_url=card.get("playback_url"),
+        cover_url=card.get("cover_url", "") or "",
+        genre=card.get("genre", []) or [],
+        mood=card.get("mood", []) or [],
+    )
+
+
+def render_chat_cards(cards: list[dict], turn_key: str) -> None:
+    """在聊天回复下渲染推荐歌曲卡片，每张带 只听/MV/不喜欢 按钮。"""
+    if not cards:
+        return
+    for i, card in enumerate(cards):
+        obj = _card_to_obj(card)
+        meta = " · ".join(filter(None, [", ".join(card.get("genre", [])), ", ".join(card.get("mood", []))]))
+        score = card.get("score")
+        score_html = f"<span class='sm-tag tag-d'>{score:.2f}</span>" if isinstance(score, (int, float)) else ""
+        c1, c2 = st.columns([0.72, 0.28])
+        with c1:
+            st.markdown(f"""<div class="sm-track">
+              <span class="sm-num">{i + 1}</span>
+              <div class="sm-info">
+                <div class="sm-title">{obj.title}</div>
+                <div class="sm-artist">{obj.artist or '未知'} · {obj.source}{(' · ' + meta) if meta else ''}</div>
+                <div class="sm-reason">{card.get('reason', '') or ''}</div>
+              </div>
+              {score_html}
+            </div>""", unsafe_allow_html=True)
+        with c2:
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                if st.button("🎵", key=f"ca_{turn_key}_{i}", help="只听歌"):
+                    play_audio(obj)
+            with b2:
+                if st.button("📺", key=f"cm_{turn_key}_{i}", help="看 MV"):
+                    play_mv(obj)
+            with b3:
+                if st.button("👎", key=f"cd_{turn_key}_{i}", help="不喜欢（负反馈给 Thompson + 加入屏蔽）"):
+                    from app.models import DislikeRequest
+                    agent.record_dislike(DislikeRequest(
+                        user_id=user_id,
+                        title=obj.title,
+                        artist=obj.artist,
+                        source=obj.source,
+                        source_id=obj.source_id,
+                        reason="ui_dislike",
+                    ))
+                    st.toast(f"已记录不喜欢：{obj.title}", icon="👎")
+                    st.rerun()
+
+
+def render_transparency_panel(meta: dict, turn_key: str) -> None:
+    """Agent 透明度面板：决策过程 / 记忆变化 / 三锚打分明细。
+
+    数据来源：trace（Phase 0-2 各节点写入）、cards.components（Phase 1 三锚精排）。
+    """
+    trace_text = meta.get("trace", "") or ""
+    cards = meta.get("cards", []) or []
+    trace_lines = [ln for ln in trace_text.splitlines() if ln.strip()]
+    has_components = any(c.get("components") for c in cards)
+    if not trace_lines and not has_components:
+        return
+
+    with st.expander("🔬 Agent 透明度面板", expanded=False):
+        # 1) 决策过程：把 trace 按节点归类
+        st.markdown("**🧠 决策过程**")
+        stage_icons = {
+            "plan": "🎯", "stream:plan": "🎯", "load_context": "📂", "gssc": "📐",
+            "web_music_search": "🌐", "stream:candidates": "🎵", "recommend": "🎁",
+            "playlist": "📋", "search": "🔍", "import": "📥", "web_fallback": "🔄",
+            "eval": "⚖️", "guard": "🛡️", "final": "✅",
+        }
+        for ln in trace_lines:
+            icon = next((v for k, v in stage_icons.items() if k in ln.lower()), "•")
+            st.caption(f"{icon} {ln}")
+
+        # 2) 记忆变化 / 预算：从 trace 里抽 GSSC 预算行与 guard 行
+        budget_lines = [ln for ln in trace_lines if "gssc" in ln.lower() or "预算" in ln]
+        guard_lines = [ln for ln in trace_lines if "guard" in ln.lower() or "移除" in ln]
+        if budget_lines or guard_lines:
+            st.markdown("**📊 上下文预算 / 反幻觉**")
+            for ln in budget_lines + guard_lines:
+                st.caption(ln.strip())
+
+        # 3) 三锚打分明细
+        if has_components:
+            st.markdown("**🧮 三锚精排打分**")
+            rows = []
+            for c in cards:
+                comp = c.get("components", {})
+                if not comp:
+                    continue
+                rows.append({
+                    "歌曲": c.get("title", "")[:20],
+                    "总分": c.get("score"),
+                    "语义": comp.get("semantic"),
+                    "口味": comp.get("personalize"),
+                    "行为": comp.get("behavior"),
+                    "权重(语/味/为)": f"{comp.get('w_semantic', 0):.2f}/{comp.get('w_personalize', 0):.2f}/{comp.get('w_behavior', 0):.2f}",
+                })
+            if rows:
+                st.dataframe(rows, use_container_width=True, hide_index=True)
+                st.caption("总分 = 语义×w_语义 + 口味×w_口味 + 行为×w_行为（缺锚时权重自动重分配）")
+
+
 def render_trace(title: str, trace: list[str]) -> None:
     if not trace:
         return
@@ -1089,19 +1204,12 @@ with tab4:
 
 with tab5:
     if "ch" not in st.session_state:
-        st.session_state["ch"] = []
-    if not st.session_state["ch"]:
-        st.markdown("""<div class='sm-card'>
-          <span style='color:var(--accent);font-size:11px;font-weight:700;letter-spacing:0.1em'>SONICMIND AGENT</span>
-          <p style='font-size:14px;margin:8px 0 4px'>我是你的音乐智能体。我能：</p>
-          <p style='font-size:13px;color:var(--text-sub);margin:0'>
-          · 分析你的音乐品味和收听模式<br/>
-          · 根据你的库推荐相似歌手和歌曲<br/>
-          · 解释为什么推荐某首歌<br/>
-          · 记住你的反馈并持续优化
-          </p>
-        </div>""", unsafe_allow_html=True)
-    for entry in st.session_state["ch"]:
+        st.session_state["ch"] = [("a", agent.generate_greeting(user_id), {
+            "trace": "[greeting] 读取用户记忆、活跃目标、最近播放和曲库状态。 → 主动生成开场建议。",
+            "evidence": "",
+            "goal": "",
+        })]
+    for turn_idx, entry in enumerate(st.session_state["ch"]):
         role, txt = entry[0], entry[1]
         if role == "u":
             st.markdown(f"<div class='sm-chat-user'>{txt}</div>", unsafe_allow_html=True)
@@ -1110,9 +1218,9 @@ with tab5:
         with st.chat_message("assistant", avatar="🎧"):
             st.markdown(txt)
             meta = entry[2] if len(entry) > 2 else {}
-            if meta.get("trace"):
-                with st.expander("🔍 Trace"):
-                    st.code(meta["trace"], language=None)
+            if meta.get("cards"):
+                render_chat_cards(meta["cards"], turn_key=str(turn_idx))
+            render_transparency_panel(meta, turn_key=str(turn_idx))
             if meta.get("evidence"):
                 with st.expander("📎 Evidence"):
                     st.text(meta["evidence"])
@@ -1133,8 +1241,26 @@ with tab5:
             history.append({"role": "user" if _role == "u" else "assistant", "content": clean})
         st.session_state["ch"].append(("u", msg))
         with st.spinner("Agent 思考中..."):
-            ans = agent.chat(user_id, msg, history=history or None)
+            stream_box = st.empty()
+            stream_events = []
+            stream_cards = []
+            ans = None
+            for event in agent.stream_chat(user_id, msg, history=history or None):
+                stream_events.append(event)
+                if event.type == "candidates":
+                    stream_cards = event.payload.get("cards", []) or stream_cards
+                if event.type != "final":
+                    stream_box.caption(f"{event.type}: {event.content}")
+                else:
+                    from app.models import AgentAnswer
+                    ans = AgentAnswer.model_validate(event.payload)
+            if ans is None:
+                ans = agent.chat(user_id, msg, history=history or None)
+            stream_box.empty()
         trace_block = "\n".join(ans.agent_trace)
+        if stream_events:
+            stream_trace = "\n".join(f"[stream:{event.type}] {event.content}" for event in stream_events if event.type != "final")
+            trace_block = stream_trace + ("\n" + trace_block if trace_block else "")
         evidence_block = "\n".join(
             [f"{e.timestamp} · {e.metadata.get('asset_title', '')} · {e.content}" for e in ans.evidences[:3]]
         )
@@ -1144,6 +1270,7 @@ with tab5:
             "trace": trace_block,
             "evidence": evidence_block,
             "goal": goal_block,
+            "cards": stream_cards,
         }))
         st.rerun()
 

@@ -203,6 +203,12 @@ class ReActLoop:
                     for tc in response.tool_calls
                 ],
             })
+            plan_text = _public_plan_summary(query, response.content, response.tool_calls, results)
+            steps.append(ReActStep(
+                thought=plan_text,
+                action="plan",
+                observation="准备调用：" + "、".join(tc.name for tc in response.tool_calls),
+            ))
 
             # 执行每个工具调用
             for tc in response.tool_calls:
@@ -212,10 +218,18 @@ class ReActLoop:
                 steps.append(step)
                 if result is not None:
                     results.append(result)
+                eval_result = _evaluate_progress(query, results)
+                if eval_result:
+                    steps.append(ReActStep(
+                        thought=eval_result,
+                        action="eval",
+                        observation="结果尚需检查或补充。",
+                    ))
+                eval_hint = _eval_hint(eval_result, step_idx)
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": obs_text[:1500],  # 限制 observation 长度防爆 context
+                    "content": (obs_text + eval_hint)[:1800],  # 限制 observation 长度防爆 context
                 })
             if _playlist_target_satisfied(query, results):
                 final_answer = self._compose_from_results(query, results, history)
@@ -236,11 +250,16 @@ class ReActLoop:
         # 如果 LLM 没给出最终答案（被截断或 max_steps），用结构化整合兜底
         if not final_answer:
             final_answer = self._compose_from_results(query, results, history)
+        final_answer = _append_progress_note(final_answer, query, results)
+
+        known_titles = _collect_known_titles(results)
+        if _should_use_grounded_music_answer(query, results):
+            final_answer = _grounded_music_answer(query, results)
 
         # Answer Guard：剔除答案里追溯不到任何工具结果的幻觉歌名
-        known_titles = _collect_known_titles(results)
         final_answer, hallucinated = guard_answer(final_answer, known_titles)
 
+        auto_memory_updated = self.agent.memory.auto_learn_from_turn(user_id, query, results)
         goal = self.agent.memory.update_goal_progress(user_id, goal, [s.action for s in steps])
         trace = [f"[{s.action}] {s.thought} → {s.observation}" for s in steps]
         if hallucinated:
@@ -252,7 +271,7 @@ class ReActLoop:
             recommended_segments=self._collect_segments(results),
             memory_updated=any(
                 r.get("type") == "memory_update" and r.get("changed") for r in results
-            ),
+            ) or auto_memory_updated,
             agent_trace=trace,
             pending_goal=goal.goal if goal and goal.status == "active" else None,
             goal_progress=_goal_progress(goal),
@@ -517,6 +536,9 @@ class ReActLoop:
         matched = _matched_keyword_actions(query)
         if not matched:
             matched = [ActionType.RETRIEVE, ActionType.RECOMMEND] if asset_id else [ActionType.TASTE, ActionType.RECOMMEND]
+        online_intents = {ActionType.RECOMMEND, ActionType.SEARCH, ActionType.PLAYLIST}
+        if not asset_id and any(action in online_intents for action in matched) and ActionType.WEB_MUSIC_SEARCH not in matched:
+            matched.insert(0, ActionType.WEB_MUSIC_SEARCH)
         return matched
 
     def _legacy_run(
@@ -553,7 +575,11 @@ class ReActLoop:
             if result is not None:
                 results.append(result)
         answer = _legacy_compose(query, results, history, self.agent.llm)
+        answer = _append_progress_note(answer, query, results)
+        if _should_use_grounded_music_answer(query, results):
+            answer = _grounded_music_answer(query, results)
         answer, hallucinated = guard_answer(answer, _collect_known_titles(results))
+        auto_memory_updated = self.agent.memory.auto_learn_from_turn(user_id, query, results)
         goal = self.agent.memory.update_goal_progress(user_id, goal, [s.action for s in steps])
         legacy_trace = [f"[{s.action}] {s.thought} → {s.observation}" for s in steps]
         if hallucinated:
@@ -562,11 +588,185 @@ class ReActLoop:
             answer=answer,
             evidences=self._collect_evidences(results)[:8],
             recommended_segments=self._collect_segments(results),
-            memory_updated=any(r.get("type") == "memory_update" and r.get("changed") for r in results),
+            memory_updated=any(r.get("type") == "memory_update" and r.get("changed") for r in results) or auto_memory_updated,
             agent_trace=legacy_trace,
             pending_goal=goal.goal if goal and goal.status == "active" else None,
             goal_progress=_goal_progress(goal),
         )
+
+
+def _public_plan_summary(
+    query: str,
+    content: str | None,
+    tool_calls: list[ToolCall],
+    results: list[dict[str, Any]],
+) -> str:
+    cleaned = (content or "").strip()
+    if cleaned:
+        cleaned = re.sub(r"</?think[^>]*>", "", cleaned, flags=re.IGNORECASE).strip()
+        if cleaned:
+            return cleaned[:220]
+    tools = [tc.name for tc in tool_calls]
+    target = _infer_requested_count(query)
+    if TOOL_WEB_MUSIC_SEARCH in tools:
+        return "用户需要音乐候选，优先联网获取真实平台结果，再根据数量和质量决定下一步。"
+    if TOOL_PLAYLIST in tools:
+        found = _candidate_count(results)
+        target_text = f"{target} 首" if target else "目标数量"
+        return f"准备基于已收集的 {found} 个候选生成歌单，并检查是否满足 {target_text}。"
+    if TOOL_RECOMMEND in tools:
+        return "准备结合用户记忆、真实候选和推荐模型排序，给出有依据的推荐。"
+    if TOOL_SEARCH in tools:
+        return "准备补充本地库命中，用于解释用户历史和线上候选之间的关系。"
+    return "准备调用最相关工具推进用户目标，并在 observation 后评估是否足够。"
+
+
+def _evaluate_progress(query: str, results: list[dict[str, Any]]) -> str:
+    target = _infer_requested_count(query)
+    playlist_count = _playlist_count(results)
+    candidate_count = _candidate_count(results)
+    verified_online = _verified_online_count(results)
+    fallback_count = _fallback_count(results)
+
+    if target and playlist_count is not None and playlist_count < target:
+        return f"歌单只有 {playlist_count}/{target} 首，不能声称完成；需要继续补充真实候选或诚实说明不足。"
+    if target and playlist_count is None and candidate_count < target:
+        return f"候选只有 {candidate_count}/{target} 个，数量不足；优先换关键词继续联网搜索。"
+    if candidate_count and verified_online == 0 and fallback_count:
+        return f"当前只有 {fallback_count} 个 fallback 候选，真实平台结果不足；最终回答必须标注降级。"
+    if candidate_count and verified_online:
+        return f"已有 {verified_online} 个真实线上候选，可继续排序、推荐或生成歌单。"
+    return "当前结果还需要和用户目标做匹配检查。"
+
+
+def _eval_hint(eval_result: str, step_idx: int) -> str:
+    if step_idx >= MAX_REACT_STEPS - 1:
+        return "\n\n评估：已接近最大步数，请不要编造；若不足，请按实际数量诚实收尾。"
+    return (
+        "\n\n评估："
+        f"{eval_result}"
+        " 如果信息不足，请换关键词或调用其他工具补充；如果已经足够，请直接最终回答。"
+    )
+
+
+def _append_progress_note(answer: str, query: str, results: list[dict[str, Any]]) -> str:
+    target = _infer_requested_count(query)
+    if not target:
+        return answer
+    playlist_count = _playlist_count(results)
+    if playlist_count is not None and playlist_count < target:
+        note = f"说明：你要求 {target} 首，但目前可追溯候选只生成了 {playlist_count} 首；我不会用未核实歌曲强行补齐。"
+        return f"{answer}\n\n{note}" if answer else note
+    return answer
+
+
+def _should_use_grounded_music_answer(query: str, results: list[dict[str, Any]]) -> bool:
+    lowered = query.lower()
+    music_intent = any(token in lowered for token in ["推荐", "歌单", "搜索", "找歌", "chill", "playlist", "recommend", "song"])
+    has_music_results = any(
+        result.get("type") in {"web_music_search", "search", "daily_recommend", "playlist"}
+        for result in results
+    )
+    return music_intent and has_music_results
+
+
+def _grounded_music_answer(query: str, results: list[dict[str, Any]]) -> str:
+    target = _infer_requested_count(query)
+    tracks = _collect_track_candidates(results)
+    tracks = _dedupe_candidates(tracks)
+    verified = [track for track in tracks if getattr(track, "source", "") in {"netease", "bilibili", "youtube"}]
+    fallback = [
+        track for track in tracks
+        if "fallback" in getattr(track, "source", "") or getattr(track, "source", "") in {"mock", "llm"}
+    ]
+    local = [track for track in tracks if getattr(track, "source", "local") == "local"]
+
+    selected = [*verified, *fallback, *local]
+    if target:
+        selected = selected[:target]
+
+    if not selected:
+        return "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。"
+
+    lines = []
+    for index, track in enumerate(selected[: max(target or 8, 8)], start=1):
+        title = getattr(track, "title", "")
+        artist = getattr(track, "artist", "") or "未知"
+        source = getattr(track, "source", "local")
+        source_label = _source_label(source)
+        lines.append(f"{index}. 《{title}》 - {artist}（{source_label}）")
+
+    if verified:
+        intro = f"我优先采用真实线上候选，先给你这 {len(selected)} 首可追溯结果："
+    else:
+        intro = f"真实线上候选不足，这轮主要是 fallback/本地候选，共 {len(selected)} 首："
+    if target and len(selected) < target:
+        intro += f"\n说明：你要求 {target} 首，但目前可追溯候选只有 {len(selected)} 首；我不会用未核实歌曲强行补齐。"
+
+    opinion = ""
+    if verified:
+        first = verified[0]
+        opinion = f"\n\n我的判断：我会先听《{getattr(first, 'title', '')}》，因为它来自真实平台结果，可信度比本地 fallback 更高。"
+    elif fallback:
+        opinion = "\n\n我的判断：这批候选质量一般，属于降级结果；更适合继续换关键词联网补搜。"
+
+    return intro + "\n" + "\n".join(lines) + opinion
+
+
+def _source_label(source: str) -> str:
+    if source == "netease":
+        return "网易云真实曲目"
+    if source == "bilibili":
+        return "B 站真实视频/MV"
+    if source == "youtube":
+        return "YouTube 真实视频"
+    if "fallback" in source or source in {"mock", "llm"}:
+        return f"fallback:{source}"
+    return "本地库"
+
+
+def _dedupe_candidates(tracks: list[Any]) -> list[Any]:
+    seen: set[str] = set()
+    unique: list[Any] = []
+    for track in tracks:
+        title = getattr(track, "title", "")
+        artist = getattr(track, "artist", "")
+        source = getattr(track, "source", "local")
+        key = f"{source}|{title.lower()}|{artist.lower()}"
+        if not title or key in seen:
+            continue
+        seen.add(key)
+        unique.append(track)
+    return unique
+
+
+def _candidate_count(results: list[dict[str, Any]]) -> int:
+    return len(_collect_track_candidates(results))
+
+
+def _playlist_count(results: list[dict[str, Any]]) -> int | None:
+    for result in reversed(results):
+        if result.get("type") == "playlist":
+            return len(result["playlist"].tracks)
+    return None
+
+
+def _verified_online_count(results: list[dict[str, Any]]) -> int:
+    count = 0
+    for track in _collect_track_candidates(results):
+        source = getattr(track, "source", "local")
+        if source in {"netease", "bilibili", "youtube"}:
+            count += 1
+    return count
+
+
+def _fallback_count(results: list[dict[str, Any]]) -> int:
+    count = 0
+    for track in _collect_track_candidates(results):
+        source = getattr(track, "source", "local")
+        if "fallback" in source or source in {"mock", "llm"}:
+            count += 1
+    return count
 
 
 def _action_to_tool(action: ActionType) -> str | None:
@@ -717,7 +917,7 @@ def _collect_known_titles(results: list[dict[str, Any]]) -> set[str]:
                     _add(tr.title)
         elif t == "web_music_search":
             for tr in r["tracks"]:
-                if tr.source != "llm" and "fallback" not in tr.source:
+                if tr.source != "llm":
                     _add(tr.title)
         elif t == "daily_recommend":
             for item in r["recommendation"].tracks:
@@ -769,7 +969,7 @@ def guard_answer(answer: str, known_titles: set[str]) -> tuple[str, list[str]]:
 
     cleaned = re.sub(r"《([^》]+)》", _replace, answer)
     cleaned = re.sub(r"[、，,]\s*(?=[、，,。；;])", "", cleaned)  # 清理删除后残留的孤立标点
-    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    cleaned = re.sub(r"[^\S\r\n]{2,}", " ", cleaned).strip()
     return cleaned, hallucinated
 
 

@@ -117,6 +117,7 @@ class UserMemory(BaseModel):
     project_notes: list[str] = Field(default_factory=list)
     listening_history: list[ListeningEvent] = Field(default_factory=list)
     ratings: list["RatingEntry"] = Field(default_factory=list)
+    dislikes: list[str] = Field(default_factory=list)
     taste_profile: TasteProfile | None = None
     daily_rec_last_generated: str | None = None
     updated_at: str = Field(default_factory=utc_now_iso)
@@ -189,10 +190,80 @@ class AgentGoal(BaseModel):
     updated_at: str = Field(default_factory=utc_now_iso)
 
 
+class RetrievalPlan(BaseModel):
+    """结构化检索执行计划（对齐 SoulTuner MusicQueryPlan.retrieval_plan 思想）。
+
+    分工：LLM 只负责判意图 + 抽实体名（entities）；genre/mood/scenario 等标签
+    由确定性规则（app/graph/tag_rules.py）填充，降低幻觉与成本。
+    """
+    use_local: bool = False        # 检索本地库 / 候选资源库
+    use_vector: bool = False       # 启用语义向量检索（sentence-transformers / TF 降级）
+    use_web: bool = False          # 联网搜索真实平台候选
+    entities: list[str] = Field(default_factory=list)        # LLM 抽取的实体（歌手/歌名）
+    genre_filter: list[str] = Field(default_factory=list)    # 规则填充
+    mood_filter: list[str] = Field(default_factory=list)     # 规则填充
+    scenario_filter: list[str] = Field(default_factory=list) # 规则填充
+
+
+class AgentPlan(BaseModel):
+    # capability 意图：直接对齐 graph/nodes.py 的真实执行分支
+    intent: Literal["recommend", "search", "playlist", "taste", "import", "journey", "chat"] = "chat"
+    strategy: Literal["online_first", "library_first", "memory_only", "no_search"] = "online_first"
+    tools_needed: list[str] = Field(default_factory=list)
+    target_count: int | None = None
+    online_required: bool = True
+    reasoning_summary: str = ""
+    retrieval_plan: RetrievalPlan = Field(default_factory=RetrievalPlan)
+
+
+class ResourceTrack(BaseModel):
+    title: str
+    artist: str = ""
+    source: str = "unknown"
+    source_id: str = ""
+    genre: list[str] = Field(default_factory=list)
+    mood: list[str] = Field(default_factory=list)
+    playback_url: str | None = None
+    verified: bool = False
+    last_seen: str = Field(default_factory=utc_now_iso)
+    exposure_count: int = 0
+
+
+class RankingBreakdown(BaseModel):
+    title: str
+    source: str
+    score: float
+    reason: str
+    components: dict[str, float] = Field(default_factory=dict)
+
+
+class StreamEvent(BaseModel):
+    type: Literal[
+        "plan", "thinking", "tool_start", "tool_result", "candidates",
+        "song_card", "eval", "final", "guard", "error",
+    ]
+    content: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class FeedbackRequest(BaseModel):
     user_id: str = "demo-user"
     segment_id: str
     accepted: bool
+
+
+class DislikeRequest(BaseModel):
+    user_id: str = "demo-user"
+    title: str = ""
+    artist: str = ""
+    source: str = ""
+    source_id: str = ""
+    reason: str = ""
+
+
+class JourneyRequest(BaseModel):
+    user_id: str = "demo-user"
+    instruction: str
 
 
 class SimilarRequest(BaseModel):
@@ -248,6 +319,7 @@ class RecommendedTrack(BaseModel):
     score: float
     reason: str
     category: Literal["familiar", "discovery", "mood_match"] = "familiar"
+    components: dict[str, float] = Field(default_factory=dict)
 
 
 class DailyRecommendation(BaseModel):

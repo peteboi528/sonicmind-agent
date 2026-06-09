@@ -19,6 +19,7 @@ from app.prompts.playlist import (
     PLAYLIST_VERSION,
 )
 from app.prompts.identify import IDENTIFY_FROM_URL_TEMPLATE, IDENTIFY_VERSION
+from app.prompts.query_plan import QUERY_PLAN_SYSTEM, QUERY_PLAN_VERSION
 
 __all__ = [
     "AGENT_SYSTEM_PROMPT",
@@ -37,4 +38,6 @@ __all__ = [
     "PLAYLIST_VERSION",
     "IDENTIFY_FROM_URL_TEMPLATE",
     "IDENTIFY_VERSION",
+    "QUERY_PLAN_SYSTEM",
+    "QUERY_PLAN_VERSION",
 ]

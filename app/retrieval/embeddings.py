@@ -71,6 +71,21 @@ def cosine_normalized(a: list[float], b: list[float]) -> float:
     return sum(x * y for x, y in zip(a, b))
 
 
+def semantic_scores(query: str, candidate_texts: list[str]) -> list[float] | None:
+    """三锚精排的语义锚：query 与每个候选文本的语义相似度，归一化到 [0,1]。
+
+    embedding 不可用时返回 None，调用方回退到 TF cosine。
+    模型输出已是归一化向量，cosine ∈ [-1,1]，这里映射到 [0,1]：(x+1)/2。
+    """
+    if not candidate_texts:
+        return []
+    vectors = encode([query, *candidate_texts])
+    if vectors is None:
+        return None
+    query_vec = vectors[0]
+    return [(cosine_normalized(query_vec, vec) + 1.0) / 2.0 for vec in vectors[1:]]
+
+
 def _reset_for_test() -> None:
     """仅供测试：清空单例缓存以便重新评估开关。"""
     global _model, _load_attempted

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import re
 import uuid
 from typing import Any
 
@@ -71,6 +72,8 @@ class MockLLM:
     def generate(self, prompt: str, system: str | None = None, temperature: float = 0.7) -> str:
         # 同时检查 system，让意图分类器在 mock 下也能命中（system 含"意图"）
         haystack = f"{system or ''}\n{prompt}".lower()
+        if "意图规划器" in (system or "") or "query_plan" in haystack:
+            return self._query_plan(prompt)
         if "推荐理由" in prompt or "reason" in haystack:
             return self._reason(prompt)
         if "搜索" in prompt or "search" in haystack:
@@ -129,6 +132,19 @@ class MockLLM:
 
     def _pick_tool(self, query: str, already_called: list[str], available: set[str]) -> str | None:
         lowered = query.lower()
+        wants_music_candidates = any(
+            kw in lowered
+            for kw in ["recommend", "suggest", "推荐", "搜索", "找歌", "歌单", "playlist", "chill", "适合", "跑步"]
+        )
+        if wants_music_candidates and TOOL_WEB_MUSIC_SEARCH in available and TOOL_WEB_MUSIC_SEARCH not in already_called:
+            return TOOL_WEB_MUSIC_SEARCH
+        if TOOL_WEB_MUSIC_SEARCH in already_called:
+            if any(kw in lowered for kw in ["playlist", "歌单", "合集"]) and TOOL_PLAYLIST in available and TOOL_PLAYLIST not in already_called:
+                return TOOL_PLAYLIST
+            if any(kw in lowered for kw in ["搜索", "找歌", "search"]) and TOOL_SEARCH in available and TOOL_SEARCH not in already_called:
+                return TOOL_SEARCH
+            if TOOL_RECOMMEND in available and TOOL_RECOMMEND not in already_called:
+                return TOOL_RECOMMEND
         for keywords, tool in _TOOL_RULES:
             if any(kw in lowered for kw in keywords) and tool in available and tool not in already_called:
                 return tool
@@ -138,9 +154,9 @@ class MockLLM:
 
     def _mock_args(self, tool: str, query: str) -> dict[str, Any]:
         if tool in {TOOL_RECOMMEND, TOOL_SEARCH, TOOL_RETRIEVE, TOOL_WEB_MUSIC_SEARCH}:
-            return {"query": query, "top_k": 5}
+            return {"query": query, "top_k": _infer_count(query) or 5}
         if tool == TOOL_PLAYLIST:
-            return {"instruction": query}
+            return {"instruction": query, "target_count": _infer_count(query)}
         if tool == TOOL_MEMORY_UPDATE:
             return {"event": query}
         if tool == TOOL_FETCH_METADATA:
@@ -160,6 +176,38 @@ class MockLLM:
 
     def _intent(self, prompt: str) -> str:
         return '{"actions": ["recommend"], "confidence": 0.8, "reason": "mock intent"}'
+
+    def _query_plan(self, prompt: str) -> str:
+        """模拟结构化意图规划：根据关键词判意图，复刻真实 LLM 的 JSON 输出。"""
+        import json as _json
+
+        lowered = prompt.lower()
+        target = _infer_count(prompt)
+        if any(k in lowered for k in ["旅程", "journey", "热身", "冲刺"]):
+            intent, use_vector = "journey", True
+        elif any(k in lowered for k in ["网易云歌单", "导入歌单", "playlist?id"]):
+            intent, use_vector = "import", False
+        elif any(k in lowered for k in ["歌单", "playlist", "合集"]):
+            intent, use_vector = "playlist", True
+        elif any(k in lowered for k in ["品味", "分析我", "taste", "偏好档案"]):
+            return _json.dumps({"intent": "taste", "entities": [], "use_local": False,
+                                "use_vector": False, "use_web": False, "target_count": None,
+                                "reasoning": "mock：只读品味画像"}, ensure_ascii=False)
+        elif any(k in lowered for k in ["搜索", "找歌", "search", "找一些"]):
+            intent, use_vector = "search", False
+        elif any(k in lowered for k in ["推荐", "suggest", "recommend", "适合", "chill", "跑步"]):
+            intent, use_vector = "recommend", True
+        elif any(k in lowered for k in ["你好", "hi", "hello", "嗨", "在吗"]):
+            return _json.dumps({"intent": "chat", "entities": [], "use_local": False,
+                                "use_vector": False, "use_web": False, "target_count": None,
+                                "reasoning": "mock：寒暄"}, ensure_ascii=False)
+        else:
+            intent, use_vector = "recommend", True
+        return _json.dumps({
+            "intent": intent, "entities": [], "use_local": True,
+            "use_vector": use_vector, "use_web": True, "target_count": target,
+            "reasoning": f"mock：{intent} 意图",
+        }, ensure_ascii=False)
 
     def _reason(self, prompt: str) -> str:
         template = random.choice(REASON_TEMPLATES)
@@ -188,3 +236,10 @@ def _extract_or_default(text: str, default: str) -> str:
         if kw in text:
             return kw
     return default
+
+
+def _infer_count(text: str) -> int | None:
+    match = re.search(r"(\d{1,3})\s*(?:首|个|tracks?|songs?)?", text, re.IGNORECASE)
+    if not match:
+        return None
+    return max(1, min(int(match.group(1)), 100))

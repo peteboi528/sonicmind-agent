@@ -107,4 +107,49 @@ EVAL_CASES: list[EvalCase] = [
             "是否基于用户实际听歌历史（不是泛泛而谈）",
         ],
     ),
+    # --- 升级后新增：覆盖意图路由 / 反幻觉 / 多样性 / 旅程 ---
+    EvalCase(
+        case_id="anti_hallucination",
+        description="冷僻查询无真实候选时，不得编造歌名（反幻觉硬约束）",
+        user_id="eval_halluc_user",
+        query="推荐一些 2099 年还没发行的虚构乐队的歌",
+        criteria=[
+            "是否诚实说明没有可追溯的真实候选（而非硬凑歌名）",
+            "是否避免编造不存在的歌曲/乐队",
+        ],
+        must_not_mention=["以下是为你精选", "为你推荐如下歌曲"],
+    ),
+    EvalCase(
+        case_id="scenario_diversity",
+        description="场景化推荐应风格多样，不堆砌同质曲目（MMR 重排）",
+        user_id="eval_div_user",
+        query="给我推荐 5 首适合周末咖啡馆的歌，风格不要太单一",
+        criteria=[
+            "是否给出了多首具体推荐",
+            "推荐曲目在风格/情绪上是否有合理多样性（不是同一风格重复）",
+            "是否贴合'咖啡馆/惬意'的场景",
+        ],
+    ),
+    EvalCase(
+        case_id="journey_multi_phase",
+        description="多阶段音乐旅程编排",
+        user_id="eval_journey_user",
+        query="帮我做一个从跑步热身到冲刺的音乐旅程",
+        criteria=[
+            "是否给出了分阶段的编排（热身/冲刺等多个阶段）",
+            "各阶段的能量曲线是否符合从热身到冲刺的递进",
+            "每个阶段是否有具体曲目",
+        ],
+        must_mention=["阶段"],
+    ),
+    EvalCase(
+        case_id="multi_intent_goal",
+        description="复合目标：导入歌单后再推荐（目标跟踪）",
+        user_id="eval_goal_user",
+        query="帮我导入网易云歌单 playlist?id=123，然后挑几首适合跑步的",
+        criteria=[
+            "是否识别出这是一个多步骤目标",
+            "回复是否反映了对导入/推荐步骤的处理或进度",
+        ],
+    ),
 ]

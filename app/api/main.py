@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 
 from app.agent import AudioVisualAgent
 from app.config import settings
 from app.models import (
     ChatRequest,
     DailyRequest,
+    DislikeRequest,
     EnrichRequest,
     FeedbackRequest,
     IngestRequest,
+    JourneyRequest,
     ListenRequest,
     MemoryUpdateRequest,
     PlaylistRequest,
@@ -163,6 +166,17 @@ def agent_run(request: ChatRequest):
     return agent.chat(request.user_id, request.message, history=history or None)
 
 
+@app.post("/agent/stream")
+def agent_stream(request: ChatRequest):
+    history = [{"role": m.role, "content": m.content} for m in request.history]
+
+    def events():
+        for event in agent.stream_chat(request.user_id, request.message, history=history or None):
+            yield f"data: {json.dumps(event.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
 @app.get("/taste/{user_id}")
 def taste_profile(user_id: str):
     return agent.get_taste_profile(user_id)
@@ -183,15 +197,31 @@ def memory_feedback(request: FeedbackRequest):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.post("/feedback/dislike")
+def dislike(request: DislikeRequest):
+    memory = agent.record_dislike(request)
+    return {"updated": True, "memory": memory}
+
+
 @app.get("/memory/{user_id}")
 def get_memory(user_id: str):
     return agent.memory.get_memory(user_id)
+
+
+@app.get("/library/tracks")
+def library_tracks(limit: int = Query(default=100, ge=1, le=500)):
+    return {"tracks": [track.model_dump(mode="json") for track in agent.list_resource_tracks(limit)]}
 
 
 @app.post("/playlist/generate")
 def generate_playlist(request: PlaylistRequest):
     playlist = agent.generate_playlist(request.user_id, request.instruction)
     return playlist
+
+
+@app.post("/journey/generate")
+def generate_journey(request: JourneyRequest):
+    return agent.generate_music_journey(request.user_id, request.instruction)
 
 
 @app.post("/playlist/auto/{user_id}")

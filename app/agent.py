@@ -4,12 +4,14 @@ import hashlib
 import logging
 import random
 import re
+from datetime import datetime
 from typing import Any
 
 from app.config import settings
 from app.llm.client import build_llm
 from app.llm.protocol import LLMError, LLMProvider
 from app.llm.structured import extract_json_dict, extract_json_list
+from app.library import ResourceLibrary
 from app.media.pipeline import MediaPipeline, netease_song_id
 from app.memory import MemoryManager
 from app.prompts import (
@@ -23,6 +25,7 @@ from app.models import (
     Asset,
     AssetStatus,
     DailyRecommendation,
+    DislikeRequest,
     EnrichResponse,
     ExternalTrack,
     FeedbackRequest,
@@ -60,11 +63,19 @@ class AudioVisualAgent:
         self.media = MediaPipeline(self.store)
         self.memory = MemoryManager(self.store)
         self.similarity = AssetSimilarity(self.store)
+        self.library = ResourceLibrary(settings.resource_library_path)
         self.llm: LLMProvider = build_llm()
         self.source: ExternalSource = MockSource()
         self.engine = RecommendEngine()
         self.daily = DailyRecommender(self.engine, self.source, self.llm)
         self.react = ReActLoop(self)
+        self.graph = None
+        self.library.sync_assets(self.list_assets())
+        try:
+            from app.graph.builder import build_agent_graph
+            self.graph = build_agent_graph(self)
+        except Exception:
+            logger.debug("LangGraph wrapper unavailable; using ReAct fallback", exc_info=True)
 
     def ingest_video(self, url: str, force_refresh: bool = False) -> Asset:
         return self.media.ingest_video(url, force_refresh=force_refresh)
@@ -250,7 +261,9 @@ class AudioVisualAgent:
             logger.debug("URL identity inference failed for asset_id=%s", asset.asset_id, exc_info=True)
 
     def analyze_media(self, asset_id: str, force_refresh: bool = False) -> tuple[Asset, list[Segment]]:
-        return self.media.analyze_media(asset_id, force_refresh=force_refresh)
+        asset, segments = self.media.analyze_media(asset_id, force_refresh=force_refresh)
+        self.library.upsert_asset(asset)
+        return asset, segments
 
     def _batch_classify_tracks(self, pairs: list[tuple[str, str]]) -> list[dict[str, list[str]]]:
         """批量让 LLM 判断一组 (歌名, 歌手) 的风格和情绪，一次调用处理多首。
@@ -282,6 +295,33 @@ class AudioVisualAgent:
         except Exception:
             logger.debug("Batch track classification failed for %s tracks", len(pairs), exc_info=True)
         return out
+
+    # 确定性兜底词表（与 _batch_classify_tracks / tag_rules 的可选值保持一致）
+    _FALLBACK_GENRES = ["流行", "摇滚", "电子", "古典", "R&B", "说唱", "爵士", "民谣", "国风"]
+    _FALLBACK_MOODS = ["欢快", "治愈", "励志", "伤感", "放松", "激昂", "浪漫", "宁静"]
+
+    def _ensure_track_tags(
+        self, title: str, artist: str, genre: list[str], mood: list[str]
+    ) -> tuple[list[str], list[str]]:
+        """三层兜底保证每首导入歌曲都有 genre/mood：
+        1) LLM 分类结果（传入的 genre/mood）；
+        2) 关键词规则从歌名+歌手推断（tag_rules）；
+        3) 基于 asset 标识的确定性 hash 选一个，绝不留空（与 tempo/energy 兜底同思路）。
+        """
+        from app.graph.tag_rules import extract_genre, extract_mood
+
+        text = f"{title} {artist}"
+        if not genre:
+            genre = extract_genre(text)
+        if not mood:
+            mood = extract_mood(text)
+        # 仍为空 → 确定性兜底，保证推荐/品味分析能用上这首歌
+        seed = int(hashlib.sha1(text.encode("utf-8")).hexdigest()[:8], 16)
+        if not genre:
+            genre = [self._FALLBACK_GENRES[seed % len(self._FALLBACK_GENRES)]]
+        if not mood:
+            mood = [self._FALLBACK_MOODS[(seed // 7) % len(self._FALLBACK_MOODS)]]
+        return genre, mood
 
     def import_netease_playlist(
         self,
@@ -337,12 +377,13 @@ class AudioVisualAgent:
                 asset.cover_url = t["cover"]
             if t.get("duration"):
                 asset.duration_seconds = t["duration"]
-            # 补全风格/情绪
+            # 补全风格/情绪：LLM → 关键词规则 → 确定性兜底，三层保证永不为空
             cls = classifications[idx] if idx < len(classifications) else {}
-            if cls.get("genre"):
-                asset.genre = cls["genre"]
-            if cls.get("mood"):
-                asset.mood = cls["mood"]
+            genre, mood = self._ensure_track_tags(
+                asset.title, asset.artist or "", cls.get("genre") or [], cls.get("mood") or []
+            )
+            asset.genre = genre
+            asset.mood = mood
             # energy/tempo 用确定性兜底（与 analyzer 一致的做法），保证有值
             rng = random.Random(int(hashlib.sha1(asset.asset_id.encode()).hexdigest()[:8], 16))
             if not asset.tempo_bpm:
@@ -447,12 +488,7 @@ class AudioVisualAgent:
 
         external_results: list[ExternalTrack] = []
         if include_external:
-            # 先从 mock 曲库搜
-            external_results = self.source.search(query, limit=top_k)
-            # 如果 mock 结果不够，用 LLM 补充
-            if len(external_results) < 5:
-                llm_results = self._llm_search(query, top_k - len(external_results))
-                external_results.extend(llm_results)
+            external_results = self.search_web_music(expanded_query, top_k=top_k)
 
         summary = _format_search_summary(
             query=query,
@@ -470,6 +506,8 @@ class AudioVisualAgent:
                 f"memory_query={memory_query or 'none'}",
                 f"local_hits={len(local_by_id)}",
                 f"external_hits={len(external_results)}",
+                f"online_verified={sum(1 for track in external_results if _is_verified_online_track(track))}",
+                f"fallback_hits={sum(1 for track in external_results if _is_fallback_track(track))}",
             ],
         )
 
@@ -511,10 +549,30 @@ class AudioVisualAgent:
         except Exception:
             logger.debug("Bilibili web music search failed for query=%s", query, exc_info=True)
 
-        # 离线 mock 曲库本身带真实结构化元数据，可安全补充
+        try:
+            video_id = self._search_youtube_video(query)
+            if video_id:
+                url = f"https://www.youtube.com/watch?v={video_id}"
+                title = youtube_source.fetch_youtube_title(url)
+                if title:
+                    tracks.append(ExternalTrack(
+                        external_id=video_id,
+                        title=title,
+                        artist="",
+                        source="youtube",
+                        playback_url=f"https://www.youtube.com/embed/{video_id}?autoplay=1&rel=0",
+                    ))
+        except Exception:
+            logger.debug("YouTube web music search failed for query=%s", query, exc_info=True)
+
+        tracks = [track for track in tracks if _valid_external_track(track, query)]
+
+        # mock 只作为联网不足时的降级候选，必须带 fallback 标记。
         if len(tracks) < top_k:
             for candidate in self.source.search(query, limit=top_k - len(tracks)):
-                tracks.append(candidate.model_copy(update={"source": f"{candidate.source}-fallback"}))
+                fallback = candidate.model_copy(update={"source": f"{candidate.source}-fallback"})
+                if _valid_external_track(fallback, query):
+                    tracks.append(fallback)
 
         seen: set[tuple[str, str]] = set()
         unique: list[ExternalTrack] = []
@@ -524,7 +582,10 @@ class AudioVisualAgent:
                 continue
             seen.add(key)
             unique.append(track)
-        return unique[:top_k]
+        selected = unique[:top_k]
+        for track in selected:
+            self.library.upsert_external(track)
+        return selected
 
     def fetch_track_metadata(
         self,
@@ -602,7 +663,15 @@ class AudioVisualAgent:
     # --- 收听记录 ---
 
     def record_listen(self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None) -> UserMemory:
-        return self.memory.record_listen(user_id, asset_id, duration, completed, context)
+        memory = self.memory.record_listen(user_id, asset_id, duration, completed, context)
+        # Thompson 在线学习反馈环：听完 → 正反馈(α+1)，秒跳 → 负反馈(β+0.5)。
+        asset = self.store.read_model("assets", asset_id, Asset)
+        if asset is not None:
+            if completed:
+                self.library.update_ts_feedback(asset, positive=True, weight=1.0)
+            elif duration and asset.duration_seconds and duration < asset.duration_seconds * 0.3:
+                self.library.update_ts_feedback(asset, positive=False, weight=0.5)
+        return memory
 
     # --- 品味档案 ---
 
@@ -613,6 +682,11 @@ class AudioVisualAgent:
         if asset is None:
             raise ValueError(f"Unknown asset_id: {asset_id}")
         memory = self.memory.record_rating(user_id, asset, score)
+        # 高分 → Thompson 正反馈，低分 → 负反馈。
+        if score >= 7.0:
+            self.library.update_ts_feedback(asset, positive=True, weight=(score - 6.0) / 4.0)
+        elif score <= 3.0:
+            self.library.update_ts_feedback(asset, positive=False, weight=(4.0 - score) / 4.0)
         # 评分后立即刷新品味档案
         library = [a for a in self.list_assets() if a.status == "analyzed"]
         memory = self.memory.refresh_taste_profile(user_id, library)
@@ -631,7 +705,57 @@ class AudioVisualAgent:
 
     def chat(self, user_id: str, message: str, history: list[dict[str, Any]] | None = None) -> AgentAnswer:
         asset_id = self._resolve_asset_context(user_id, message)
+        if self.graph is not None:
+            try:
+                return self.graph.invoke(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
+            except Exception:
+                logger.debug("LangGraph invoke failed; falling back to ReActLoop", exc_info=True)
         return self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
+
+    def stream_chat(self, user_id: str, message: str, history: list[dict[str, Any]] | None = None):
+        asset_id = self._resolve_asset_context(user_id, message)
+        if self.graph is not None:
+            yield from self.graph.stream(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
+            return
+        answer = self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
+        from app.models import StreamEvent
+        yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))
+
+    def generate_greeting(self, user_id: str) -> str:
+        memory = self.memory.get_memory(user_id)
+        assets = self.list_assets()
+        goal = self.memory.get_active_goal(user_id)
+        parts = ["嘿，我先看了一眼你的音乐状态。"]
+
+        if memory.taste_profile and memory.taste_profile.top_genres:
+            top_genre = memory.taste_profile.top_genres[0][0]
+            parts.append(f"你最近的品味更偏 {top_genre}。")
+        elif memory.preferences:
+            parts.append(f"我记得你提过：{memory.preferences[-1]}。")
+
+        hour = datetime.now().hour
+        if 6 <= hour < 11:
+            parts.append("现在适合先找一些轻快但不吵的真实曲目。")
+        elif 22 <= hour or hour < 2:
+            parts.append("夜深了，我会优先找更松弛、耐听的版本。")
+
+        if goal:
+            parts.append(f"上次的目标还在：{goal.goal}")
+
+        if memory.listening_history:
+            recent = memory.listening_history[-3:]
+            completed = sum(1 for item in recent if item.completed)
+            if completed >= 2:
+                parts.append("最近你完整听完的歌比较多，我会延续这个方向。")
+            elif len(recent) >= 2 and completed == 0:
+                parts.append("最近跳过比较多，我会少依赖本地库，多去线上找新候选。")
+
+        if len(assets) < 3:
+            parts.append("曲库还不多，我可以先联网找真实候选，或者导入网易云歌单再推荐。")
+        else:
+            parts.append("我会把真实线上候选放前面，本地库只当作你的口味参考。")
+
+        return " ".join(parts)
 
     # --- 记忆 ---
 
@@ -646,6 +770,47 @@ class AudioVisualAgent:
         if target is None:
             raise ValueError(f"Unknown segment_id: {request.segment_id}")
         return self.memory.record_feedback(request.user_id, target, request.accepted)
+
+    def record_dislike(self, request: DislikeRequest) -> UserMemory:
+        self.library.add_dislike(request)
+        # 负反馈也推给 Thompson：明确不喜欢 → ts_beta 大幅上调，后续探索几乎不再选中。
+        from types import SimpleNamespace
+        self.library.update_ts_feedback(
+            SimpleNamespace(
+                title=request.title, artist=request.artist,
+                source=request.source, external_id=request.source_id, asset_id=request.source_id,
+            ),
+            positive=False, weight=3.0,
+        )
+        memory = self.memory.get_memory(request.user_id)
+        key = " - ".join(part for part in [request.title, request.artist] if part) or request.source_id or request.source
+        if key and key not in memory.dislikes:
+            memory.dislikes.append(key)
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", request.user_id, memory)
+        return memory
+
+    def list_resource_tracks(self, limit: int = 100):
+        self.library.sync_assets(self.list_assets())
+        return self.library.list_tracks(limit)
+
+    def generate_music_journey(self, user_id: str, instruction: str) -> dict[str, Any]:
+        phases = _journey_phases(instruction)
+        out = {"user_id": user_id, "instruction": instruction, "phases": []}
+        for phase in phases:
+            query = f"{instruction} {phase['query']}"
+            candidates = [
+                track for track in self.search_web_music(query, top_k=8)
+                if not self.library.is_disliked(user_id, track)
+            ]
+            self.library.record_exposure(candidates[:3])
+            out["phases"].append({
+                "name": phase["name"],
+                "goal": phase["goal"],
+                "transition": phase["transition"],
+                "tracks": [track.model_dump(mode="json") for track in candidates[:3]],
+            })
+        return out
 
     # --- 播放 ---
 
@@ -891,12 +1056,13 @@ class AudioVisualAgent:
         target_count: int,
     ) -> list[Asset | ExternalTrack]:
         search_terms = _playlist_search_terms(instruction)
-        online_preferred = bool(seed_tracks) or target_count > max(len(library), 12) or any(
-            token in instruction.lower()
-            for token in ["联网", "外部", "新作品", "真实", "online", "web"]
-        )
-        external = self.source.search(search_terms, limit=max(target_count * 2, 40))
-        if len(external) < target_count:
+        external: list[ExternalTrack] = []
+        for online_query in _playlist_online_queries(search_terms):
+            if len(_dedupe_tracks([*seed_tracks, *external])) >= target_count:
+                break
+            external.extend(self.search_web_music(online_query, top_k=min(max(target_count, 8), 25)))
+
+        if len(_dedupe_tracks([*seed_tracks, *external])) < target_count:
             external.extend(
                 self.source.get_recommendations(
                     seed_genres=["流行", "民谣", "R&B", "说唱", "电子"],
@@ -910,11 +1076,7 @@ class AudioVisualAgent:
             key=lambda asset: _playlist_match_score(asset, search_terms),
             reverse=True,
         )
-        ordered: list[Asset | ExternalTrack]
-        if online_preferred:
-            ordered = [*seed_tracks, *external, *library_ranked]
-        else:
-            ordered = [*library_ranked, *seed_tracks, *external]
+        ordered: list[Asset | ExternalTrack] = [*seed_tracks, *external, *library_ranked]
         return _dedupe_tracks(ordered)
 
     def _fallback_playlist(
@@ -1060,8 +1222,70 @@ class AudioVisualAgent:
         )
 
     def recommend_for_query(self, user_id: str, goal: str, top_k: int = 5) -> DailyRecommendation:
+        memory = self.memory.get_memory(user_id)
+        memory_query = self.memory.weighted_query(memory)
+        online_query = f"{goal} {memory_query}".strip()
+        online_candidates = self.search_web_music(online_query, top_k=max(top_k * 2, top_k))
+        verified = [
+            track for track in online_candidates
+            if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track)
+        ]
+        if verified:
+            ranked = self._rerank_tracks(user_id, online_query, _dedupe_tracks(verified), top_k)
+            self.library.record_exposure([t for t, _ in ranked])
+            self.library.decay_exposure_ts([t for t, _ in ranked])
+            tracks: list[RecommendedTrack] = []
+            for track, breakdown in ranked:
+                tracks.append(RecommendedTrack(
+                    asset=track,
+                    score=breakdown.score,
+                    reason=breakdown.reason or _online_candidate_reason(track, memory_query),
+                    category="discovery",
+                    components=breakdown.components,
+                ))
+            return DailyRecommendation(
+                user_id=user_id,
+                tracks=tracks,
+                reason_summary=f"优先采用 {len(tracks)} 首真实线上候选，经三锚精排+MMR 多样性重排；本地库只作为偏好参考。",
+                agent_trace=[
+                    f"online_query={online_query}",
+                    f"online_verified={len(verified)}",
+                    f"fallback_candidates={sum(1 for track in online_candidates if _is_fallback_track(track))}",
+                    "reason_source=online_candidate",
+                    "rerank=tri_anchor+mmr",
+                ],
+            )
         time_bucket = self._infer_time_bucket(goal)
-        return self.daily_recommend(user_id, time_of_day=time_bucket, count=top_k)
+        rec = self.daily_recommend(user_id, time_of_day=time_bucket, count=top_k)
+        rec.agent_trace.append("reason_source=fallback")
+        return rec
+
+    def _rerank_tracks(self, user_id: str, query: str, tracks: list[Any], top_k: int):
+        """三锚精排 + MMR 多样性重排管线。返回 [(track, RankingBreakdown), ...]。"""
+        from app.graph.tag_rules import extract_scenario
+        from app.memory import compute_behavior_scores
+        from app.recommend.rerank import rerank_candidates
+
+        if not settings.enable_rerank or not tracks:
+            from app.models import RankingBreakdown
+            fallback = [
+                (t, RankingBreakdown(
+                    title=getattr(t, "title", ""), source=getattr(t, "source", "local"),
+                    score=round(1.0 - i * 0.04, 4), reason="顺序兜底（rerank 关闭）",
+                ))
+                for i, t in enumerate(tracks[:top_k])
+            ]
+            return fallback
+
+        memory = self.memory.get_memory(user_id)
+        taste = memory.taste_profile
+        durations = {a.asset_id: a.duration_seconds for a in self.list_assets()}
+        behavior = compute_behavior_scores(memory.listening_history, durations)
+        scenarios = {s.lower() for s in extract_scenario(query)}
+        return rerank_candidates(
+            query, tracks, taste,
+            behavior_scores=behavior, scenarios=scenarios, top_k=top_k,
+        )
 
     def _resolve_asset_context(self, user_id: str, query: str) -> str | None:
         # Keep only explicit/recent media context. Tool selection itself is now
@@ -1136,6 +1360,43 @@ def _playlist_search_terms(instruction: str) -> str:
     if "工作" in instruction or "专注" in instruction:
         terms.extend(["放松", "宁静", "电子", "爵士"])
     return " ".join(terms)
+
+
+def _playlist_online_queries(search_terms: str) -> list[str]:
+    queries = [search_terms]
+    lowered = search_terms.lower()
+    if "chill" in lowered or "放松" in search_terms:
+        queries.extend([
+            "chill R&B 放松 歌曲推荐",
+            "华语 chill 放松 歌单",
+            "R&B 民谣 放松 歌曲",
+        ])
+    if "跑步" in search_terms or "运动" in search_terms:
+        queries.extend([
+            "跑步 高能 歌曲推荐",
+            "运动 电子 摇滚 歌单",
+        ])
+    unique: list[str] = []
+    for query in queries:
+        normalized = query.strip()
+        if normalized and normalized not in unique:
+            unique.append(normalized)
+    return unique[:4]
+
+
+def _journey_phases(instruction: str) -> list[dict[str, str]]:
+    lowered = instruction.lower()
+    if any(token in lowered or token in instruction for token in ["跑步", "运动", "running", "workout"]):
+        return [
+            {"name": "热身", "goal": "轻快进入状态", "query": "热身 轻快 节奏", "transition": "从低强度节奏进入身体状态。"},
+            {"name": "冲刺", "goal": "高能量推进", "query": "跑步 高能 快节奏", "transition": "中段提升 BPM 和能量，适合冲起来。"},
+            {"name": "放松", "goal": "降速恢复", "query": "运动后 放松 舒缓", "transition": "尾段降低强度，帮助恢复。"},
+        ]
+    return [
+        {"name": "开场", "goal": "建立氛围", "query": "开场 氛围 音乐", "transition": "先用稳定情绪铺底。"},
+        {"name": "推进", "goal": "提升记忆点", "query": "高潮 推荐 音乐", "transition": "中段提高辨识度和情绪张力。"},
+        {"name": "收束", "goal": "留下余韵", "query": "结尾 放松 音乐", "transition": "最后用更耐听的曲目收尾。"},
+    ]
 
 
 def _format_search_summary(
@@ -1214,6 +1475,41 @@ def _track_key(track: Asset | ExternalTrack | dict[str, Any]) -> str:
     artist = str(track.get("artist", "")).lower().strip()
     aid = str(track.get("asset_id", "")).strip()
     return f"asset:{aid}" if aid else f"title:{title}:{artist}"
+
+
+def _is_verified_online_track(track: Asset | ExternalTrack) -> bool:
+    return isinstance(track, ExternalTrack) and track.source in {"netease", "bilibili", "youtube"}
+
+
+def _is_fallback_track(track: Asset | ExternalTrack) -> bool:
+    source = getattr(track, "source", "local")
+    return "fallback" in source or source in {"mock", "llm"}
+
+
+def _valid_external_track(track: ExternalTrack, query: str) -> bool:
+    title = (track.title or "").strip()
+    if not title:
+        return False
+    lowered_title = title.lower()
+    lowered_query = query.lower().strip()
+    if lowered_title == lowered_query:
+        return False
+    if lowered_title in {"网易云音乐", "bilibili", "youtube", "搜索结果"}:
+        return False
+    if len(title) > 80 and " - " not in title:
+        return False
+    return True
+
+
+def _online_candidate_reason(track: ExternalTrack, memory_query: str) -> str:
+    source_label = {
+        "netease": "网易云真实曲目",
+        "bilibili": "B 站真实视频/MV",
+        "youtube": "YouTube 真实视频",
+    }.get(track.source, "真实线上候选")
+    if memory_query:
+        return f"online_candidate：来自{source_label}，并结合你的记忆偏好「{memory_query[:40]}」排序。"
+    return f"online_candidate：来自{source_label}，不是本地 mock 结果。"
 
 
 def _dedupe_tracks(tracks: list[Asset | ExternalTrack]) -> list[Asset | ExternalTrack]:

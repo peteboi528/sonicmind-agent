@@ -5,6 +5,7 @@ import logging
 import re
 import urllib.parse
 import urllib.request
+from html import unescape
 from typing import Any
 
 
@@ -44,7 +45,7 @@ def fetch_bilibili_title(url: str) -> str | None:
             title = match.group(1).strip()
             for suffix in ["_哔哩哔哩_bilibili", " - 哔哩哔哩"]:
                 title = title.replace(suffix, "")
-            return title.strip()
+            return unescape(title.strip())
     except Exception:
         logger.debug("Bilibili title fetch failed", exc_info=True)
     return None
@@ -66,7 +67,7 @@ def search_bilibili_detail(query: str) -> dict[str, Any] | None:
             bvid = item.get("bvid")
             title = item.get("title")
             if bvid and title:
-                clean_title = re.sub(r"</?em[^>]*>", "", title).strip()
+                clean_title = unescape(re.sub(r"</?em[^>]*>", "", title).strip())
                 return {
                     "bvid": bvid,
                     "title": clean_title,

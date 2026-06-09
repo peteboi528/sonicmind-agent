@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 from datetime import datetime, timezone
+from typing import Any
 
 from app.models import (
     AgentGoal,
@@ -188,6 +189,29 @@ class MemoryManager:
         parts.extend(memory.common_goals[-3:])
         return " ".join(parts)
 
+    def auto_learn_from_turn(self, user_id: str, query: str, results: list[dict[str, Any]]) -> bool:
+        """Conservatively learn from an agent turn without requiring an explicit memory tool call."""
+        memory = self.get_memory(user_id)
+        changed = False
+
+        explicit = extract_preference(query)
+        if explicit:
+            if self._upsert_entry(memory, explicit, "auto_explicit"):
+                changed = True
+            if explicit not in memory.preferences:
+                memory.preferences.append(explicit)
+                changed = True
+
+        inferred = infer_preferences_from_results(query, results)
+        for item in inferred:
+            if self._upsert_entry(memory, item, "inferred_from_result"):
+                changed = True
+
+        if changed:
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", user_id, memory)
+        return changed
+
     def get_active_goal(self, user_id: str) -> AgentGoal | None:
         goal = self.store.read_model("goals", user_id, AgentGoal)
         if goal is None or goal.status != "active":
@@ -266,6 +290,54 @@ def score_entries(entries: list[MemoryEntry]) -> list[tuple[MemoryEntry, float]]
         scored.append((entry, weight))
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored
+
+
+def infer_preferences_from_results(query: str, results: list[dict[str, Any]]) -> list[str]:
+    lowered = query.lower()
+    if not any(token in lowered for token in ["推荐", "歌单", "适合", "喜欢", "chill", "playlist", "recommend"]):
+        return []
+
+    genre_counts: dict[str, int] = {}
+    mood_counts: dict[str, int] = {}
+    considered = 0
+
+    for track in _iter_verified_tracks(results):
+        considered += 1
+        for genre in getattr(track, "genre", []) or []:
+            genre_counts[genre] = genre_counts.get(genre, 0) + 1
+        for mood in getattr(track, "mood", []) or []:
+            mood_counts[mood] = mood_counts.get(mood, 0) + 1
+
+    if considered < 3:
+        return []
+
+    inferred: list[str] = []
+    for label, counts in [("风格", genre_counts), ("情绪", mood_counts)]:
+        if not counts:
+            continue
+        name, count = max(counts.items(), key=lambda item: item[1])
+        if count >= 2:
+            inferred.append(f"{label}偏好：{name}")
+    return inferred[:2]
+
+
+def _iter_verified_tracks(results: list[dict[str, Any]]) -> list[Any]:
+    tracks: list[Any] = []
+    for result in results:
+        result_type = result.get("type")
+        if result_type == "web_music_search":
+            for track in result["tracks"]:
+                source = getattr(track, "source", "")
+                if source in {"netease", "bilibili", "youtube"}:
+                    tracks.append(track)
+        elif result_type == "daily_recommend":
+            tracks.extend(item.asset for item in result["recommendation"].tracks[:5])
+        elif result_type == "playlist":
+            for track in result["playlist"].tracks[:8]:
+                source = getattr(track, "source", "local")
+                if source != "llm" and "fallback" not in source:
+                    tracks.append(track)
+    return tracks
 
 
 def compute_behavior_scores(

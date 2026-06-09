@@ -49,7 +49,7 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
 AGENT_TOOLS: list[dict[str, Any]] = [
     _tool(
         TOOL_RECOMMEND,
-        "根据用户的品味档案和当前需求推荐音乐。适用于：用户想要新歌推荐、根据心情/时段推荐、每日推荐。若用户要求真实线上结果或本地结果不足，应先调用 search_web_music。",
+        "根据用户的品味档案和当前需求推荐音乐。适用于：用户想要新歌推荐、根据心情/时段推荐、每日推荐。默认应先调用 search_web_music 获取真实线上候选，再用本工具排序和解释。",
         {
             "query": {
                 "type": "string",
@@ -65,7 +65,7 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     ),
     _tool(
         TOOL_SEARCH,
-        "在本地音乐库和离线候选曲库中搜索匹配歌曲。适用于：用户找特定歌曲、特定歌手、特定关键词。若用户明确要求真实平台结果，应先调用 search_web_music。",
+        "搜索本地音乐库，并可补充离线 fallback。适用于：用户找特定歌曲、特定歌手、特定关键词。默认推荐先调用 search_web_music；本工具用于补充本地记忆和库内命中。",
         {
             "query": {
                 "type": "string",
@@ -81,7 +81,7 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     ),
     _tool(
         TOOL_PLAYLIST,
-        "根据用户指令生成一个主题歌单。适用于：用户明确说'做一个歌单'、'帮我整理'等。若用户给的是网易云歌单链接，应先调用 import_netease_playlist。",
+        "根据用户指令生成一个主题歌单。适用于：用户明确说'做一个歌单'、'帮我整理'等。生成前应尽量已有 search_web_music 或导入结果作为真实候选；若用户给的是网易云歌单链接，应先调用 import_netease_playlist。",
         {
             "instruction": {
                 "type": "string",
@@ -150,7 +150,7 @@ AGENT_TOOLS: list[dict[str, Any]] = [
     ),
     _tool(
         TOOL_WEB_MUSIC_SEARCH,
-        "联网搜索真实音乐或视频候选。适用于：用户要求真实曲目、最新内容、指定平台内容，或离线曲库不足。结果不可预知，调用后应根据 observation 决定是否 fetch metadata、推荐或生成歌单。",
+        "联网搜索真实音乐或视频候选。推荐、搜索、歌单任务默认优先调用本工具。结果不可预知，调用后应评估数量和质量；不足时换关键词继续搜索，足够时再推荐或生成歌单。",
         {
             "query": {"type": "string", "description": "搜索关键词，可以包含歌曲、歌手、场景或平台"},
             "top_k": {"type": "integer", "description": "返回数量，默认 5", "default": 5},

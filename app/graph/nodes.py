@@ -4,6 +4,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from app.context import ContextBudgetManager, ContextSource
+from app.config import settings
 from app.graph.tag_rules import extract_tags
 from app.llm.structured import extract_json_dict
 from app.models import AgentAnswer, AgentPlan, RetrievalPlan, StreamEvent
@@ -48,7 +49,8 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
 
 def plan_intent(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     query = state["query"]
-    plan = plan_with_llm(agent, query) or build_agent_plan(query)
+    history_text = (state.get("context") or {}).get("history_text", "")
+    plan = plan_with_llm(agent, query, history_text) or build_agent_plan(query)
     return {
         **state,
         "plan": plan,
@@ -183,7 +185,11 @@ def evaluate(agent: AudioVisualAgent, state: AgentState) -> AgentState:
 
 
 def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
-    answer_text = compose_answer(state["query"], state.get("results", []), state["plan"])
+    memory_query = (state.get("context") or {}).get("memory_query", "")
+    answer_text = compose_answer(
+        state["query"], state.get("results", []), state["plan"],
+        agent=agent, memory_query=memory_query,
+    )
     known = collect_known_titles(state.get("results", []))
     answer_text, removed = guard_answer(answer_text, known)
     memory_updated = agent.memory.auto_learn_from_turn(state["user_id"], state["query"], state.get("results", []))
@@ -211,13 +217,19 @@ def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     }
 
 
-def plan_with_llm(agent: AudioVisualAgent, query: str) -> AgentPlan | None:
+def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -> AgentPlan | None:
     """用 LLM 产出结构化 AgentPlan：LLM 判意图 + 抽实体，标签走确定性规则。
 
-    失败（解析错误 / LLM 不可用）返回 None，调用方降级到关键词 build_agent_plan。
+    history_text 非空时拼进 prompt，让意图规划理解多轮指代（如"再来几首"
+    需沿用上一轮的歌手/场景实体）。失败（解析错误 / LLM 不可用）返回 None，
+    调用方降级到关键词 build_agent_plan。
     """
     try:
-        raw = agent.llm.generate(query, system=QUERY_PLAN_SYSTEM, temperature=0.1)
+        if history_text.strip():
+            user_prompt = f"【最近对话】\n{history_text}\n\n【本轮输入】\n{query}"
+        else:
+            user_prompt = query
+        raw = agent.llm.generate(user_prompt, system=QUERY_PLAN_SYSTEM, temperature=0.1)
     except Exception:
         return None
     data = extract_json_dict(raw)
@@ -253,7 +265,7 @@ def plan_with_llm(agent: AudioVisualAgent, query: str) -> AgentPlan | None:
     )
 
 
-_VALID_INTENTS = {"recommend", "search", "playlist", "taste", "import", "journey", "chat"}
+_VALID_INTENTS = {"recommend", "search", "playlist", "taste", "import", "journey", "discuss", "chat"}
 
 
 def _tools_for_intent(intent: str, use_web: bool) -> list[str]:
@@ -263,6 +275,8 @@ def _tools_for_intent(intent: str, use_web: bool) -> list[str]:
         return ["taste"]
     if intent == "chat":
         return []
+    if intent == "discuss":
+        return ["web_music_search"] if use_web else []
     if intent == "import":
         return ["import"]
     if intent == "playlist":
@@ -278,6 +292,8 @@ def _strategy_for(intent: str, use_web: bool) -> str:
         return "memory_only"
     if intent == "chat":
         return "no_search"
+    if intent == "discuss":
+        return "online_first" if use_web else "no_search"
     return "online_first" if use_web else "library_first"
 
 
@@ -361,6 +377,21 @@ def build_agent_plan(query: str) -> AgentPlan:
             target_count=target,
             reasoning_summary="用户要推荐音乐，优先获取真实线上候选，再结合记忆排序。",
         )
+    # 音乐讨论/知识类问题：搜歌手真实曲目作为论据，再让 LLM 讨论
+    _DISCUSS_KEYWORDS = [
+        "牛逼", "怎么样", "评价", "介绍", "背景", "风格是", "什么水平", "好听吗",
+        "厉害", "经典", "代表", "值得听", "有什么歌", "有哪些歌", "成名曲",
+        "特色", "曲风", "地位", "影响", "怎么样", "如何看", "聊聊",
+        "和 ", " vs ", "对比", "谁的", "专辑", "出道", "代表作",
+    ]
+    if any(kw in query for kw in _DISCUSS_KEYWORDS):
+        return AgentPlan(
+            intent="discuss",
+            tools_needed=["web_music_search"],
+            online_required=True,
+            reasoning_summary="音乐讨论，联网搜歌手真实曲目作为讨论论据。",
+            retrieval_plan=_keyword_retrieval_plan(query, use_web=True),
+        )
     return AgentPlan(
         intent="chat",
         strategy="no_search",
@@ -383,12 +414,18 @@ def _completed_actions(results: list[dict[str, Any]]) -> list[str]:
     return [mapping.get(result.get("type", ""), result.get("type", "")) for result in results]
 
 
-def compose_answer(query: str, results: list[dict[str, Any]], plan: AgentPlan) -> str:
+def compose_answer(
+    query: str,
+    results: list[dict[str, Any]],
+    plan: AgentPlan,
+    agent: AudioVisualAgent | None = None,
+    memory_query: str = "",
+) -> str:
     if plan.intent == "chat":
-        return (
-            "你好，我在。你可以直接给我一个音乐目标，比如“帮我做 30 首 chill 歌单”、"
-            "“找 Asen 风格的 R&B”或者“做一个跑步热身到冲刺的音乐旅程”。"
-        )
+        return _compose_chat_response(query, agent) or "你好，我在。有什么音乐上的事可以帮你?"
+    if plan.intent == "discuss":
+        tracks = _collect_tracks(results)
+        return _compose_discussion(query, tracks, agent) or "抱歉，我暂时无法讨论这个话题。"
     if plan.intent == "taste":
         return next((r["summary"] for r in results if r.get("type") == "taste"), "还没有足够品味数据。")
     if plan.intent == "journey":
@@ -405,14 +442,104 @@ def compose_answer(query: str, results: list[dict[str, Any]], plan: AgentPlan) -
         return "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。"
     if plan.target_count:
         tracks = tracks[: plan.target_count]
-    intro = f"我按在线优先策略整理了 {len(tracks)} 个可追溯候选："
-    if plan.target_count and len(tracks) < plan.target_count:
-        intro += f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
+    shortfall = bool(plan.target_count and len(tracks) < plan.target_count)
+    # 引言：优先让 LLM 结合记忆生成有温度的开场；失败回退确定性模板。
+    # 歌曲清单始终由真实候选确定性拼接——LLM 绝不参与歌名生成（防幻觉）。
+    intro = _compose_intro(query, tracks, plan, agent, memory_query, shortfall)
     lines = [
         f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}（{getattr(track, 'source', 'local')}）"
         for idx, track in enumerate(tracks[: plan.target_count or 12], start=1)
     ]
     return intro + "\n" + "\n".join(lines)
+
+
+def _compose_intro(
+    query: str,
+    tracks: list[Any],
+    plan: AgentPlan,
+    agent: AudioVisualAgent | None,
+    memory_query: str,
+    shortfall: bool,
+) -> str:
+    """生成推荐引言。LLM 可用时结合记忆个性化，否则用确定性模板。"""
+    fallback = f"我按在线优先策略整理了 {len(tracks)} 个可追溯候选："
+    if shortfall:
+        fallback += f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
+
+    if agent is None or getattr(agent, "llm", None) is None:
+        return fallback
+
+    titles_preview = "、".join(getattr(t, "title", "") for t in tracks[:5])
+    mem_hint = f"用户偏好：{memory_query[:150]}" if memory_query else "暂无明确偏好记录"
+    prompt = (
+        f"用户请求：{query}\n"
+        f"我已找到 {len(tracks)} 首真实候选，前几首：{titles_preview}\n"
+        f"{mem_hint}\n\n"
+        "请写一句自然、简短（40字内）的推荐开场白，体现你理解了用户的需求和偏好。"
+        "不要列歌名，不要编造任何歌曲，不要用书名号。只输出这一句话。"
+    )
+    try:
+        text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+    except Exception:
+        return fallback
+    # LLM 兜底：异常输出（空/过长/含书名号疑似编造歌名）一律回退模板
+    if not text or len(text) > 120 or "《" in text:
+        return fallback
+    if shortfall:
+        text += f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
+    return text
+
+
+def _compose_chat_response(query: str, agent: AudioVisualAgent | None) -> str | None:
+    """让 LLM 自然回复寒暄/闲聊，而非返回硬编码模板。"""
+    if agent is None or getattr(agent, "llm", None) is None:
+        return None
+    prompt = (
+        f"用户说：{query}\n\n"
+        "你是用户的私人音乐搭子，用中文自然简短地回复。"
+        "如果用户只是在打招呼，友好回应并提示你可以帮他做什么音乐相关的事。"
+        "不要每次用同一句话。20字以内。"
+    )
+    try:
+        text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+    except Exception:
+        return None
+    if not text or len(text) > 200:
+        return None
+    return text
+
+
+def _compose_discussion(
+    query: str,
+    tracks: list[Any],
+    agent: AudioVisualAgent | None,
+) -> str | None:
+    """让 LLM 基于搜到的真实曲目 + 自身知识自然讨论音乐话题。"""
+    if agent is None or getattr(agent, "llm", None) is None:
+        return None
+    track_hint = ""
+    if tracks:
+        items = []
+        for t in tracks[:8]:
+            title = getattr(t, "title", "")
+            artist = getattr(t, "artist", "") or ""
+            items.append(f"《{title}》{artist}")
+        track_hint = f"已搜到该歌手/专辑的真实曲目：{'、'.join(items)}\n"
+    prompt = (
+        f"{track_hint}"
+        f"用户问：{query}\n\n"
+        "请用中文自然地回答，像一个懂音乐的朋友在聊天。"
+        "可以讲风格特点、代表作品、在音乐圈的地位、适合听什么场景等。"
+        "如果搜到了真实曲目，可以挑几首重点推荐并说明理由。"
+        "不要编造不存在的歌名。40-200字。"
+    )
+    try:
+        text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+    except Exception:
+        return None
+    if not text or len(text) > 500:
+        return None
+    return text
 
 
 def collect_known_titles(results: list[dict[str, Any]]) -> set[str]:

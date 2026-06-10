@@ -11,6 +11,8 @@ import pytest
 os.environ["LLM_API_KEY"] = ""
 os.environ.setdefault("LLM_TIMEOUT_SECONDS", "1")
 os.environ.setdefault("RESOURCE_LIBRARY_PATH", "data/test_resource_library.sqlite")
+# 外部源默认已改为真实网易云源（NeteaseSource）；测试需离线确定，强制用 mock 目录。
+os.environ["EXTERNAL_SOURCE"] = "mock"
 
 
 @pytest.fixture(autouse=True)

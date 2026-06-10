@@ -14,8 +14,14 @@ class Settings:
         self.llm_api_key: str = os.getenv("LLM_API_KEY", "")
         self.llm_model: str = os.getenv("LLM_MODEL", "qwen2.5")
         self.llm_timeout_seconds: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
-        self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "1024"))
-        self.external_source: str = os.getenv("EXTERNAL_SOURCE", "mock")
+        # 推理模型（deepseek-v4-flash 等）会先消耗 token 做推理，再产出 content。
+        # 1024 容易被推理吃光导致 content 为空，故默认提到 2048。
+        self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+        # 温度三档：结构化任务要稳定、对话要自然、生成文案要有变化。
+        self.struct_task_temperature: float = float(os.getenv("STRUCT_TASK_TEMPERATURE", "0.1"))
+        self.dialog_temperature: float = float(os.getenv("DIALOG_TEMPERATURE", "0.6"))
+        self.generation_temperature: float = float(os.getenv("GENERATION_TEMPERATURE", "0.7"))
+        self.external_source: str = os.getenv("EXTERNAL_SOURCE", "netease")
         self.store_root: str = os.getenv("STORE_ROOT", "data/store")
         self.media_root: str = os.getenv("MEDIA_ROOT", "data/media")
         self.resource_library_path: str = os.getenv("RESOURCE_LIBRARY_PATH", "data/resource_library.sqlite")
@@ -33,6 +39,15 @@ class Settings:
         # Thompson Sampling 探索：尾部候选中用于探索的比例。
         self.exploration_ratio: float = float(os.getenv("EXPLORATION_RATIO", "0.2"))
         self.enable_rerank: bool = os.getenv("ENABLE_RERANK", "true").lower() == "true"
+
+        # ---- Bot 适配器配置（留空禁用） ----
+        self.feishu_app_id: str = os.getenv("FEISHU_APP_ID", "")
+        self.feishu_app_secret: str = os.getenv("FEISHU_APP_SECRET", "")
+        self.feishu_verification_token: str = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+        self.feishu_encrypt_key: str = os.getenv("FEISHU_ENCRYPT_KEY", "")
+        self.wechat_token: str = os.getenv("WECHAT_TOKEN", "")
+        self.wechat_app_id: str = os.getenv("WECHAT_APP_ID", "")
+        self.wechat_app_secret: str = os.getenv("WECHAT_APP_SECRET", "")
 
     @property
     def mock_mode(self) -> bool:

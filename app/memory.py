@@ -26,6 +26,12 @@ PREFERENCE_PATTERNS = [
     re.compile(r"(?:喜欢|偏好|更想要|更喜欢|爱听)(.+)"),
 ]
 
+# 负面偏好提取：匹配"不要/别推/讨厌/不喜欢"等 + 后续的风格/类型词
+NEGATIVE_PREFERENCE_PATTERNS = [
+    re.compile(r"(?:不要|别推|讨厌|不喜欢|排除|过滤|少推|别给我|别再|不想听)\s*(.+)"),
+    re.compile(r"(?:no\s+|don'?t\s+(?:want|like|give)\s+)(.+)", re.IGNORECASE),
+]
+
 GOAL_KEYWORDS = ["目标", "任务", "帮我", "导入", "歌单", "先", "然后", "再", "跑步", "整理"]
 
 ACTION_TO_GOAL_STEP = {
@@ -105,6 +111,44 @@ class MemoryManager:
         memory.updated_at = utc_now_iso()
         self.store.write_model("memory", user_id, memory)
         return memory
+
+    @staticmethod
+    def _extract_negative_preference(query: str) -> str | None:
+        """从用户输入中提取负面偏好（如"不要抖音热歌"→"抖音热歌"）。"""
+        for pat in NEGATIVE_PREFERENCE_PATTERNS:
+            m = pat.search(query)
+            if m:
+                text = m.group(1).strip().rstrip("的了着过")
+                if text and 2 <= len(text) <= 20:
+                    return text
+        return None
+
+    def add_exclusion(self, user_id: str, rule: str) -> bool:
+        """添加一条排除规则。已存在则返回 False。"""
+        rule = rule.strip()
+        if not rule:
+            return False
+        memory = self.get_memory(user_id)
+        if rule in memory.exclusion_rules:
+            return False
+        memory.exclusion_rules.append(rule)
+        memory.updated_at = utc_now_iso()
+        self.store.write_model("memory", user_id, memory)
+        return True
+
+    def remove_exclusion(self, user_id: str, rule: str) -> bool:
+        """删除一条排除规则。不存在则返回 False。"""
+        memory = self.get_memory(user_id)
+        if rule not in memory.exclusion_rules:
+            return False
+        memory.exclusion_rules.remove(rule)
+        memory.updated_at = utc_now_iso()
+        self.store.write_model("memory", user_id, memory)
+        return True
+
+    def list_exclusions(self, user_id: str) -> list[str]:
+        """返回用户的排除规则列表。"""
+        return list(self.get_memory(user_id).exclusion_rules)
 
     def record_listen(self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None) -> UserMemory:
         memory = self.get_memory(user_id)
@@ -187,6 +231,15 @@ class MemoryManager:
             repeat = max(1, int(weight * 2))
             parts.extend([entry.text] * repeat)
         parts.extend(memory.common_goals[-3:])
+        # 关键修复：把从上传/收听歌曲算出的品味档案也带进查询。
+        # 否则用户上传一堆 Beatles（taste=摇滚），推荐查询却完全不含"摇滚"，
+        # 在线搜索只能返回与泛化词匹配的热门垃圾。
+        taste = memory.taste_profile
+        if taste:
+            for genre, _ in taste.top_genres[:3]:
+                parts.append(genre)
+            for mood, _ in taste.top_moods[:2]:
+                parts.append(mood)
         return " ".join(parts)
 
     def auto_learn_from_turn(self, user_id: str, query: str, results: list[dict[str, Any]]) -> bool:
@@ -201,6 +254,12 @@ class MemoryManager:
             if explicit not in memory.preferences:
                 memory.preferences.append(explicit)
                 changed = True
+
+        # 负面偏好提取：用户说"不要抖音热歌""别推孟菲斯说唱"等
+        negative = self._extract_negative_preference(query)
+        if negative and negative not in memory.exclusion_rules:
+            memory.exclusion_rules.append(negative)
+            changed = True
 
         inferred = infer_preferences_from_results(query, results)
         for item in inferred:

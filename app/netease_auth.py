@@ -190,10 +190,13 @@ def _api_get(url: str, cookie: str = "") -> dict | None:
 def fetch_playlist_tracks(playlist_id: str, cookie: str = "", limit: int = 200) -> dict:
     """拉取歌单的全部曲目。
 
-    返回 ``{"name": str, "tracks": [{"song_id","title","artist","album",
-    "cover","duration"}], "total": int}``。失败时 tracks 为空列表。
+    返回 ``{"name": str, "tags": [str], "tracks": [{"song_id","title","artist",
+    "album","cover","duration"}], "total": int}``。失败时 tracks 为空列表。
+
+    tags 是歌单本身的分类标签（如 ["R&B/Soul", "欧美"]）——网易云歌曲级 API
+    不返回曲风，但歌单级 tags 常带风格线索，导入时用作整单曲风兜底。
     """
-    out: dict = {"name": "", "tracks": [], "total": 0}
+    out: dict = {"name": "", "tags": [], "tracks": [], "total": 0}
     detail = _api_get(
         f"https://music.163.com/api/v6/playlist/detail?id={playlist_id}&n=1000",
         cookie,
@@ -202,6 +205,7 @@ def fetch_playlist_tracks(playlist_id: str, cookie: str = "", limit: int = 200) 
         return out
     pl = detail.get("playlist") or {}
     out["name"] = pl.get("name", "")
+    out["tags"] = [t for t in (pl.get("tags") or []) if t]
     track_ids = [str(t.get("id")) for t in (pl.get("trackIds") or []) if t.get("id")]
     out["total"] = len(track_ids)
     track_ids = track_ids[:limit]

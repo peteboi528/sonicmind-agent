@@ -35,6 +35,45 @@ def search_netease(query: str) -> str | None:
     return None
 
 
+def search_netease_many(query: str, limit: int = 20) -> list[dict[str, Any]]:
+    """搜索网易云，返回多条真实曲目元数据（用于推荐/歌单候选）。
+
+    每项 {"song_id","title","artist","album","cover"}。失败返回空列表。
+    """
+    search_url = (
+        "https://music.163.com/api/search/get/web"
+        f"?s={urllib.parse.quote(query)}&type=1&limit={limit}&offset=0"
+    )
+    try:
+        req = urllib.request.Request(search_url, headers=_HEADERS)
+        with urllib.request.urlopen(req, timeout=8) as response:
+            data = json.loads(response.read().decode())
+        songs = data.get("result", {}).get("songs", []) or []
+    except Exception:
+        logger.debug("NetEase multi-search failed for %s", query, exc_info=True)
+        return []
+
+    results: list[dict[str, Any]] = []
+    for song in songs:
+        name = (song.get("name") or "").strip()
+        if not name:
+            continue
+        artists = "、".join(
+            a.get("name", "").strip()
+            for a in (song.get("artists") or song.get("ar") or [])
+            if a.get("name")
+        )
+        album = song.get("album") or song.get("al") or {}
+        results.append({
+            "song_id": str(song.get("id")),
+            "title": name,
+            "artist": artists,
+            "album": (album.get("name") or "").strip() or None,
+            "cover": album.get("picUrl"),
+        })
+    return results
+
+
 def search_netease_detail(query: str) -> dict[str, Any] | None:
     """Search NetEase and return verified track metadata."""
     song_id = search_netease(query)

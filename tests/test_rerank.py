@@ -62,8 +62,8 @@ def test_breakdown_has_components():
 # ---- MMR 多样性 ----
 
 def test_mmr_promotes_diversity():
-    taste = TasteProfile(top_genres=[("R&B", 1.0)], top_moods=[("放松", 1.0)])
-    # 三首高分同质（都 R&B/放松），一首异质（电子/激昂）但分稍低
+    taste = TasteProfile(top_genres=[("R&B", 1.0), ("电子", 0.8)], top_moods=[("放松", 1.0), ("激昂", 0.8)])
+    # 三首同质（都 R&B/放松），一首相关但不同风格（电子/激昂，也在口味里）
     tracks = [
         _track("RB1", ["R&B"], ["放松"]),
         _track("RB2", ["R&B"], ["放松"]),
@@ -73,8 +73,26 @@ def test_mmr_promotes_diversity():
     scored = tri_anchor_rerank("chill", tracks, PreferenceProfile.from_taste(taste))
     diversified = mmr_rerank(scored, top_k=2, lambda_=0.5)
     titles = [t.title for t, _ in diversified]
-    # 第二首应换成异质的 EDM，而非又一首 R&B
+    # 第二首应换成相关但异质的 EDM，而非又一首同质 R&B
     assert "EDM" in titles
+
+
+def test_mmr_does_not_let_irrelevant_leapfrog_relevant():
+    """回归：低相关的噪声候选不得靠'多样性'反超明显更相关的候选。
+
+    复现用户 bug——上传摇滚后，无关垃圾被 MMR 插到真实摇滚候选前面。
+    """
+    taste = TasteProfile(top_genres=[("摇滚", 1.0)], top_moods=[("励志", 1.0)])
+    tracks = [
+        _track("英伦摇滚合集", ["摇滚"], ["励志"]),
+        _track("辣条史诗噪声", [], []),  # 零相关垃圾
+        _track("摇滚现场", ["摇滚"], ["励志"]),
+    ]
+    scored = tri_anchor_rerank("摇滚", tracks, PreferenceProfile.from_taste(taste))
+    diversified = mmr_rerank(scored, top_k=3, lambda_=0.7)
+    titles = [t.title for t, _ in diversified]
+    # 两首摇滚都必须排在垃圾之前
+    assert titles.index("辣条史诗噪声") == 2
 
 
 def test_rerank_candidates_respects_top_k():

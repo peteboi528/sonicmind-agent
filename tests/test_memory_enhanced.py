@@ -61,3 +61,33 @@ def test_feedback_reinforces_preference(tmp_path):
         memory = agent.memory.get_memory("test-user")
         entry = next(e for e in memory.structured_preferences if "cinematic tension" in e.text)
         assert entry.frequency >= 2
+
+
+def test_weighted_query_includes_taste_profile(tmp_path):
+    """回归：上传歌曲算出的品味档案必须进入推荐查询。
+
+    历史 bug：weighted_query 只读 structured_preferences，无视 taste_profile，
+    导致用户上传一堆摇滚后，在线推荐查询完全不含'摇滚'，只能返回泛化垃圾。
+    """
+    from app.models import Asset, TasteProfile, UserMemory
+
+    agent = CineSonicAgent(JsonStore(tmp_path / "store"))
+    memory = UserMemory(
+        user_id="u1",
+        taste_profile=TasteProfile(
+            top_genres=[("摇滚", 12.0), ("英伦摇滚", 12.0)],
+            top_moods=[("励志", 12.0)],
+        ),
+    )
+    query = agent.memory.weighted_query(memory)
+    assert "摇滚" in query
+    assert "英伦摇滚" in query
+    assert "励志" in query
+
+
+def test_weighted_query_empty_without_any_signal(tmp_path):
+    """无偏好无品味时返回空串（不崩）。"""
+    from app.models import UserMemory
+
+    agent = CineSonicAgent(JsonStore(tmp_path / "store"))
+    assert agent.memory.weighted_query(UserMemory(user_id="u2")) == ""

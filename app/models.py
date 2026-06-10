@@ -118,6 +118,7 @@ class UserMemory(BaseModel):
     listening_history: list[ListeningEvent] = Field(default_factory=list)
     ratings: list["RatingEntry"] = Field(default_factory=list)
     dislikes: list[str] = Field(default_factory=list)
+    exclusion_rules: list[str] = Field(default_factory=list)  # 用户明确排除的风格/类型，如 ["抖音热歌", "中文孟菲斯说唱"]
     taste_profile: TasteProfile | None = None
     daily_rec_last_generated: str | None = None
     updated_at: str = Field(default_factory=utc_now_iso)
@@ -131,6 +132,8 @@ class AgentAnswer(BaseModel):
     agent_trace: list[str] = Field(default_factory=list)
     pending_goal: str | None = None
     goal_progress: list[str] = Field(default_factory=list)
+    # 标记本轮是否走了降级路径（LLM 失败 → 关键词/模板兜底），便于排查"对话僵硬"。
+    fallback_reason: str | None = None
 
 
 class IngestRequest(BaseModel):
@@ -289,6 +292,9 @@ class ExternalTrack(BaseModel):
     preview_url: str | None = None
     playback_url: str | None = None
     source: str = "mock"
+    # 候选类型：track=单曲 / mv=单曲MV或现场（可播，保留）/
+    # compilation=合集连播串烧（污染源，过滤掉）。
+    candidate_kind: Literal["track", "mv", "compilation"] = "track"
 
 
 TrackOrigin = Literal["local", "netease", "bilibili", "youtube", "mock", "llm_guess"]

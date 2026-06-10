@@ -57,3 +57,29 @@ def test_keeps_playlist_names_in_book_marks():
     assert "《成都》" in cleaned
     assert "《不存在》" not in cleaned
     assert removed == ["不存在"]
+
+
+def test_removes_quoted_hallucination_without_bookmarks():
+    """纵深防御：LLM 不用书名号、改用引号提编造歌名，也要拦下。"""
+    known = {"Blinding Lights"}
+    answer = '为你挑了 "Blinding Lights" 和 "Fake Song" 两首。'
+    cleaned, removed = guard_answer(answer, known)
+    assert "Fake Song" in removed
+    assert "Blinding Lights" in cleaned
+    assert "Fake Song" not in cleaned
+
+
+def test_quoted_known_title_kept():
+    known = {"Save Your Tears"}
+    answer = 'The Weeknd 的 "Save Your Tears" 很适合。'
+    cleaned, removed = guard_answer(answer, known)
+    assert removed == []
+    assert "Save Your Tears" in cleaned
+
+
+def test_quoted_long_sentence_not_treated_as_song():
+    """引号里是长句/带句末标点 → 不当歌名，避免误伤。"""
+    known = set()
+    answer = '他说"今天天气真好，我们出去走走吧。"然后就走了。'
+    cleaned, removed = guard_answer(answer, known)
+    assert removed == []

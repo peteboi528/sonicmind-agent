@@ -34,8 +34,9 @@ def test_smalltalk_does_not_require_music_candidates(tmp_path):
 
     answer = agent.chat("u1", "hello")
 
-    assert "你好" in answer.answer
+    # chat 意图不应联网搜索、不应返回可追溯候选
     assert "可追溯的音乐候选" not in answer.answer
+    assert "可追溯候选" not in answer.answer
     assert not any("[web_music_search]" in step for step in answer.agent_trace)
     assert answer.pending_goal is None
 

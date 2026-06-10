@@ -133,7 +133,11 @@ class ReActLoop:
             except Exception as exc:
                 last_exc = exc
         assert last_exc is not None
-        return self._legacy_run(user_id, asset_id, query, top_k, history, last_exc, goal)
+        logger.warning("ReAct tool-calling loop failed twice, degrading to legacy: %s", last_exc)
+        answer = self._legacy_run(user_id, asset_id, query, top_k, history, last_exc, goal)
+        # 标记降级：让上层和排查者知道这轮没走 LLM 主路径（"对话僵硬"常源于此）。
+        answer.fallback_reason = f"tool_calling_loop 连续失败，已降级到关键词路径：{last_exc}"
+        return answer
 
     # =============================================================
     # 新流程：真 ReAct + tool calling
@@ -231,14 +235,21 @@ class ReActLoop:
                     "tool_call_id": tc.id,
                     "content": (obs_text + eval_hint)[:1800],  # 限制 observation 长度防爆 context
                 })
-            if _playlist_target_satisfied(query, results):
-                final_answer = self._compose_from_results(query, results, history)
+            if _playlist_target_satisfied(query, results) and not _target_hint_sent(messages):
+                # 以前这里硬 break + 模板兜底，剥夺了 LLM 的收尾表达权。
+                # 改为给 LLM 一条提示：目标数量已满足，请基于已有候选自然收尾，
+                # 不要再调用工具。LLM 下一轮就会停止调用工具并生成自然语言答案
+                # （由 MAX_REACT_STEPS 兜底防止无限循环）。
+                messages.append({
+                    "role": "user",
+                    "content": "（系统提示）候选数量已满足你的目标，请不要再调用工具，"
+                               "直接基于已有候选给我一个自然、有判断力的最终推荐回答。",
+                })
                 steps.append(ReActStep(
-                    thought="歌单数量目标已满足，提前收尾。",
-                    action="finalize",
-                    observation="避免继续重复搜索或超出最大步数。",
+                    thought="歌单数量目标已满足，提示 LLM 自然收尾。",
+                    action="eval",
+                    observation="已通知 LLM 停止调用工具并整合答案。",
                 ))
-                break
 
         else:
             steps.append(ReActStep(
@@ -248,13 +259,24 @@ class ReActLoop:
             ))
 
         # 如果 LLM 没给出最终答案（被截断或 max_steps），用结构化整合兜底
+        llm_answered = bool(final_answer)
         if not final_answer:
             final_answer = self._compose_from_results(query, results, history)
         final_answer = _append_progress_note(final_answer, query, results)
 
         known_titles = _collect_known_titles(results)
+        # 音乐类查询：以前无条件用模板覆盖 LLM 输出（"对话僵硬"的核心原因）。
+        # 现在分两种情况：
+        #  - LLM 没给出充分自然语言 → 用 grounded 模板兜底（保证有可追溯结果）；
+        #  - LLM 给了充分回答 → 保留 LLM 原文，把可追溯歌曲清单作为附录拼接，
+        #    既保住自然表达，又不丢真实候选。
         if _should_use_grounded_music_answer(query, results):
-            final_answer = _grounded_music_answer(query, results)
+            if llm_answered and _is_substantial_answer(final_answer):
+                appendix = _grounded_track_list(query, results)
+                if appendix:
+                    final_answer = f"{final_answer}\n\n{appendix}"
+            else:
+                final_answer = _grounded_music_answer(query, results)
 
         # Answer Guard：剔除答案里追溯不到任何工具结果的幻觉歌名
         final_answer, hallucinated = guard_answer(final_answer, known_titles)
@@ -670,6 +692,46 @@ def _should_use_grounded_music_answer(query: str, results: list[dict[str, Any]])
     return music_intent and has_music_results
 
 
+def _is_substantial_answer(answer: str) -> bool:
+    """判断 LLM 的最终回答是否够充分（值得保留而非被模板覆盖）。
+
+    经验阈值：去掉进度备注等装饰后，正文 ≥ 40 字才算 LLM 真的说了点东西。
+    过短（如 "好的"、空话）则视为不充分，交给 grounded 模板兜底。
+    """
+    if not answer:
+        return False
+    stripped = answer.strip()
+    return len(stripped) >= 40
+
+
+def _grounded_track_list(query: str, results: list[dict[str, Any]]) -> str:
+    """生成可追溯歌曲清单（作为 LLM 自然语言回答的附录）。
+
+    只列出真实平台候选，不含模板化的"我优先采用..."开场白和"我的判断"——
+    那些由 LLM 自己的回答承担。无候选时返回空串（不打扰 LLM 的回答）。
+    """
+    target = _infer_requested_count(query)
+    tracks = _dedupe_candidates(_collect_track_candidates(results))
+    verified = [t for t in tracks if getattr(t, "source", "") in {"netease", "bilibili", "youtube"}]
+    fallback = [
+        t for t in tracks
+        if "fallback" in getattr(t, "source", "") or getattr(t, "source", "") in {"mock", "llm"}
+    ]
+    local = [t for t in tracks if getattr(t, "source", "local") == "local"]
+    selected = [*verified, *fallback, *local]
+    if target:
+        selected = selected[:target]
+    if not selected:
+        return ""
+    lines = ["📋 可追溯候选："]
+    for index, track in enumerate(selected[: max(target or 8, 8)], start=1):
+        title = getattr(track, "title", "")
+        artist = getattr(track, "artist", "") or "未知"
+        source_label = _source_label(getattr(track, "source", "local"))
+        lines.append(f"{index}. 《{title}》 - {artist}（{source_label}）")
+    return "\n".join(lines)
+
+
 def _grounded_music_answer(query: str, results: list[dict[str, Any]]) -> str:
     target = _infer_requested_count(query)
     tracks = _collect_track_candidates(results)
@@ -895,6 +957,14 @@ def _playlist_target_satisfied(query: str, results: list[dict[str, Any]]) -> boo
     return False
 
 
+def _target_hint_sent(messages: list[dict[str, Any]]) -> bool:
+    """是否已向 LLM 发过"目标已满足"提示，避免每步重复发。"""
+    return any(
+        m.get("role") == "user" and "候选数量已满足" in (m.get("content") or "")
+        for m in messages
+    )
+
+
 def _collect_known_titles(results: list[dict[str, Any]]) -> set[str]:
     """从工具结果里收集所有"可追溯"的真实曲目标题，构成 Answer Guard 白名单。
 
@@ -968,6 +1038,25 @@ def guard_answer(answer: str, known_titles: set[str]) -> tuple[str, list[str]]:
         return ""  # 直接删除未经核实的歌名
 
     cleaned = re.sub(r"《([^》]+)》", _replace, answer)
+
+    # 纵深防御：英文/中文引号包裹的疑似歌名也校验（LLM 自由生成文案时
+    # 可能不用书名号提歌名，绕过上面的 《》 扫描）。仅当被引内容像歌名
+    # （短、不含句末标点）才判定，避免误伤普通引用。
+    quoted_src = cleaned
+
+    def _replace_quoted(match: re.Match[str]) -> str:
+        name = match.group(1).strip()
+        if not name or len(name) > 40 or any(p in name for p in "。！？.!?，,；;\n"):
+            return match.group(0)
+        prefix = quoted_src[max(0, match.start() - 8):match.start()]
+        if any(token in prefix for token in ["歌单", "专辑", "报告", "列表", "标题", "需求", "请求"]):
+            return match.group(0)
+        if _is_known(name):
+            return match.group(0)
+        hallucinated.append(name)
+        return ""
+
+    cleaned = re.sub(r'[“"\']([^”"\'\n]+)[”"\']', _replace_quoted, quoted_src)
     cleaned = re.sub(r"[、，,]\s*(?=[、，,。；;])", "", cleaned)  # 清理删除后残留的孤立标点
     cleaned = re.sub(r"[^\S\r\n]{2,}", " ", cleaned).strip()
     return cleaned, hallucinated

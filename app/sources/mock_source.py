@@ -77,9 +77,39 @@ CATALOG_DATA_2: list[tuple[str, str, str, list[str], list[str], int, float]] = [
     ("Autumn Leaves", "Bill Evans", "Portrait in Jazz", ["爵士"], ["伤感", "宁静"], 100, 0.3),
 ]
 
+# R&B / Soul 专区：用户曲库以英文 R&B 为主，单独补一批真实曲目，
+# 让推荐在该方向有足够候选，也平衡 catalog 的语言分布（英文占比更高）。
+CATALOG_RNB: list[tuple[str, str, str, list[str], list[str], int, float]] = [
+    ("Blinding Lights", "The Weeknd", "After Hours", ["R&B", "流行"], ["热血", "浪漫"], 171, 0.85),
+    ("Earned It", "The Weeknd", "Fifty Shades of Grey", ["R&B"], ["浪漫", "伤感"], 122, 0.5),
+    ("Often", "The Weeknd", "Beauty Behind the Madness", ["R&B"], ["放松", "孤独"], 92, 0.45),
+    ("Save Your Tears", "The Weeknd", "After Hours", ["R&B", "流行"], ["伤感", "欢快"], 118, 0.7),
+    ("Adorn", "Miguel", "Kaleidoscope Dream", ["R&B"], ["浪漫", "放松"], 110, 0.55),
+    ("Sure Thing", "Miguel", "All I Want Is You", ["R&B"], ["浪漫"], 80, 0.45),
+    ("Best Part", "Daniel Caesar", "Freudian", ["R&B"], ["浪漫", "治愈"], 70, 0.35),
+    ("Get You", "Daniel Caesar", "Freudian", ["R&B"], ["浪漫", "放松"], 110, 0.4),
+    ("Nights", "Frank Ocean", "Blonde", ["R&B"], ["孤独", "放松"], 88, 0.5),
+    ("Pink + White", "Frank Ocean", "Blonde", ["R&B"], ["治愈", "放松"], 80, 0.45),
+    ("Thinkin Bout You", "Frank Ocean", "Channel Orange", ["R&B"], ["伤感", "浪漫"], 132, 0.4),
+    ("Snooze", "SZA", "SOS", ["R&B"], ["浪漫", "放松"], 143, 0.5),
+    ("Good Days", "SZA", "SOS", ["R&B"], ["治愈", "放松"], 121, 0.45),
+    ("Kill Bill", "SZA", "SOS", ["R&B", "流行"], ["伤感", "欢快"], 89, 0.55),
+    ("Location", "Khalid", "American Teen", ["R&B"], ["放松", "浪漫"], 89, 0.4),
+    ("Redbone", "Childish Gambino", "Awaken, My Love!", ["R&B"], ["放松", "孤独"], 80, 0.45),
+    ("Cranes in the Sky", "Solange", "A Seat at the Table", ["R&B"], ["伤感", "宁静"], 100, 0.35),
+    ("Passionfruit", "Drake", "More Life", ["R&B", "流行"], ["放松", "浪漫"], 112, 0.5),
+    ("Come Through and Chill", "Miguel", "War & Leisure", ["R&B"], ["放松", "浪漫"], 75, 0.4),
+    ("Cranes", "Masego", "Lady Lady", ["R&B", "爵士"], ["放松", "欢快"], 95, 0.5),
+    ("特别的人", "方大同", "未来", ["R&B"], ["浪漫", "治愈"], 96, 0.55),
+    ("Love Song", "方大同", "爱爱爱", ["R&B"], ["浪漫"], 88, 0.5),
+    ("小方", "陶喆", "太平盛世", ["R&B"], ["欢快", "治愈"], 100, 0.6),
+    ("普通朋友", "陶喆", "I'm OK", ["R&B"], ["伤感"], 84, 0.45),
+    ("爱很简单", "陶喆", "David Tao", ["R&B"], ["浪漫", "治愈"], 72, 0.4),
+]
+
 
 def _build_catalog() -> list[ExternalTrack]:
-    all_data = CATALOG_DATA + CATALOG_DATA_2
+    all_data = CATALOG_DATA + CATALOG_DATA_2 + CATALOG_RNB
     catalog: list[ExternalTrack] = []
     for title, artist, album, genres, moods, bpm, energy in all_data:
         ext_id = hashlib.sha1(f"{title}-{artist}".encode()).hexdigest()[:10]

@@ -70,3 +70,15 @@ def test_api_flow():
     clear_cache = client.delete("/cache?preserve_memory=false")
     assert clear_cache.status_code == 200
     assert "assets" in clear_cache.json()["cleared"]
+
+
+def test_ingest_full_runs_three_steps():
+    """ingest_full 必须串起 ingest→enrich→analyze（修复 Web 入库只调一步、歌曲不识别的回归）。"""
+    client = TestClient(app)
+    resp = client.post("/assets/ingest_full", json={"url": "https://example.com/full-test"})
+    assert resp.status_code == 200
+    asset = resp.json()
+    assert asset["asset_id"]
+    # analyze 步骤跑过 → 状态应为 analyzed（而非停在 ingested 占位）
+    assert asset["status"] == "analyzed"
+    client.delete(f"/assets/{asset['asset_id']}")

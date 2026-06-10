@@ -7,3 +7,8 @@ __pycache__/
 data/
 artifacts/
 .env
+
+# 前端：依赖与缓存不入库，但 app/web/dist 构建产物要提交（部署无需 node）
+frontend/node_modules/
+frontend/.vite/
+.idea/

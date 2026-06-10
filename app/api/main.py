@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
 
 from app.agent import AudioVisualAgent
@@ -32,7 +33,29 @@ app = FastAPI(
     description="音视频内容分析、个性化推荐、每日歌单、LLM 语义搜索。",
     version="0.3.0",
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 agent = AudioVisualAgent()
+
+# ---- 挂载 Web 前端 & Bot 路由 ----
+from app.api.web_routes import router as _web_router
+app.include_router(_web_router)
+
+try:
+    from app.api.bot_routes import router as _bot_router
+    app.include_router(_bot_router)
+except ImportError:
+    pass  # bot_routes 尚未创建时不报错
+
+try:
+    from app.api.auth_routes import router as _auth_router
+    app.include_router(_auth_router)
+except ImportError:
+    pass  # auth_routes 尚未创建时不报错
 
 
 @app.get("/")
@@ -69,6 +92,27 @@ def list_assets():
 @app.post("/assets/ingest")
 def ingest(request: IngestRequest):
     asset = agent.ingest_video(request.url, force_refresh=request.force_refresh)
+    return asset
+
+
+@app.post("/assets/ingest_full")
+def ingest_full(request: IngestRequest):
+    """完整入库：解析 URL → 联网识别歌名歌手 → 生成片段/曲风。
+
+    Web 前端用这一个调用复刻 Streamlit 的三步流程（之前 Web 只调 ingest，
+    导致入库的音视频停在占位标题、未识别——本端点修复该回归）。
+    enrich 失败不阻断（标题至少有 URL 解析的结果），analyze 仍会执行。
+    """
+    asset = agent.ingest_video(request.url, force_refresh=request.force_refresh)
+    try:
+        enriched = agent.enrich_asset(asset.asset_id, use_network=True)
+        asset = enriched.asset
+    except Exception:
+        logger.warning("enrich step failed during ingest_full for %s", asset.asset_id, exc_info=True)
+    try:
+        asset, _ = agent.analyze_media(asset.asset_id, force_refresh=request.force_refresh)
+    except Exception:
+        logger.warning("analyze step failed during ingest_full for %s", asset.asset_id, exc_info=True)
     return asset
 
 
@@ -206,6 +250,28 @@ def dislike(request: DislikeRequest):
 @app.get("/memory/{user_id}")
 def get_memory(user_id: str):
     return agent.memory.get_memory(user_id)
+
+
+# ---- 排除规则（用户偏好设置） ----
+
+@app.get("/exclusions/{user_id}")
+def list_exclusions(user_id: str):
+    return {"rules": agent.memory.list_exclusions(user_id)}
+
+
+@app.post("/exclusions/{user_id}")
+def add_exclusion(user_id: str, body: dict[str, str]):
+    rule = body.get("rule", "").strip()
+    if not rule:
+        raise HTTPException(status_code=400, detail="rule is required")
+    added = agent.memory.add_exclusion(user_id, rule)
+    return {"added": added, "rules": agent.memory.list_exclusions(user_id)}
+
+
+@app.delete("/exclusions/{user_id}/{rule:path}")
+def remove_exclusion(user_id: str, rule: str):
+    removed = agent.memory.remove_exclusion(user_id, rule)
+    return {"removed": removed, "rules": agent.memory.list_exclusions(user_id)}
 
 
 @app.get("/library/tracks")

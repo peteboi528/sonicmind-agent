@@ -15,6 +15,19 @@ from app.prompts import AGENT_SYSTEM_PROMPT
 SYSTEM_PROMPT = AGENT_SYSTEM_PROMPT
 
 
+def _extract_message_text(msg: dict[str, Any]) -> str:
+    """从一条 message 里取最终文本。
+
+    推理模型（deepseek-v4-flash 等）把答案放在 reasoning_content，content 常为空。
+    优先用 content；为空时回退 reasoning_content（去掉明显的思考引导前缀）。
+    """
+    content = (msg.get("content") or "").strip()
+    if content:
+        return content
+    reasoning = (msg.get("reasoning_content") or "").strip()
+    return reasoning
+
+
 class OpenAICompatibleLLM:
     def __init__(self, base_url: str, api_key: str, model: str) -> None:
         self.base_url = base_url.rstrip("/")
@@ -46,6 +59,7 @@ class OpenAICompatibleLLM:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
+            "top_p": 0.95,
             "tools": tools,
             "tool_choice": tool_choice,
             "max_tokens": settings.llm_max_tokens,
@@ -61,6 +75,11 @@ class OpenAICompatibleLLM:
             finish = choice.get("finish_reason", "stop")
             content = msg.get("content") or ""
             tool_calls_raw = msg.get("tool_calls") or []
+            # 推理模型（如 deepseek-v4-flash）会把最终文本放进 reasoning_content，
+            # content 为空。仅当没有工具调用、且 content 为空时，回退到 reasoning 文本，
+            # 否则用户会拿到空回复 → 触发各处模板兜底（"对话僵硬"的总开关之一）。
+            if not content and not tool_calls_raw:
+                content = _extract_message_text(msg)
             tool_calls: list[ToolCall] = []
             for tc in tool_calls_raw:
                 fn = tc.get("function", {})
@@ -90,11 +109,12 @@ class OpenAICompatibleLLM:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
+            "top_p": 0.95,
             "max_tokens": settings.llm_max_tokens,
         }
         try:
             data = self._post(payload)
-            return data["choices"][0]["message"]["content"]
+            return _extract_message_text(data["choices"][0]["message"])
         except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
             raise LLMError(str(exc)) from exc
 
@@ -108,8 +128,16 @@ class OpenAICompatibleLLM:
             },
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=settings.llm_timeout_seconds) as response:
-            return json.loads(response.read().decode("utf-8"))
+        # 网络抖动/超时重试一次，避免偶发失败被当成"LLM 没响应"而降级到模板。
+        last_exc: Exception | None = None
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(request, timeout=settings.llm_timeout_seconds) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+                last_exc = exc
+                continue
+        raise last_exc if last_exc else RuntimeError("LLM request failed")
 
 
 def build_llm() -> LLMProvider:

@@ -67,6 +67,49 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return inter / union if union else 0.0
 
 
+def detect_language(track: Any) -> str:
+    """判断一首歌的主语言：'zh'（中文为主）或 'en'（非中文/英文为主）。
+
+    启发式：看标题+歌手里 CJK 字符 vs 拉丁字母的占比。两者都没有时归到 'en'
+    （多数纯符号/数字标题是西文曲目）。够用、零依赖。
+    """
+    text = f"{getattr(track, 'title', '') or ''} {getattr(track, 'artist', '') or ''}"
+    cjk = len(re.findall(r"[一-鿿]", text))
+    latin = len(re.findall(r"[a-zA-Z]", text))
+    if cjk == 0 and latin == 0:
+        return "en"
+    return "zh" if cjk >= latin else "en"
+
+
+def language_distribution(tracks: list[Any]) -> dict[str, float]:
+    """统计一批曲目的语言占比，返回 {'zh': x, 'en': y}（和为 1）。
+
+    空库返回均衡分布，避免冷启动时把任一语言压到 0。
+    """
+    if not tracks:
+        return {"zh": 0.5, "en": 0.5}
+    counts = {"zh": 0, "en": 0}
+    for t in tracks:
+        counts[detect_language(t)] += 1
+    total = counts["zh"] + counts["en"]
+    return {"zh": counts["zh"] / total, "en": counts["en"] / total}
+
+
+def _apply_exclusion_filter(tracks: list[Any], rules: list[str]) -> list[Any]:
+    """排除命中用户排除规则的候选。规则作为子串匹配候选的 title+artist+genre+mood。"""
+    filtered: list[Any] = []
+    for t in tracks:
+        title = (getattr(t, "title", "") or "").lower()
+        artist = (getattr(t, "artist", "") or "").lower()
+        genres = " ".join(getattr(t, "genre", []) or []).lower()
+        moods = " ".join(getattr(t, "mood", []) or []).lower()
+        combined = f"{title} {artist} {genres} {moods}"
+        excluded = any(rule.lower() in combined for rule in rules)
+        if not excluded:
+            filtered.append(t)
+    return filtered
+
+
 def _track_tags(track: Any) -> dict[str, set[str]]:
     genre = {g.lower() for g in (getattr(track, "genre", []) or [])}
     mood = {m.lower() for m in (getattr(track, "mood", []) or [])}
@@ -149,13 +192,31 @@ def _normalized_weights(semantic_ok: bool, behavior_ok: bool) -> tuple[float, fl
     return w_sem / total, w_per / total, w_beh / total
 
 
+def _language_multiplier(track: Any, lang_pref: dict[str, float] | None) -> float:
+    """按曲库语言分布给候选一个温和的乘性权重（不排斥任何语言）。
+
+    思路：曲库里某语言占比越高，该语言候选越被偏好，但只是"加权"不是"过滤"——
+    占比低的语言仍保留可观权重，避免一刀切。映射：multiplier = 0.85 + 0.30*share，
+    即占比 0 的语言仍有 0.85，占比 1 的语言到 1.15，差距温和（约 35%）。
+    """
+    if not lang_pref:
+        return 1.0
+    share = lang_pref.get(detect_language(track), 0.5)
+    return 0.85 + 0.30 * share
+
+
 def tri_anchor_rerank(
     query: str,
     tracks: list[Any],
     profile: PreferenceProfile,
     behavior_scores: dict[str, float] | None = None,
+    lang_pref: dict[str, float] | None = None,
 ) -> list[tuple[Any, RankingBreakdown]]:
-    """三锚归一化精排。返回按 final_score 降序的 (track, breakdown) 列表。"""
+    """三锚归一化精排。返回按 final_score 降序的 (track, breakdown) 列表。
+
+    lang_pref：曲库语言分布 {'zh':x,'en':y}。给定时按分布对候选做温和的语言加权
+    （英文歌多则多推英文，但中文仍保留），实现用户"按曲库语言偏好推荐"的需求。
+    """
     if not tracks:
         return []
     semantic, semantic_ok = _semantic_anchor(query, tracks)
@@ -165,7 +226,13 @@ def tri_anchor_rerank(
 
     scored: list[tuple[Any, RankingBreakdown]] = []
     for i, track in enumerate(tracks):
-        final = w_sem * semantic[i] + w_per * personalize[i] + w_beh * behavior[i]
+        base = w_sem * semantic[i] + w_per * personalize[i] + w_beh * behavior[i]
+        lang_mult = _language_multiplier(track, lang_pref)
+        # 乘性加权在 base>0 时倾斜同语言候选；额外加一个很小的加性语言先验，
+        # 让 base≈0（冷启动/泛查询无任何锚信号）时语言偏好仍能打破平局，
+        # 但量级（≤0.05）远小于真实相关性差异，不会盖过口味/语义。
+        lang_prior = 0.05 * lang_pref.get(detect_language(track), 0.5) if lang_pref else 0.0
+        final = base * lang_mult + lang_prior
         breakdown = RankingBreakdown(
             title=getattr(track, "title", ""),
             source=getattr(track, "source", "local"),
@@ -178,6 +245,7 @@ def tri_anchor_rerank(
                 "w_semantic": round(w_sem, 3),
                 "w_personalize": round(w_per, 3),
                 "w_behavior": round(w_beh, 3),
+                "lang_mult": round(lang_mult, 3),
             },
         )
         scored.append((track, breakdown))
@@ -214,7 +282,10 @@ def mmr_rerank(
             rel = bd.score
             cand_tags = _all_tags(track)
             max_overlap = max((_jaccard(cand_tags, st) for st in sel_tagsets), default=0.0)
-            mmr = lam * rel - (1 - lam) * max_overlap
+            # 多样性惩罚按候选自身相关性缩放：低相关的垃圾候选不该靠"多样"翻盘到
+            # 高相关候选前面（否则 rel≈0 的噪声会反超 rel 明显更高的同质好候选）。
+            penalty = (1 - lam) * max_overlap * rel
+            mmr = lam * rel - penalty
             if mmr > best_score:
                 best_score, best_idx = mmr, idx
         chosen = remaining.pop(best_idx)
@@ -236,10 +307,20 @@ def rerank_candidates(
     scenarios: set[str] | None = None,
     top_k: int = 5,
     apply_mmr: bool = True,
+    lang_pref: dict[str, float] | None = None,
+    exclusion_rules: list[str] | None = None,
 ) -> list[tuple[Any, RankingBreakdown]]:
-    """精排管线入口：三锚精排 → MMR 多样性重排 → 取 top_k。"""
+    """精排管线入口：排除过滤 → 三锚精排 → MMR 多样性重排 → 取 top_k。
+
+    exclusion_rules：用户排除规则（如"抖音热歌"），候选匹配则丢弃。
+    lang_pref：曲库语言分布，传入时按分布对候选做温和语言加权。
+    """
+    # 排除过滤：先于精排，命中排除规则的候选直接丢弃
+    if exclusion_rules:
+        tracks = _apply_exclusion_filter(tracks, exclusion_rules)
+
     profile = PreferenceProfile.from_taste(taste, scenarios=scenarios)
-    scored = tri_anchor_rerank(query, tracks, profile, behavior_scores)
+    scored = tri_anchor_rerank(query, tracks, profile, behavior_scores, lang_pref=lang_pref)
     if apply_mmr:
         return mmr_rerank(scored, top_k=top_k)
     return scored[:top_k]

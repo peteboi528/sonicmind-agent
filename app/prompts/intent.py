@@ -27,5 +27,23 @@ few-shot 示例：
 用户：我喜欢周杰伦，帮我做个歌单
 输出：{"actions": ["memory_update", "playlist"], "reason": "先记录偏好再生成歌单"}
 
+用户：再来几首类似的
+输出：{"actions": ["recommend"], "reason": "承接上一轮推荐，继续推同方向"}
+
+用户：换个轻快一点的风格
+输出：{"actions": ["recommend"], "reason": "基于上文调整情绪方向再推荐"}
+
+用户：这几首里哪首最适合跑步？为什么
+输出：{"actions": ["retrieve"], "reason": "针对已有候选解释理由，需取证据"}
+
+用户：我最近爱听 city pop，顺便分析下我的口味
+输出：{"actions": ["memory_update", "taste"], "reason": "记录新偏好并分析品味"}
+
+用户：asen牛逼吗
+输出：{"actions": ["search"], "reason": "讨论歌手，需搜其真实曲目做论据"}
+
+用户：Blonde 这张专辑怎么样
+输出：{"actions": ["search"], "reason": "讨论专辑，搜相关曲目"}
+
 只输出 JSON：{"actions": ["动作1"], "reason": "简短说明"}
 """

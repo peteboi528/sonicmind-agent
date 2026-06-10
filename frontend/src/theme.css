@@ -1,0 +1,123 @@
+/* ============================================================
+   SONICMIND — 全局主题与布局（Vue 重构版）
+   复用原 Vanilla 版 Spotify 深色 design tokens
+   ============================================================ */
+:root {
+  --bg:           #0a0a0a;
+  --bg-card:      #181818;
+  --bg-hover:     #282828;
+  --bg-elevated:  #1f1f1f;
+  --bg-input:     #2a2a2a;
+  --accent:       #1DB954;
+  --accent-hover: #1ed760;
+  --accent-dim:   rgba(29,185,84,0.12);
+  --accent-glow:  rgba(29,185,84,0.25);
+  --text:         #FFFFFF;
+  --text-sub:     #B3B3B3;
+  --text-muted:   #6A6A6A;
+  --border:       #282828;
+  --danger:       #e74c3c;
+  --radius:       12px;
+  --radius-sm:    8px;
+  --radius-pill:  500px;
+  --shadow:       0 4px 24px rgba(0,0,0,0.4);
+  --transition:   0.2s ease;
+  --font:         'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --sidebar-w:    260px;
+  --player-h:     72px;
+}
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html { font-size: 16px; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+  overflow: hidden;
+}
+button { cursor: pointer; font-family: inherit; border: none; background: none; color: inherit; }
+input, textarea, select { font-family: inherit; }
+a { color: inherit; text-decoration: none; }
+
+/* ---------- App Shell：侧边栏 + 主区 ---------- */
+.app-shell { display: flex; height: 100dvh; }
+.main-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  position: relative;
+}
+.tab-content { flex: 1; overflow-y: auto; padding: 24px 32px 100px; }
+
+/* ---------- 顶部 Tab 导航 ---------- */
+.tab-nav {
+  display: flex;
+  gap: 4px;
+  padding: 14px 32px 0;
+  border-bottom: 1px solid var(--border);
+  background: rgba(10,10,10,0.92);
+  backdrop-filter: blur(16px);
+  position: sticky;
+  top: 0;
+  z-index: 50;
+}
+.tab-nav button {
+  padding: 10px 18px;
+  color: var(--text-sub);
+  font-size: 0.95rem;
+  font-weight: 600;
+  border-bottom: 2px solid transparent;
+  transition: var(--transition);
+}
+.tab-nav button:hover { color: var(--text); }
+.tab-nav button.active { color: var(--text); border-bottom-color: var(--accent); }
+
+/* ---------- 通用控件 ---------- */
+.btn {
+  background: var(--accent);
+  color: #000;
+  font-weight: 700;
+  padding: 10px 20px;
+  border-radius: var(--radius-pill);
+  transition: var(--transition);
+}
+.btn:hover { background: var(--accent-hover); transform: scale(1.02); }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 8px 16px;
+  border-radius: var(--radius-pill);
+}
+.btn-ghost:hover { border-color: var(--text-sub); background: var(--bg-hover); }
+.input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid transparent;
+  color: var(--text);
+  padding: 11px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 0.95rem;
+  transition: var(--transition);
+}
+.input:focus { outline: none; border-color: var(--accent); }
+
+.section-title { font-size: 1.5rem; font-weight: 800; margin-bottom: 4px; }
+.section-sub { color: var(--text-sub); font-size: 0.9rem; margin-bottom: 20px; }
+.empty-hint { color: var(--text-muted); text-align: center; padding: 48px 0; }
+.loading-hint { color: var(--text-sub); text-align: center; padding: 32px 0; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-thumb { background: var(--bg-hover); border-radius: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 768px) {
+  .app-shell { flex-direction: column; }
+  .tab-content { padding: 16px 16px 100px; }
+  .tab-nav { padding: 12px 16px 0; overflow-x: auto; }
+}

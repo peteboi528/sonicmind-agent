@@ -47,6 +47,7 @@ from app.recommend.engine import RecommendEngine
 from app.retrieval.vector_store import HybridRetriever
 from app.similarity import AssetSimilarity
 from app.sources.mock_source import MockSource
+from app.sources.netease_source import NeteaseSource
 from app.sources import bilibili as bilibili_source
 from app.sources import netease as netease_source
 from app.sources import youtube as youtube_source
@@ -57,6 +58,18 @@ from app.storage import JsonStore
 logger = logging.getLogger(__name__)
 
 
+def _build_source() -> ExternalSource:
+    """选择外部源：默认真实网易云源；仅当 EXTERNAL_SOURCE=mock 时才用假目录。
+
+    历史 bug：这里曾写死 MockSource()，导致推荐/歌单补位永远拉硬编码假歌单
+    （晴天、Yellow、Let It Be…），真实网易云源形同虚设。现在默认走真实源。
+    """
+    if settings.external_source == "mock":
+        logger.info("ExternalSource = MockSource（EXTERNAL_SOURCE=mock）")
+        return MockSource()
+    return NeteaseSource()
+
+
 class AudioVisualAgent:
     def __init__(self, store: JsonStore | None = None) -> None:
         self.store = store or JsonStore()
@@ -65,7 +78,7 @@ class AudioVisualAgent:
         self.similarity = AssetSimilarity(self.store)
         self.library = ResourceLibrary(settings.resource_library_path)
         self.llm: LLMProvider = build_llm()
-        self.source: ExternalSource = MockSource()
+        self.source: ExternalSource = _build_source()
         self.engine = RecommendEngine()
         self.daily = DailyRecommender(self.engine, self.source, self.llm)
         self.react = ReActLoop(self)
@@ -265,13 +278,51 @@ class AudioVisualAgent:
         self.library.upsert_asset(asset)
         return asset, segments
 
+    _VALID_GENRES = {"流行", "摇滚", "电子", "古典", "R&B", "说唱", "爵士", "民谣", "国风", "金属"}
+
+    # 网易云歌单 tags → 本系统曲风词表的映射（歌单级 tags 是导入时唯一可靠的曲风线索）
+    _NETEASE_TAG_TO_GENRE = {
+        "R&B/Soul": "R&B", "R&B": "R&B", "Soul": "R&B", "蓝调": "R&B",
+        "摇滚": "摇滚", "Rock": "摇滚", "金属": "金属", "Metal": "金属", "朋克": "摇滚",
+        "电子": "电子", "Electronic": "电子", "House": "电子", "Techno": "电子", "EDM": "电子",
+        "说唱": "说唱", "Rap": "说唱", "Hip-Hop": "说唱", "嘻哈": "说唱",
+        "爵士": "爵士", "Jazz": "爵士", "布鲁斯": "爵士",
+        "古典": "古典", "Classical": "古典", "纯音乐": "古典",
+        "民谣": "民谣", "Folk": "民谣", "乡村": "民谣",
+        "流行": "流行", "Pop": "流行",
+        "国风": "国风", "古风": "国风", "中国风": "国风",
+    }
+
+    def _playlist_tags_to_genres(self, tags: list[str]) -> list[str]:
+        """把网易云歌单 tags 映射成本系统曲风（用作整单兜底）。无映射则返回空。"""
+        genres: list[str] = []
+        for tag in tags:
+            g = self._NETEASE_TAG_TO_GENRE.get(tag)
+            if g and g not in genres:
+                genres.append(g)
+        return genres
+
     def _batch_classify_tracks(self, pairs: list[tuple[str, str]]) -> list[dict[str, list[str]]]:
         """批量让 LLM 判断一组 (歌名, 歌手) 的风格和情绪，一次调用处理多首。
 
         返回与输入等长的列表，每项 {"genre": [...], "mood": [...]}；失败则该项为空。
+        会做一次重试：首次解析后仍为空的项，重新发一个只含这些歌的小批再问一次，
+        减少落到「中性默认」兜底的数量（提升 R&B 等英文歌名的分类命中率）。
         """
         if not pairs:
             return []
+        out = self._classify_once(pairs)
+        # 重试：收集首轮没拿到 genre 的项，单独再问一次
+        missing = [i for i, r in enumerate(out) if not r.get("genre")]
+        if missing:
+            retry_pairs = [pairs[i] for i in missing]
+            retried = self._classify_once(retry_pairs)
+            for slot, r in zip(missing, retried):
+                if r.get("genre"):
+                    out[slot] = r
+        return out
+
+    def _classify_once(self, pairs: list[tuple[str, str]]) -> list[dict[str, list[str]]]:
         lines = "\n".join(f"{i}. 《{t}》- {a or '未知'}" for i, (t, a) in enumerate(pairs))
         prompt = (
             f"判断下面每首歌的风格和情绪。\n{lines}\n\n"
@@ -288,12 +339,15 @@ class AudioVisualAgent:
                     continue
                 g = str(item.get("genre", "")).strip()
                 m = str(item.get("mood", "")).strip()
+                genres = [x.strip() for x in g.replace("、", ",").split(",") if x.strip()]
+                # 只保留在合法集合内的风格，过滤 LLM 偶发的自由发挥
+                genres = [x for x in genres if x in self._VALID_GENRES]
                 out[i] = {
-                    "genre": [x.strip() for x in g.replace("、", ",").split(",") if x.strip()],
+                    "genre": genres,
                     "mood": [x.strip() for x in m.replace("、", ",").split(",") if x.strip()],
                 }
         except Exception:
-            logger.debug("Batch track classification failed for %s tracks", len(pairs), exc_info=True)
+            logger.debug("Track classification failed for %s tracks", len(pairs), exc_info=True)
         return out
 
     # 确定性兜底词表（与 _batch_classify_tracks / tag_rules 的可选值保持一致）
@@ -301,12 +355,22 @@ class AudioVisualAgent:
     _FALLBACK_MOODS = ["欢快", "治愈", "励志", "伤感", "放松", "激昂", "浪漫", "宁静"]
 
     def _ensure_track_tags(
-        self, title: str, artist: str, genre: list[str], mood: list[str]
+        self,
+        title: str,
+        artist: str,
+        genre: list[str],
+        mood: list[str],
+        playlist_genres: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
-        """三层兜底保证每首导入歌曲都有 genre/mood：
-        1) LLM 分类结果（传入的 genre/mood）；
+        """按可靠性逐层补全 genre/mood：
+        1) LLM 分类结果（传入的 genre/mood）——最准；
         2) 关键词规则从歌名+歌手推断（tag_rules）；
-        3) 基于 asset 标识的确定性 hash 选一个，绝不留空（与 tempo/energy 兜底同思路）。
+        3) 歌单级 tags 映射的曲风（playlist_genres）——整单线索，比瞎猜可靠；
+        4) 仍为空 → genre 标「未分类」，绝不用 hash 随机或假「流行」污染品味画像。
+
+        历史教训：早期第 4 层用 hash 随机贴「摇滚/电子/说唱」，导致导入 70 首
+        R&B 出现错误风格；后改假「流行」又掩盖了 LLM 失败。现在失败就如实标
+        「未分类」，让用户和推荐系统都知道这首没识别出来。
         """
         from app.graph.tag_rules import extract_genre, extract_mood
 
@@ -315,12 +379,14 @@ class AudioVisualAgent:
             genre = extract_genre(text)
         if not mood:
             mood = extract_mood(text)
-        # 仍为空 → 确定性兜底，保证推荐/品味分析能用上这首歌
-        seed = int(hashlib.sha1(text.encode("utf-8")).hexdigest()[:8], 16)
+        # 用歌单整单曲风兜底（网易云 tags 映射结果）
+        if not genre and playlist_genres:
+            genre = list(playlist_genres)
+        # 仍为空 → 如实标「未分类」，不猜
         if not genre:
-            genre = [self._FALLBACK_GENRES[seed % len(self._FALLBACK_GENRES)]]
+            genre = ["未分类"]
         if not mood:
-            mood = [self._FALLBACK_MOODS[(seed // 7) % len(self._FALLBACK_MOODS)]]
+            mood = ["放松"]
         return genre, mood
 
     def import_netease_playlist(
@@ -352,10 +418,12 @@ class AudioVisualAgent:
             "tracks": [],
         }
         tracks = data.get("tracks", [])
-        # 批量让 LLM 判断 genre/mood（分块，每块 20 首，控制 prompt 长度）
+        # 歌单级 tags 映射成曲风，作为整单兜底（网易云歌曲级无曲风，歌单 tags 是唯一可靠线索）
+        playlist_genres = self._playlist_tags_to_genres(data.get("tags", []))
+        # 批量让 LLM 判断 genre/mood（每块 8 首：20 首会让 DeepSeek 超时整批失败）
         classifications: list[dict[str, list[str]]] = []
-        for start in range(0, len(tracks), 20):
-            chunk = tracks[start:start + 20]
+        for start in range(0, len(tracks), 8):
+            chunk = tracks[start:start + 8]
             classifications.extend(
                 self._batch_classify_tracks([(t.get("title", ""), t.get("artist", "")) for t in chunk])
             )
@@ -380,7 +448,8 @@ class AudioVisualAgent:
             # 补全风格/情绪：LLM → 关键词规则 → 确定性兜底，三层保证永不为空
             cls = classifications[idx] if idx < len(classifications) else {}
             genre, mood = self._ensure_track_tags(
-                asset.title, asset.artist or "", cls.get("genre") or [], cls.get("mood") or []
+                asset.title, asset.artist or "", cls.get("genre") or [], cls.get("mood") or [],
+                playlist_genres=playlist_genres,
             )
             asset.genre = genre
             asset.mood = mood
@@ -521,9 +590,13 @@ class AudioVisualAgent:
         """
         tracks: list[ExternalTrack] = []
 
+        # 网易云为主候选源：用多结果搜索拿真实歌曲（之前只取 1 首，导致大量缺口
+        # 被 B站/YouTube 的合集视频/SEO 垃圾填补，搜索质量差）。
         try:
-            meta = self._search_netease_detail(query)
-            if meta and meta.get("title"):
+            from app.sources.netease import search_netease_many
+            for meta in search_netease_many(query, limit=top_k):
+                if not meta.get("title"):
+                    continue
                 tracks.append(ExternalTrack(
                     external_id=meta["song_id"],
                     title=meta["title"],
@@ -531,39 +604,45 @@ class AudioVisualAgent:
                     album=meta.get("album"),
                     cover_url=meta.get("cover"),
                     source="netease",
+                    candidate_kind=_classify_candidate_kind(meta["title"], "netease"),
                     playback_url=f"https://music.163.com/song?id={meta['song_id']}",
                 ))
         except Exception:
             logger.debug("NetEase web music search failed for query=%s", query, exc_info=True)
 
-        try:
-            bili = self._search_bilibili_detail(query)
-            if bili and bili.get("title"):
-                tracks.append(ExternalTrack(
-                    external_id=bili["bvid"],
-                    title=bili["title"],
-                    artist=bili.get("author", ""),
-                    source="bilibili",
-                    playback_url=f"https://player.bilibili.com/player.html?bvid={bili['bvid']}&autoplay=0&high_quality=1&danmaku=0",
-                ))
-        except Exception:
-            logger.debug("Bilibili web music search failed for query=%s", query, exc_info=True)
-
-        try:
-            video_id = self._search_youtube_video(query)
-            if video_id:
-                url = f"https://www.youtube.com/watch?v={video_id}"
-                title = youtube_source.fetch_youtube_title(url)
-                if title:
+        # B站/YouTube 仅在网易云候选不足时补充（且会被合集过滤），不再作为主力。
+        if len(tracks) < top_k:
+            try:
+                bili = self._search_bilibili_detail(query)
+                if bili and bili.get("title"):
                     tracks.append(ExternalTrack(
-                        external_id=video_id,
-                        title=title,
-                        artist="",
-                        source="youtube",
-                        playback_url=f"https://www.youtube.com/embed/{video_id}?autoplay=1&rel=0",
+                        external_id=bili["bvid"],
+                        title=bili["title"],
+                        artist=bili.get("author", ""),
+                        source="bilibili",
+                        candidate_kind=_classify_candidate_kind(bili["title"], "bilibili"),
+                        playback_url=f"https://player.bilibili.com/player.html?bvid={bili['bvid']}&autoplay=0&high_quality=1&danmaku=0",
                     ))
-        except Exception:
-            logger.debug("YouTube web music search failed for query=%s", query, exc_info=True)
+            except Exception:
+                logger.debug("Bilibili web music search failed for query=%s", query, exc_info=True)
+
+        if len(tracks) < top_k:
+            try:
+                video_id = self._search_youtube_video(query)
+                if video_id:
+                    url = f"https://www.youtube.com/watch?v={video_id}"
+                    title = youtube_source.fetch_youtube_title(url)
+                    if title:
+                        tracks.append(ExternalTrack(
+                            external_id=video_id,
+                            title=title,
+                            artist="",
+                            source="youtube",
+                            candidate_kind=_classify_candidate_kind(title, "youtube"),
+                            playback_url=f"https://www.youtube.com/embed/{video_id}?autoplay=1&rel=0",
+                        ))
+            except Exception:
+                logger.debug("YouTube web music search failed for query=%s", query, exc_info=True)
 
         tracks = [track for track in tracks if _valid_external_track(track, query)]
 
@@ -864,21 +943,26 @@ class AudioVisualAgent:
     # --- 两种播放模式：只听歌（音频） / 看 MV（视频） ---
 
     def get_audio_url(self, track: Asset | ExternalTrack, netease_cookie: str = "") -> str | None:
-        """只听歌：只返回纯音频直链（网易云 MP3），不回退到 YouTube，避开机器人验证墙。"""
-        if isinstance(track, Asset) and track.source_url:
-            netease_id = _netease_song_id(track.source_url)
+        """只听歌：只返回纯音频直链（网易云 MP3），不回退到 YouTube，避开机器人验证墙。
+
+        用鸭子类型读属性，兼容 Asset / ExternalTrack / Web 前端传来的 SimpleNamespace
+        （历史 bug：原来用 isinstance 严格判类型，前端的 SimpleNamespace 两者都不匹配，
+        导致 VIP 登录后仍永远返回 None，看似"无法播放"）。
+        """
+        source_url = getattr(track, "source_url", "") or ""
+        title = getattr(track, "title", "") or ""
+        artist = getattr(track, "artist", "") or ""
+
+        # 1) 来源链接里能直接提取网易云 song id 的，直接取流
+        if source_url:
+            netease_id = _netease_song_id(source_url)
             if netease_id:
                 return self._get_netease_audio_url(netease_id, netease_cookie)
-            # 非网易云来源：按标题搜网易云拿音频
-            netease_id = self._search_netease(f"{track.title} {track.artist or ''}")
+        # 2) 否则按 标题+歌手 搜网易云拿音频
+        if title:
+            netease_id = self._search_netease(f"{title} {artist}".strip())
             if netease_id:
                 return self._get_netease_audio_url(netease_id, netease_cookie)
-            return None
-        if isinstance(track, ExternalTrack):
-            netease_id = self._search_netease(f"{track.title} {track.artist}")
-            if netease_id:
-                return self._get_netease_audio_url(netease_id, netease_cookie)
-            return None
         return None
 
     def get_mv_url(self, track: Asset | ExternalTrack) -> str | None:
@@ -1282,10 +1366,41 @@ class AudioVisualAgent:
         durations = {a.asset_id: a.duration_seconds for a in self.list_assets()}
         behavior = compute_behavior_scores(memory.listening_history, durations)
         scenarios = {s.lower() for s in extract_scenario(query)}
+        # 关键修复：在线候选 genre/mood 常为空，导致口味锚 Jaccard 恒为 0、精排空转。
+        # 用规则从标题+歌手推断补全，让三锚精排有信号可比。
+        self._enrich_candidate_tags(tracks)
+        # 语言加权：按曲库的中/英文分布偏好同语言候选（英文歌多则多推英文，但不排斥中文）。
+        from app.recommend.rerank import language_distribution
+        lang_pref = language_distribution(self.list_assets())
+        # 排除规则：用户明确表示不要的风格/类型
+        exclusion_rules = memory.exclusion_rules or None
         return rerank_candidates(
             query, tracks, taste,
             behavior_scores=behavior, scenarios=scenarios, top_k=top_k,
+            lang_pref=lang_pref, exclusion_rules=exclusion_rules,
         )
+
+    @staticmethod
+    def _enrich_candidate_tags(tracks: list[Any]) -> None:
+        """给缺 genre/mood 的候选用关键词规则就地补全（不写库，仅供本次精排）。"""
+        from app.graph.tag_rules import extract_genre, extract_mood
+
+        for t in tracks:
+            text = f"{getattr(t, 'title', '')} {getattr(t, 'artist', '') or ''}"
+            if not getattr(t, "genre", None):
+                inferred = extract_genre(text)
+                if inferred and hasattr(t, "genre"):
+                    try:
+                        t.genre = inferred
+                    except Exception:
+                        pass
+            if not getattr(t, "mood", None):
+                inferred = extract_mood(text)
+                if inferred and hasattr(t, "mood"):
+                    try:
+                        t.mood = inferred
+                    except Exception:
+                        pass
 
     def _resolve_asset_context(self, user_id: str, query: str) -> str | None:
         # Keep only explicit/recent media context. Tool selection itself is now
@@ -1486,6 +1601,33 @@ def _is_fallback_track(track: Asset | ExternalTrack) -> bool:
     return "fallback" in source or source in {"mock", "llm"}
 
 
+def _classify_candidate_kind(title: str, source: str) -> str:
+    """根据标题判断候选类型：track / mv / compilation。
+
+    B站/YouTube 大量返回「合集/连播/串烧/精选集」类视频，这些不是单曲，
+    混进推荐会严重退化体验（如「推荐 The Weeknd」只出歌曲合集视频）。
+    这里用关键词识别，compilation 类在 _valid_external_track 中被丢弃。
+    """
+    t = (title or "").lower()
+    # 合集/连播信号（中英）
+    compilation_signals = [
+        "合集", "连播", "串烧", "歌曲合集", "精选集", "歌单", "全部歌曲",
+        "全部曲目", "经典回顾", "最全", "歌曲大全", "纯享合集", "金曲合集",
+        "playlist", "full album", "all songs", "greatest hits", "mix",
+        "compilation", "best of", "non-stop", "megamix", "mega mix", "歌曲串烧",
+    ]
+    if any(sig in t for sig in compilation_signals):
+        return "compilation"
+    # 时长/数量型信号：标题里出现「N首」「N分钟」连播暗示
+    if re.search(r"\d+\s*首", t) or re.search(r"\d+\s*songs?\b", t):
+        return "compilation"
+    # MV/现场信号（可播，保留为 mv）
+    mv_signals = ["mv", "live", "现场", "演唱会", "官方视频", "official video", "music video"]
+    if any(sig in t for sig in mv_signals):
+        return "mv"
+    return "track"
+
+
 def _valid_external_track(track: ExternalTrack, query: str) -> bool:
     title = (track.title or "").strip()
     if not title:
@@ -1497,6 +1639,9 @@ def _valid_external_track(track: ExternalTrack, query: str) -> bool:
     if lowered_title in {"网易云音乐", "bilibili", "youtube", "搜索结果"}:
         return False
     if len(title) > 80 and " - " not in title:
+        return False
+    # 合集/连播类视频污染推荐，直接丢弃（网易云单曲不受影响）。
+    if getattr(track, "candidate_kind", "track") == "compilation":
         return False
     return True
 

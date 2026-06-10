@@ -77,24 +77,22 @@ class DailyRecommender:
         taste = user.taste_profile or TasteProfile()
         bucket = time_of_day or get_time_bucket()
 
-        # 用 LLM 根据用户品味生成推荐歌单
-        library_desc = self._describe_library(library)
-        prefs_desc = ", ".join(user.preferences[-5:]) if user.preferences else "暂无明确偏好"
-        taste_desc = self._describe_taste(taste)
-
-        prompt = DAILY_RECOMMEND_USER_TEMPLATE(
-            count=count,
-            prefs_desc=prefs_desc,
-            taste_desc=taste_desc,
-            library_desc=library_desc,
-            bucket=bucket,
-        )
-
-        tracks = self._llm_recommend(prompt, count, bucket, openness=taste.discovery_openness)
+        # 优先用真实外部源推荐（不编造歌曲），失败再用 LLM
+        tracks = self._fallback_recommend(user, library, taste, bucket, count)
 
         if not tracks:
-            # 兜底：用传统引擎
-            tracks = self._fallback_recommend(user, library, taste, bucket, count)
+            # 兜底：用 LLM 生成（标记 source="llm"，用户可见这是未核实的）
+            library_desc = self._describe_library(library)
+            prefs_desc = ", ".join(user.preferences[-5:]) if user.preferences else "暂无明确偏好"
+            taste_desc = self._describe_taste(taste)
+            prompt = DAILY_RECOMMEND_USER_TEMPLATE(
+                count=count,
+                prefs_desc=prefs_desc,
+                taste_desc=taste_desc,
+                library_desc=library_desc,
+                bucket=bucket,
+            )
+            tracks = self._llm_recommend(prompt, count, bucket, openness=taste.discovery_openness)
 
         tracks = [self._with_reason(track, user, library, taste) for track in tracks]
 

@@ -1314,6 +1314,15 @@ class AudioVisualAgent:
             track for track in online_candidates
             if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track)
         ]
+
+        # 如果加上 memory_query 后搜不到，用纯 goal 再搜一次（memory_query 可能干扰搜索）
+        if not verified:
+            online_candidates = self.search_web_music(goal, top_k=max(top_k * 2, top_k))
+            verified = [
+                track for track in online_candidates
+                if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track)
+            ]
+
         if verified:
             ranked = self._rerank_tracks(user_id, online_query, _dedupe_tracks(verified), top_k)
             self.library.record_exposure([t for t, _ in ranked])
@@ -1339,10 +1348,19 @@ class AudioVisualAgent:
                     "rerank=tri_anchor+mmr",
                 ],
             )
-        time_bucket = self._infer_time_bucket(goal)
-        rec = self.daily_recommend(user_id, time_of_day=time_bucket, count=top_k)
-        rec.agent_trace.append("reason_source=fallback")
-        return rec
+
+        # 真实候选不足时诚实返回空列表，不回退到 LLM 编造歌曲（source="llm" 幻觉）。
+        logger.warning("recommend_for_query: no verified online candidates for goal=%s", goal)
+        return DailyRecommendation(
+            user_id=user_id,
+            tracks=[],
+            reason_summary=f"未找到与「{goal}」匹配的真实线上候选，暂不推荐虚构歌曲。",
+            agent_trace=[
+                f"online_query={online_query}",
+                "online_verified=0",
+                "reason_source=none_real_candidates",
+            ],
+        )
 
     def _rerank_tracks(self, user_id: str, query: str, tracks: list[Any], top_k: int):
         """三锚精排 + MMR 多样性重排管线。返回 [(track, RankingBreakdown), ...]。"""

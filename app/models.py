@@ -210,7 +210,7 @@ class RetrievalPlan(BaseModel):
 
 class AgentPlan(BaseModel):
     # capability 意图：直接对齐 graph/nodes.py 的真实执行分支
-    intent: Literal["recommend", "search", "playlist", "taste", "import", "journey", "chat"] = "chat"
+    intent: Literal["recommend", "search", "playlist", "taste", "import", "journey", "discuss", "chat"] = "chat"
     strategy: Literal["online_first", "library_first", "memory_only", "no_search"] = "online_first"
     tools_needed: list[str] = Field(default_factory=list)
     target_count: int | None = None

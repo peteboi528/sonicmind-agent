@@ -1628,6 +1628,47 @@ def _classify_candidate_kind(title: str, source: str) -> str:
     return "track"
 
 
+# 搜索噪声过滤：中文停用词不作为相关性判据（如"的""歌""我"等）
+_QUERY_NOISE = {"的", "了", "在", "是", "我", "你", "他", "她", "它", "和", "与", "或",
+                "歌", "曲", "音乐", "首", "些", "几", "个", "找", "要", "想", "帮", "给",
+                "推荐", "适合", "播放", "听", "下", "不", "也", "都", "就", "还", "又",
+                "a", "an", "the", "of", "in", "on", "is", "to", "for", "me", "my", "and",
+                "or", "it", "s", "t", "m"}
+
+
+def _query_matches_track(query: str, track: ExternalTrack) -> bool:
+    """搜索词的每个显著词元必须至少命中 title 或 artist 之一。
+
+    网易云搜索 API 做全字段模糊匹配（歌词/评论/标签都会命中），
+    导致搜 "Drake" 返回一堆歌名里根本没有 Drake 的中文歌。
+    这里做严格过滤：每个非停用词 token 必须在 title+artist 中出现。
+    """
+    import unicodedata
+
+    # 分词：按空格/标点拆，过滤停用词和过短 token
+    tokens = re.split(r"[\s,，、·\-|/\\]+", query.strip())
+    tokens = [t for t in tokens if t and t.lower() not in _QUERY_NOISE and len(t) > 1]
+    if not tokens:
+        return True  # 纯噪声查询不过滤
+
+    searchable = f"{(track.title or '')} {(track.artist or '')}".lower()
+
+    for token in tokens:
+        lowered = token.lower()
+        if lowered in searchable:
+            continue
+        # 英文 token 做子串模糊匹配（"drake" 匹配 "Drake、Future"）
+        # 但中文 token 必须精确子串匹配（"周杰伦" 不应匹配 "周杰"）
+        is_cjk = any("CJK" in unicodedata.name(c, "") for c in token)
+        if is_cjk:
+            if token not in searchable:
+                return False
+        else:
+            if lowered not in searchable:
+                return False
+    return True
+
+
 def _valid_external_track(track: ExternalTrack, query: str) -> bool:
     title = (track.title or "").strip()
     if not title:
@@ -1642,6 +1683,10 @@ def _valid_external_track(track: ExternalTrack, query: str) -> bool:
         return False
     # 合集/连播类视频污染推荐，直接丢弃（网易云单曲不受影响）。
     if getattr(track, "candidate_kind", "track") == "compilation":
+        return False
+    # 相关性过滤：搜索词的每个显著词元必须至少命中 title 或 artist 之一。
+    # 否则网易云模糊搜索会返回大量歌词/评论里提到关键词但实际无关的歌曲。
+    if not _query_matches_track(query, track):
         return False
     return True
 

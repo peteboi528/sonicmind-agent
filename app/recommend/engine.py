@@ -68,6 +68,7 @@ def compute_taste_profile(
 ) -> TasteProfile:
     genre_counts: dict[str, float] = {}
     mood_counts: dict[str, float] = {}
+    artist_counts: dict[str, float] = {}  # 艺术家偏好追踪
     energy_sum = 0.0
     energy_n = 0
     tempo_values: list[int] = []
@@ -78,23 +79,37 @@ def compute_taste_profile(
             genre_counts[g] = genre_counts.get(g, 0) + 1
         for m in asset.mood:
             mood_counts[m] = mood_counts.get(m, 0) + 1
+        # 艺术家计数
+        if asset.artist:
+            artist_key = asset.artist.lower().strip()
+            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
         if asset.energy_level is not None:
             energy_sum += asset.energy_level
             energy_n += 1
         if asset.tempo_bpm is not None:
             tempo_values.append(asset.tempo_bpm)
 
-    # 评分加权：10.0=+4, 8.0=+2.4, 5.0=0, 3.0=-0.8, 0.0=-2
+    # 评分加权：大幅增强信号
+    # 旧：(score - 5.0) * 0.5 → 10分才+2.5，太弱
+    # 新：(score - 5.0) * 2.0 → 10分+10, 8分+6, 5分0, 3分-4, 1分-8
+    # 评分比单纯的库存在权重高得多，真正反映用户喜好
     if ratings:
         asset_map = {a.asset_id: a for a in assets}
         for rating in ratings:
-            weight = (rating.score - 5.0) * 0.5  # 10→2.5, 8→1.5, 5→0, 3→-1, 0→-2.5
+            weight = (rating.score - 5.0) * 2.0  # 10→10, 8→6, 5→0, 3→-4, 1→-8
             genres = rating.genre or (asset_map.get(rating.asset_id, None) and asset_map[rating.asset_id].genre) or []
             moods = rating.mood or (asset_map.get(rating.asset_id, None) and asset_map[rating.asset_id].mood) or []
             for g in genres:
                 genre_counts[g] = genre_counts.get(g, 0) + weight
             for m in moods:
                 mood_counts[m] = mood_counts.get(m, 0) + weight
+            # 高分艺术家偏好加强
+            if rating.score >= 7:
+                artist_name = rating.artist or ""
+                if artist_name:
+                    artist_key = artist_name.lower().strip()
+                    artist_counts[artist_key] = artist_counts.get(artist_key, 0) + weight * 0.5
+            # 能量偏好
             if rating.score >= 4:
                 rated_asset = asset_map.get(rating.asset_id)
                 if rated_asset and rated_asset.energy_level is not None:
@@ -104,9 +119,11 @@ def compute_taste_profile(
     # 过滤掉负权重
     genre_counts = {k: max(v, 0) for k, v in genre_counts.items() if v > 0}
     mood_counts = {k: max(v, 0) for k, v in mood_counts.items() if v > 0}
+    artist_counts = {k: max(v, 0) for k, v in artist_counts.items() if v > 0}
 
     top_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)[:6]
     top_moods = sorted(mood_counts.items(), key=lambda x: x[1], reverse=True)[:6]
+    top_artists = sorted(artist_counts.items(), key=lambda x: x[1], reverse=True)[:8]
     preferred_energy = energy_sum / energy_n if energy_n else 0.5
     if tempo_values:
         tempo_range = [min(tempo_values), max(tempo_values)]
@@ -118,6 +135,7 @@ def compute_taste_profile(
     return TasteProfile(
         top_genres=[(g, round(w, 1)) for g, w in top_genres],
         top_moods=[(m, round(w, 1)) for m, w in top_moods],
+        top_artists=[(a, round(w, 1)) for a, w in top_artists],
         preferred_energy=round(preferred_energy, 2),
         preferred_tempo_range=tempo_range,
         discovery_openness=openness,

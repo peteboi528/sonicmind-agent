@@ -8,6 +8,7 @@ from typing import Any
 from app.models import (
     AgentGoal,
     Asset,
+    DialogueState,
     ListeningEvent,
     MemoryEntry,
     MemoryUpdateRequest,
@@ -24,6 +25,10 @@ from app.storage import JsonStore
 PREFERENCE_PATTERNS = [
     re.compile(r"(?:i\s+)?(?:like|love|prefer)\s+(.+)", re.IGNORECASE),
     re.compile(r"(?:喜欢|偏好|更想要|更喜欢|爱听)(.+)"),
+    # 更宽泛的音乐偏好捕获：听/在听/循环/追/迷 + 歌手/曲风
+    re.compile(r"(?:在听|正在听|最近听|听了|一直听|常听|循环|单曲循环|追|迷|粉)\s*(.+)"),
+    re.compile(r"(?:听了|在听)\s*(.{2,15})的?歌"),
+    re.compile(r"(?:i\s+)?(?:listen\s+to|into|vibing\s+(?:to|with))\s+(.+)", re.IGNORECASE),
 ]
 
 # 负面偏好提取：匹配"不要/别推/讨厌/不喜欢"等 + 后续的风格/类型词
@@ -240,6 +245,9 @@ class MemoryManager:
                 parts.append(genre)
             for mood, _ in taste.top_moods[:2]:
                 parts.append(mood)
+            # 艺术家偏好：高分歌手带进搜索查询，提升同风格歌曲召回
+            for artist, _ in taste.top_artists[:3]:
+                parts.append(artist)
         return " ".join(parts)
 
     def auto_learn_from_turn(self, user_id: str, query: str, results: list[dict[str, Any]]) -> bool:
@@ -253,6 +261,12 @@ class MemoryManager:
                 changed = True
             if explicit not in memory.preferences:
                 memory.preferences.append(explicit)
+                changed = True
+
+        # 从检索结果中提取歌手/歌名作为兴趣信号（即使没有明确说"喜欢"）
+        entities_from_results = _extract_entities_from_results(results)
+        for entity in entities_from_results:
+            if self._upsert_entry(memory, entity, "from_search_result"):
                 changed = True
 
         # 负面偏好提取：用户说"不要抖音热歌""别推孟菲斯说唱"等
@@ -276,6 +290,39 @@ class MemoryManager:
         if goal is None or goal.status != "active":
             return None
         return goal
+
+    # ── DialogueState：轻量多轮延续状态 ───────────────────────────────
+    def get_dialogue_state(self, user_id: str) -> DialogueState:
+        state = self.store.read_model("dialogue", user_id, DialogueState)
+        return state or DialogueState(user_id=user_id)
+
+    def save_dialogue_state(
+        self,
+        user_id: str,
+        intent: str,
+        query: str,
+        entities: list[str],
+        genre_tags: list[str] | None = None,
+        mood_tags: list[str] | None = None,
+        scenario_tags: list[str] | None = None,
+    ) -> DialogueState:
+        prev = self.get_dialogue_state(user_id)
+        state = DialogueState(
+            user_id=user_id,
+            last_intent=intent,
+            last_query=query,
+            entities=list(entities),
+            genre_tags=list(genre_tags or []),
+            mood_tags=list(mood_tags or []),
+            scenario_tags=list(scenario_tags or []),
+            turn_count=prev.turn_count + 1,
+            updated_at=utc_now_iso(),
+        )
+        self.store.write_model("dialogue", user_id, state)
+        return state
+
+    def clear_dialogue_state(self, user_id: str) -> None:
+        self.store.delete_key("dialogue", user_id)
 
     def ensure_goal(self, user_id: str, query: str) -> AgentGoal | None:
         goal = self.get_active_goal(user_id)
@@ -380,6 +427,20 @@ def infer_preferences_from_results(query: str, results: list[dict[str, Any]]) ->
     return inferred[:2]
 
 
+def _extract_entities_from_results(results: list[dict[str, Any]]) -> list[str]:
+    """从检索结果中提取高频歌手名，作为兴趣信号写入记忆。
+
+    如果某个歌手在结果中出现了 2 次以上，说明用户正在关注这个歌手。
+    这比等用户说"我喜欢XXX"更主动。
+    """
+    artist_counts: dict[str, int] = {}
+    for track in _iter_verified_tracks(results):
+        artist = (getattr(track, "artist", "") or "").strip()
+        if artist and 2 <= len(artist) <= 30:
+            artist_counts[artist] = artist_counts.get(artist, 0) + 1
+    return [artist for artist, count in artist_counts.items() if count >= 2][:5]
+
+
 def _iter_verified_tracks(results: list[dict[str, Any]]) -> list[Any]:
     tracks: list[Any] = []
     for result in results:
@@ -456,7 +517,11 @@ def extract_goal(event: str) -> str | None:
 
 
 def cleanup(value: str) -> str:
-    return re.sub(r"\s+", " ", value.strip("。.!? ，,")).strip()
+    # 去掉前后的语气词（上/了/过/的/啊/呢/吧/哦）和标点
+    value = re.sub(r"\s+", " ", value.strip("。.!? ，,；;！"))
+    value = re.sub(r"^[上进了的了啊呢吧哦着过]", "", value)
+    value = re.sub(r"[上了的了啊呢吧哦着过]$", "", value)
+    return value.strip()
 
 
 def should_start_goal(query: str) -> bool:

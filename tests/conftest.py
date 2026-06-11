@@ -20,7 +20,7 @@ def fake_online_music_search(monkeypatch):
     from app.agent import AudioVisualAgent
     from app.models import ExternalTrack
 
-    def _fake_search_web_music(self, query: str, top_k: int = 5):
+    def _fake_search_web_music(self, query: str, top_k: int = 5, relevance_query: str = ""):
         seeds = [
             ExternalTrack(
                 external_id="netease-real-1",

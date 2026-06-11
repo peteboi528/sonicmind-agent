@@ -71,7 +71,7 @@ onMounted(load);
       <div class="section-sub">这些关键词会从推荐和搜索结果中过滤掉。你也可以在对话中说"不要抖音热歌"来自动添加。</div>
 
       <div class="input-row">
-        <input v-model="newRule" class="input" placeholder="输入排除词，如"抖音热歌"" @keyup.enter="addRule" />
+        <input v-model="newRule" class="input" placeholder="输入排除词，如：抖音热歌" @keyup.enter="addRule" />
         <button class="btn" :disabled="!newRule.trim()" @click="addRule">添加</button>
       </div>
 

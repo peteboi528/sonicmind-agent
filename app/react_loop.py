@@ -19,6 +19,15 @@ import re
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
+from app.answer import (
+    dedupe_tracks as _dedupe_candidates,
+    goal_progress as _goal_progress,
+    grounded_music_answer as _grounded_music_answer_impl,
+    grounded_track_list as _grounded_track_list_impl,
+    guard_answer,
+    infer_count as _infer_requested_count,
+    source_label as _source_label,
+)
 from app.llm.protocol import LLMResponse, ToolCall
 from app.llm.structured import extract_json_dict
 from app.llm.tools import (
@@ -108,6 +117,55 @@ def _matched_keyword_actions(query: str) -> list[ActionType]:
     return matched
 
 
+def _build_enriched_system_prompt(agent: CineSonicAgent, user_id: str) -> str:
+    """在静态 system prompt 后拼入用户画像摘要，让 LLM 知道用户是谁。
+
+    静态 prompt 定义角色和行为规则；动态画像注入偏好、排除规则、品味档案、
+    最近对话实体等信息，让 LLM 能做出个性化推荐和连贯多轮对话。
+    """
+    parts = [AGENT_SYSTEM_PROMPT]
+    try:
+        memory = agent.memory.get_memory(user_id)
+    except Exception:
+        return AGENT_SYSTEM_PROMPT
+
+    profile_lines: list[str] = []
+    # 偏好
+    if memory.preferences:
+        recent = memory.preferences[-5:]
+        profile_lines.append("用户提到过的偏好：" + "、".join(recent))
+    # 结构化偏好（高频）
+    if memory.structured_preferences:
+        from app.memory import score_entries
+        scored = score_entries(memory.structured_preferences)
+        top = [entry.text for entry, _ in scored[:5]]
+        if top:
+            profile_lines.append("高频偏好标签：" + "、".join(top))
+    # 排除规则
+    if memory.exclusion_rules:
+        profile_lines.append("用户明确排除：" + "、".join(memory.exclusion_rules))
+    # 品味档案
+    taste = memory.taste_profile
+    if taste:
+        if taste.top_genres:
+            genres = "、".join(g for g, _ in taste.top_genres[:3])
+            profile_lines.append(f"品味档案·风格：{genres}")
+        if taste.top_moods:
+            moods = "、".join(m for m, _ in taste.top_moods[:2])
+            profile_lines.append(f"品味档案·情绪：{moods}")
+    # 最近对话实体（DialogueState）
+    try:
+        dialogue = agent.memory.get_dialogue_state(user_id)
+        if dialogue.entities:
+            profile_lines.append("最近聊到的歌手/曲目：" + "、".join(dialogue.entities))
+    except Exception:
+        pass
+
+    if profile_lines:
+        parts.append("\n\n【用户画像】\n" + "\n".join(f"- {line}" for line in profile_lines))
+    return "\n".join(parts)
+
+
 class ReActLoop:
     def __init__(self, agent: CineSonicAgent) -> None:
         self.agent = agent
@@ -156,12 +214,28 @@ class ReActLoop:
         results: list[dict[str, Any]] = []
         tokens_total = 0
 
-        # 构造消息：system + history + 当前 user query
+        # 构造消息：system（含用户画像）+ history + 当前 user query
+        system_prompt = _build_enriched_system_prompt(self.agent, user_id)
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
         ]
         if history:
-            messages.extend({"role": m["role"], "content": m["content"]} for m in history)
+            # 保留 tool/tool_calls 字段，让 LLM 看到之前的工具交互上下文。
+            # 只对 role=assistant 且含 tool_calls 的消息保留完整结构；
+            # 对 tool 角色消息也保留 tool_call_id。
+            for m in history:
+                if m.get("role") == "tool":
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": m.get("tool_call_id", ""),
+                        "content": m.get("content", ""),
+                    })
+                else:
+                    messages.append({
+                        "role": m["role"],
+                        "content": m["content"],
+                        **({"tool_calls": m["tool_calls"]} if m.get("tool_calls") else {}),
+                    })
         ctx_parts: list[str] = []
         if asset_id:
             ctx_parts.append(f"当前媒体上下文 asset_id={asset_id}")
@@ -705,101 +779,13 @@ def _is_substantial_answer(answer: str) -> bool:
 
 
 def _grounded_track_list(query: str, results: list[dict[str, Any]]) -> str:
-    """生成可追溯歌曲清单（作为 LLM 自然语言回答的附录）。
-
-    只列出真实平台候选，不含模板化的"我优先采用..."开场白和"我的判断"——
-    那些由 LLM 自己的回答承担。无候选时返回空串（不打扰 LLM 的回答）。
-    """
-    target = _infer_requested_count(query)
-    tracks = _dedupe_candidates(_collect_track_candidates(results))
-    verified = [t for t in tracks if getattr(t, "source", "") in {"netease", "bilibili", "youtube"}]
-    fallback = [
-        t for t in tracks
-        if "fallback" in getattr(t, "source", "") or getattr(t, "source", "") in {"mock", "llm"}
-    ]
-    local = [t for t in tracks if getattr(t, "source", "local") == "local"]
-    selected = [*verified, *fallback, *local]
-    if target:
-        selected = selected[:target]
-    if not selected:
-        return ""
-    lines = ["📋 可追溯候选："]
-    for index, track in enumerate(selected[: max(target or 8, 8)], start=1):
-        title = getattr(track, "title", "")
-        artist = getattr(track, "artist", "") or "未知"
-        source_label = _source_label(getattr(track, "source", "local"))
-        lines.append(f"{index}. 《{title}》 - {artist}（{source_label}）")
-    return "\n".join(lines)
+    """ReAct fallback：可追溯歌曲清单附录。委托 app.answer，候选用窄收集器。"""
+    return _grounded_track_list_impl(query, results, _collect_track_candidates(results))
 
 
 def _grounded_music_answer(query: str, results: list[dict[str, Any]]) -> str:
-    target = _infer_requested_count(query)
-    tracks = _collect_track_candidates(results)
-    tracks = _dedupe_candidates(tracks)
-    verified = [track for track in tracks if getattr(track, "source", "") in {"netease", "bilibili", "youtube"}]
-    fallback = [
-        track for track in tracks
-        if "fallback" in getattr(track, "source", "") or getattr(track, "source", "") in {"mock", "llm"}
-    ]
-    local = [track for track in tracks if getattr(track, "source", "local") == "local"]
-
-    selected = [*verified, *fallback, *local]
-    if target:
-        selected = selected[:target]
-
-    if not selected:
-        return "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。"
-
-    lines = []
-    for index, track in enumerate(selected[: max(target or 8, 8)], start=1):
-        title = getattr(track, "title", "")
-        artist = getattr(track, "artist", "") or "未知"
-        source = getattr(track, "source", "local")
-        source_label = _source_label(source)
-        lines.append(f"{index}. 《{title}》 - {artist}（{source_label}）")
-
-    if verified:
-        intro = f"我优先采用真实线上候选，先给你这 {len(selected)} 首可追溯结果："
-    else:
-        intro = f"真实线上候选不足，这轮主要是 fallback/本地候选，共 {len(selected)} 首："
-    if target and len(selected) < target:
-        intro += f"\n说明：你要求 {target} 首，但目前可追溯候选只有 {len(selected)} 首；我不会用未核实歌曲强行补齐。"
-
-    opinion = ""
-    if verified:
-        first = verified[0]
-        opinion = f"\n\n我的判断：我会先听《{getattr(first, 'title', '')}》，因为它来自真实平台结果，可信度比本地 fallback 更高。"
-    elif fallback:
-        opinion = "\n\n我的判断：这批候选质量一般，属于降级结果；更适合继续换关键词联网补搜。"
-
-    return intro + "\n" + "\n".join(lines) + opinion
-
-
-def _source_label(source: str) -> str:
-    if source == "netease":
-        return "网易云真实曲目"
-    if source == "bilibili":
-        return "B 站真实视频/MV"
-    if source == "youtube":
-        return "YouTube 真实视频"
-    if "fallback" in source or source in {"mock", "llm"}:
-        return f"fallback:{source}"
-    return "本地库"
-
-
-def _dedupe_candidates(tracks: list[Any]) -> list[Any]:
-    seen: set[str] = set()
-    unique: list[Any] = []
-    for track in tracks:
-        title = getattr(track, "title", "")
-        artist = getattr(track, "artist", "")
-        source = getattr(track, "source", "local")
-        key = f"{source}|{title.lower()}|{artist.lower()}"
-        if not title or key in seen:
-            continue
-        seen.add(key)
-        unique.append(track)
-    return unique
+    """ReAct fallback：完整 grounded 音乐答案。委托 app.answer。"""
+    return _grounded_music_answer_impl(query, results, _collect_track_candidates(results))
 
 
 def _candidate_count(results: list[dict[str, Any]]) -> int:
@@ -924,14 +910,6 @@ def _legacy_compose(
     return "\n\n".join(answer_parts) if answer_parts else f"已处理你的请求：{query}"
 
 
-def _infer_requested_count(text: str) -> int | None:
-    match = re.search(r"(\d{1,3})\s*(?:首|个|tracks?|songs?)?", text, re.IGNORECASE)
-    if not match:
-        return None
-    value = int(match.group(1))
-    return max(1, min(value, 100))
-
-
 def _collect_track_candidates(results: list[dict[str, Any]]) -> list[Any]:
     tracks: list[Any] = []
     for result in results:
@@ -1007,67 +985,5 @@ def _collect_known_titles(results: list[dict[str, Any]]) -> set[str]:
     return titles
 
 
-def guard_answer(answer: str, known_titles: set[str]) -> tuple[str, list[str]]:
-    """Answer Guard：扫描答案里 《》 包裹的歌名，剔除白名单之外的幻觉曲目。
-
-    返回 (清洗后的答案, 被移除的幻觉歌名列表)。中文场景下歌名几乎都用
-    书名号包裹，这是高可靠、低误伤的程序化信号。
-    """
-    if not answer:
-        return answer, []
-    known_norm = {t.strip().lower() for t in known_titles}
-    hallucinated: list[str] = []
-
-    def _is_known(name: str) -> bool:
-        n = name.strip().lower()
-        if not n:
-            return True
-        if n in known_norm:
-            return True
-        # 容忍真实标题带副标题/译名等额外信息的包含匹配
-        return any(n in kt or kt in n for kt in known_norm)
-
-    def _replace(match: re.Match[str]) -> str:
-        name = match.group(1)
-        prefix = answer[max(0, match.start() - 8):match.start()]
-        if any(token in prefix for token in ["歌单", "专辑", "报告", "列表", "标题"]):
-            return match.group(0)
-        if _is_known(name):
-            return match.group(0)
-        hallucinated.append(name)
-        return ""  # 直接删除未经核实的歌名
-
-    cleaned = re.sub(r"《([^》]+)》", _replace, answer)
-
-    # 纵深防御：英文/中文引号包裹的疑似歌名也校验（LLM 自由生成文案时
-    # 可能不用书名号提歌名，绕过上面的 《》 扫描）。仅当被引内容像歌名
-    # （短、不含句末标点）才判定，避免误伤普通引用。
-    quoted_src = cleaned
-
-    def _replace_quoted(match: re.Match[str]) -> str:
-        name = match.group(1).strip()
-        if not name or len(name) > 40 or any(p in name for p in "。！？.!?，,；;\n"):
-            return match.group(0)
-        prefix = quoted_src[max(0, match.start() - 8):match.start()]
-        if any(token in prefix for token in ["歌单", "专辑", "报告", "列表", "标题", "需求", "请求"]):
-            return match.group(0)
-        if _is_known(name):
-            return match.group(0)
-        hallucinated.append(name)
-        return ""
-
-    cleaned = re.sub(r'[“"\']([^”"\'\n]+)[”"\']', _replace_quoted, quoted_src)
-    cleaned = re.sub(r"[、，,]\s*(?=[、，,。；;])", "", cleaned)  # 清理删除后残留的孤立标点
-    cleaned = re.sub(r"[^\S\r\n]{2,}", " ", cleaned).strip()
-    return cleaned, hallucinated
-
-
-def _goal_progress(goal: AgentGoal | None) -> list[str]:
-    if goal is None:
-        return []
-    lines = [f"status={goal.status}", f"goal={goal.goal}"]
-    if goal.steps_done:
-        lines.append("done=" + "、".join(goal.steps_done))
-    if goal.steps_pending:
-        lines.append("pending=" + "、".join(goal.steps_pending))
-    return lines
+# guard_answer 与 _goal_progress 已迁移至 app.answer，本模块顶部 import 后
+# 直接以原名 re-export，旧 import 路径（app.graph.nodes / tests）保持可用。

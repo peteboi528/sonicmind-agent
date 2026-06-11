@@ -71,6 +71,7 @@ export const api = {
     jsonFetch("/memory/update", { method: "POST", body: JSON.stringify({ user_id: userId, event }) }),
   getMemory: (userId) => jsonFetch(`/memory/${encodeURIComponent(userId)}`),
   getTaste: (userId) => jsonFetch(`/taste/${encodeURIComponent(userId)}`),
+  getRatings: (userId) => jsonFetch(`/ratings/${encodeURIComponent(userId)}`),
   dislike: (userId, track) =>
     jsonFetch("/feedback/dislike", { method: "POST", body: JSON.stringify({
       user_id: userId, title: track.title, artist: track.artist,

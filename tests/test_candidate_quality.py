@@ -21,8 +21,8 @@ class TestCandidateKindClassifier:
     def test_compilation_english(self):
         for title in [
             "The Weeknd Greatest Hits Full Album",
-            "Best of Coldplay Playlist",
-            "Non-stop EDM Mix 2024",
+            "The Best of Coldplay",
+            "Coldplay Compilation 2024",
         ]:
             assert _classify_candidate_kind(title, "youtube") == "compilation", title
 
@@ -30,10 +30,38 @@ class TestCandidateKindClassifier:
         assert _classify_candidate_kind("精选 50首 一次听个够", "bilibili") == "compilation"
         assert _classify_candidate_kind("Top 20 songs", "youtube") == "compilation"
 
-    def test_mv_kept(self):
-        assert _classify_candidate_kind("Blinding Lights (Official Video)", "youtube") == "mv"
-        assert _classify_candidate_kind("周杰伦 - 晴天 MV", "bilibili") == "mv"
-        assert _classify_candidate_kind("Adele Live at the BBC", "youtube") == "mv"
+    def test_official_mv_kept(self):
+        assert _classify_candidate_kind("Blinding Lights (Official Video)", "youtube") == "official_mv"
+        assert _classify_candidate_kind("周杰伦 - 晴天 MV", "bilibili") == "official_mv"
+        assert _classify_candidate_kind("Adele Live at the BBC", "youtube") == "official_mv"
+
+    def test_lyrics_video(self):
+        for title in [
+            "Blinding Lights (Lyrics)",
+            "周杰伦 晴天 动态歌词",
+            "Someone Like You Lyric Video",
+        ]:
+            assert _classify_candidate_kind(title, "youtube") == "lyrics_video", title
+
+    def test_playlist(self):
+        for title in [
+            "欧美流行 精选歌单",
+            "Chill Vibes Playlist 2024",
+            "华语流行排行榜",
+        ]:
+            assert _classify_candidate_kind(title, "bilibili") == "playlist", title
+
+    def test_long_mix(self):
+        for title in [
+            "Non-stop EDM Mix 2024",
+            "Deep House DJ Mix",
+            "Lofi 2 hours 连续播放",
+        ]:
+            assert _classify_candidate_kind(title, "youtube") == "long_mix", title
+
+    def test_remix_is_track_not_long_mix(self):
+        # 单曲 Remix 不应误判为 long_mix
+        assert _classify_candidate_kind("Blinding Lights (Chromatics Remix)", "netease") == "track"
 
     def test_plain_track(self):
         assert _classify_candidate_kind("Blinding Lights", "netease") == "track"
@@ -48,6 +76,27 @@ class TestValidExternalTrackFiltersCompilation:
         )
         assert _valid_external_track(track, "The Weeknd") is False
 
+    def test_playlist_dropped(self):
+        track = ExternalTrack(
+            external_id="bv2", title="Chill Playlist",
+            artist="", source="bilibili", candidate_kind="playlist",
+        )
+        assert _valid_external_track(track, "Chill") is False
+
+    def test_lyrics_video_dropped(self):
+        track = ExternalTrack(
+            external_id="yt3", title="Blinding Lights Lyrics",
+            artist="The Weeknd", source="youtube", candidate_kind="lyrics_video",
+        )
+        assert _valid_external_track(track, "The Weeknd") is False
+
+    def test_long_mix_dropped(self):
+        track = ExternalTrack(
+            external_id="yt4", title="EDM Non-stop Mix",
+            artist="", source="youtube", candidate_kind="long_mix",
+        )
+        assert _valid_external_track(track, "EDM") is False
+
     def test_track_kept(self):
         track = ExternalTrack(
             external_id="n1", title="Blinding Lights",
@@ -55,9 +104,9 @@ class TestValidExternalTrackFiltersCompilation:
         )
         assert _valid_external_track(track, "The Weeknd") is True
 
-    def test_mv_kept(self):
+    def test_official_mv_kept(self):
         track = ExternalTrack(
             external_id="yt1", title="Blinding Lights (Official Video)",
-            artist="The Weeknd", source="youtube", candidate_kind="mv",
+            artist="The Weeknd", source="youtube", candidate_kind="official_mv",
         )
         assert _valid_external_track(track, "The Weeknd") is True

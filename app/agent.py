@@ -325,11 +325,21 @@ class AudioVisualAgent:
     def _classify_once(self, pairs: list[tuple[str, str]]) -> list[dict[str, list[str]]]:
         lines = "\n".join(f"{i}. 《{t}》- {a or '未知'}" for i, (t, a) in enumerate(pairs))
         prompt = (
-            f"判断下面每首歌的风格和情绪。\n{lines}\n\n"
+            f"判断下面每首歌的风格（genre）和情绪（mood）。\n"
+            f"歌手名是判断风格的重要线索：看歌手名是否包含或暗示特定风格。\n\n"
+            f"{lines}\n\n"
             f"严格输出 JSON 数组，每项对应一首（按序号），格式：\n"
-            f'[{{"genre":"流行","mood":"治愈"}}]\n'
+            f'[{{"genre":"说唱","mood":"激昂"}}]\n\n'
             f"风格可选：流行、摇滚、电子、古典、R&B、说唱、爵士、民谣、国风、金属。\n"
-            f"情绪可选：欢快、治愈、励志、伤感、放松、激昂、浪漫、孤独。"
+            f"情绪可选：欢快、治愈、励志、伤感、放松、激昂、浪漫、孤独、律动、慵懒、热血、暗黑。\n\n"
+            f"判断指南：\n"
+            f"- 歌手名含 Ft./feat./× 或多位歌手 → 可能是说唱/R&B 合作曲\n"
+            f"- 英文歌名 + 中文歌手 → 可能是 R&B/说唱/独立\n"
+            f"- 歌手名含 Gem/Trap/Lil/K/制作人代号 → 倾向说唱\n"
+            f"- 歌手名含 keshi/Dean/Crush/Zion.T/SZA/The Weeknd → R&B\n"
+            f"- 摇滚/金属/朋克相关关键词 → 摇滚\n"
+            f"- DJ/Remix/电音/Beat → 电子\n"
+            f"- 不确定的宁可标「流行」也不要瞎猜小众风格\n"
         )
         out: list[dict[str, list[str]]] = [{"genre": [], "mood": []} for _ in pairs]
         try:
@@ -350,9 +360,9 @@ class AudioVisualAgent:
             logger.debug("Track classification failed for %s tracks", len(pairs), exc_info=True)
         return out
 
-    # 确定性兜底词表（与 _batch_classify_tracks / tag_rules 的可选值保持一致）
-    _FALLBACK_GENRES = ["流行", "摇滚", "电子", "古典", "R&B", "说唱", "爵士", "民谣", "国风"]
-    _FALLBACK_MOODS = ["欢快", "治愈", "励志", "伤感", "放松", "激昂", "浪漫", "宁静"]
+    # 确定性兜底词表（与 tag_rules 的可选值保持一致）
+    _FALLBACK_GENRES = ["流行", "摇滚", "电子", "古典", "R&B", "说唱", "爵士", "民谣", "国风", "金属"]
+    _FALLBACK_MOODS = ["欢快", "治愈", "励志", "伤感", "放松", "激昂", "浪漫", "宁静", "律动", "梦幻", "暗黑", "性感"]
 
     def _ensure_track_tags(
         self,
@@ -364,21 +374,21 @@ class AudioVisualAgent:
     ) -> tuple[list[str], list[str]]:
         """按可靠性逐层补全 genre/mood：
         1) LLM 分类结果（传入的 genre/mood）——最准；
-        2) 关键词规则从歌名+歌手推断（tag_rules）；
-        3) 歌单级 tags 映射的曲风（playlist_genres）——整单线索，比瞎猜可靠；
-        4) 仍为空 → genre 标「未分类」，绝不用 hash 随机或假「流行」污染品味画像。
-
-        历史教训：早期第 4 层用 hash 随机贴「摇滚/电子/说唱」，导致导入 70 首
-        R&B 出现错误风格；后改假「流行」又掩盖了 LLM 失败。现在失败就如实标
-        「未分类」，让用户和推荐系统都知道这首没识别出来。
+        2) 关键词规则从歌名+歌手推断（tag_rules extract_genre/mood）；
+        3) 歌手名→风格映射表（tag_rules extract_genre_from_artist）——覆盖已知艺人；
+        4) 歌单级 tags 映射的曲风（playlist_genres）——整单线索；
+        5) 仍为空 → genre 标「未分类」，绝不用 hash 随机或假「流行」污染品味画像。
         """
-        from app.graph.tag_rules import extract_genre, extract_mood
+        from app.graph.tag_rules import extract_genre, extract_genre_from_artist, extract_mood
 
         text = f"{title} {artist}"
         if not genre:
             genre = extract_genre(text)
         if not mood:
             mood = extract_mood(text)
+        # 歌手名映射兜底：比歌单 tags 更精准，覆盖 keshi/Drake/The Weeknd 等知名艺人
+        if not genre and artist:
+            genre = extract_genre_from_artist(artist)
         # 用歌单整单曲风兜底（网易云 tags 映射结果）
         if not genre and playlist_genres:
             genre = list(playlist_genres)
@@ -513,20 +523,31 @@ class AudioVisualAgent:
         time_of_day: str | None = None,
         count: int | None = None,
     ) -> DailyRecommendation:
+        count = count or settings.daily_rec_count
         memory = self.memory.get_memory(user_id)
         library = [a for a in self.list_assets() if a.status == "analyzed"]
         if not memory.taste_profile:
             memory = self.memory.refresh_taste_profile(user_id, library)
-        memory_query = self.memory.weighted_query(memory)
-        query = f"{time_of_day or 'current'} {' '.join(memory.common_goals[-2:])} {memory_query}".strip()
-        evidences = self.retrieve_library_evidence(query, top_k=4) if library else []
-        trace = [
-            f"memory_query={memory_query or 'none'}",
-            f"time_bucket={time_of_day or 'auto'}",
-            f"library_assets={len(library)}",
-            f"evidence_chunks={len(evidences)}",
-        ]
-        return self.daily.generate(memory, library, time_of_day, count=count, evidences=evidences, trace=trace)
+
+        # ── 构造品味驱动的推荐目标 ──
+        # 关键：目标句只含时间/风格/情绪词，不含歌手名。
+        # 歌手名通过 taste_summary + library_artists 传给 recommend_for_query 的 LLM 候选生成。
+        # 如果目标句含歌手名 → _query_has_entity=True → 走 exact 搜索 → 返回垃圾。
+        taste = memory.taste_profile or TasteProfile()
+        taste_genres = [g for g, _ in taste.top_genres[:3]]
+        taste_moods = [m for m, _ in taste.top_moods[:2]]
+        time_hint = time_of_day or get_time_bucket_name()
+
+        goal_parts = []
+        if time_hint:
+            goal_parts.append(time_hint)
+        if taste_genres:
+            goal_parts.append(" ".join(taste_genres))
+        if taste_moods:
+            goal_parts.append(" ".join(taste_moods))
+        goal = " ".join(goal_parts) if goal_parts else "推荐好听的音乐"
+
+        return self.recommend_for_query(user_id, goal, top_k=count)
 
     def find_similar_assets(self, asset_id: str, top_k: int = 5) -> list[SimilarAssetResult]:
         return self.similarity.find_similar_assets(asset_id, top_k)
@@ -540,11 +561,15 @@ class AudioVisualAgent:
         memory = self.memory.get_memory(user_id)
         memory_query = self.memory.weighted_query(memory)
         expanded_query = f"{query} {memory_query}".strip()
+        search_goal = _extract_search_query(query)
+        # 本地搜索：只用核心搜索词（search_goal），不用 memory 扩展词。
+        # 之前用 expanded_query.split() 做 any() 匹配，memory 的风格标签如
+        # "说唱""R&B""chill" 会匹配库里几乎所有歌，淹没真正相关的结果。
+        local_terms = search_goal.lower().split() if search_goal else query.lower().split()
         local_results: list[Asset] = []
-        query_lower = expanded_query.lower()
         for asset in self.list_assets():
             searchable = f"{asset.title} {asset.artist or ''} {' '.join(asset.genre)} {' '.join(asset.mood)}".lower()
-            if any(term in searchable for term in query_lower.split()):
+            if any(term in searchable for term in local_terms):
                 local_results.append(asset)
 
         evidences = self.retrieve_library_evidence(expanded_query, top_k=min(top_k, 6))
@@ -557,7 +582,10 @@ class AudioVisualAgent:
 
         external_results: list[ExternalTrack] = []
         if include_external:
-            external_results = self.search_web_music(expanded_query, top_k=top_k)
+            # 用 expanded_query 搜索拿更广结果，但相关性过滤用核心词 search_goal
+            external_results = self.search_web_music(
+                expanded_query, top_k=top_k, relevance_query=search_goal,
+            )
 
         summary = _format_search_summary(
             query=query,
@@ -580,13 +608,21 @@ class AudioVisualAgent:
             ],
         )
 
-    def search_web_music(self, query: str, top_k: int = 5) -> list[ExternalTrack]:
+    def search_web_music(self, query: str, top_k: int = 5, relevance_query: str = "") -> list[ExternalTrack]:
         """Agent tool wrapper for explicit online search.
 
         The default product flow remains offline-first. This method is only
         called when the ReAct loop decides the user needs real platform data.
         每个候选都必须回查到真实曲目元数据；回查失败的候选直接丢弃，
         绝不把搜索词 query 当成歌名返回（这是幻觉的主要来源之一）。
+
+        Args:
+            query: 传给搜索 API 的完整查询词（可含 memory 扩展词，获取更广结果）。
+            top_k: 目标候选数量。
+            relevance_query: 相关性过滤用的核心查询词。为空时默认等于 query。
+                当 query 包含 memory 扩展词（如风格/情绪标签 "Rock Pop chill"）时，
+                这些词不应该作为歌名匹配条件——它们搜得到、但不该决定去留。
+                传核心词（如歌手名）可避免 memory 扩展词误杀真实候选。
         """
         tracks: list[ExternalTrack] = []
 
@@ -644,13 +680,17 @@ class AudioVisualAgent:
             except Exception:
                 logger.debug("YouTube web music search failed for query=%s", query, exc_info=True)
 
-        tracks = [track for track in tracks if _valid_external_track(track, query)]
+        # 相关性过滤：用 relevance_query（核心词）而非完整 query（含 memory 扩展词）。
+        # memory 扩展词如 "Rock Pop chill" 用于引导搜索 API 返回更广结果，
+        # 但不应要求出现在每首歌的 title/artist 里，否则几乎所有候选被误杀。
+        rel_q = relevance_query or query
+        tracks = [track for track in tracks if _valid_external_track(track, rel_q)]
 
         # mock 只作为联网不足时的降级候选，必须带 fallback 标记。
         if len(tracks) < top_k:
             for candidate in self.source.search(query, limit=top_k - len(tracks)):
                 fallback = candidate.model_copy(update={"source": f"{candidate.source}-fallback"})
-                if _valid_external_track(fallback, query):
+                if _valid_external_track(fallback, rel_q):
                     tracks.append(fallback)
 
         seen: set[tuple[str, str]] = set()
@@ -1043,6 +1083,10 @@ class AudioVisualAgent:
             f"- {track.title} - {getattr(track, 'artist', '') or '?'} ({getattr(track, 'source', 'local')})"
             for track in candidates[:120]
         )
+        # 用户画像：品味摘要 + 排除规则，让 LLM 做个性化选曲
+        memory = self.memory.get_memory(user_id)
+        taste_summary = self.summarize_taste(user_id) if memory.taste_profile else ""
+        exclusion_rules = memory.exclusion_rules or None
 
         prompt = GENERATE_PLAYLIST_TEMPLATE(
             instruction=instruction,
@@ -1050,6 +1094,8 @@ class AudioVisualAgent:
             lib_desc=lib_desc,
             target_count=target_count,
             candidate_desc=candidate_desc,
+            taste_summary=taste_summary,
+            exclusion_rules=exclusion_rules,
         )
         try:
             result = self.llm.generate(prompt)
@@ -1124,7 +1170,13 @@ class AudioVisualAgent:
         playlists: list[Playlist] = []
         for key in keys:
             if key.startswith(f"{user_id}_"):
-                pl = self.store.read_model("playlists", key, Playlist)
+                # 单个歌单文件可能是旧 schema 写的（字段已变更），解析失败时
+                # 跳过它而不是让整个列表 500——否则前端只会看到「加载失败」。
+                try:
+                    pl = self.store.read_model("playlists", key, Playlist)
+                except Exception:
+                    logger.warning("Skipping unreadable playlist %s (stale schema?)", key, exc_info=True)
+                    continue
                 if pl:
                     playlists.append(pl)
         return playlists
@@ -1140,11 +1192,17 @@ class AudioVisualAgent:
         target_count: int,
     ) -> list[Asset | ExternalTrack]:
         search_terms = _playlist_search_terms(instruction)
+        # 从 instruction 中提取核心搜索词，用于相关性过滤（不含扩展的风格词）
+        relevance_core = _extract_search_query(instruction) or instruction
         external: list[ExternalTrack] = []
         for online_query in _playlist_online_queries(search_terms):
             if len(_dedupe_tracks([*seed_tracks, *external])) >= target_count:
                 break
-            external.extend(self.search_web_music(online_query, top_k=min(max(target_count, 8), 25)))
+            # 关键修复：用核心词做相关性过滤，扩展词只用于引导搜索API
+            external.extend(self.search_web_music(
+                online_query, top_k=min(max(target_count, 8), 25),
+                relevance_query=relevance_core,
+            ))
 
         if len(_dedupe_tracks([*seed_tracks, *external])) < target_count:
             external.extend(
@@ -1295,36 +1353,96 @@ class AudioVisualAgent:
         taste = memory.taste_profile or TasteProfile()
         genres = [genre for genre, _ in taste.top_genres[:4]]
         moods = [mood for mood, _ in taste.top_moods[:4]]
+        artists = [artist for artist, _ in taste.top_artists[:5]]
         prefs = memory.preferences[-3:]
         genre_text = "、".join(genres) if genres else "未形成稳定风格"
         mood_text = "、".join(moods) if moods else "暂无明显偏好"
         pref_text = "；".join(prefs) if prefs else "暂无"
-        return (
+        artist_text = "、".join(artists) if artists else ""
+        parts = [
             f"你的品味目前更偏向 {genre_text}，"
             f"情绪上常出现 {mood_text}，"
-            f"显式表达过的偏好包括 {pref_text}。"
-        )
+        ]
+        if artist_text:
+            parts.append(f"偏好的艺人有 {artist_text}，")
+        parts.append(f"显式表达过的偏好包括 {pref_text}。")
+        return "".join(parts)
 
     def recommend_for_query(self, user_id: str, goal: str, top_k: int = 5) -> DailyRecommendation:
         memory = self.memory.get_memory(user_id)
         memory_query = self.memory.weighted_query(memory)
-        online_query = f"{goal} {memory_query}".strip()
-        online_candidates = self.search_web_music(online_query, top_k=max(top_k * 2, top_k))
+        search_goal = _extract_search_query(goal)
+        taste_summary = self.summarize_taste(user_id) if memory.taste_profile else ""
+        library_artists = list({a.artist for a in self.list_assets() if a.artist})[:10]
+
+        # ── 三路搜索策略 ──
+        # 精确实体查询 (有歌手/歌名) → 网易云歌曲搜索
+        # 情绪/场景/模糊查询 → LLM 候选生成 + 网易云歌单搜索
+        trace_lines: list[str] = []
+        all_candidates: list[ExternalTrack] = []
+
+        has_entity = self._query_has_entity(search_goal)
+
+        if has_entity:
+            # 路由C：精确搜索（网易云歌曲搜索，这个是OK的）
+            trace_lines.append(f"route=exact, search_goal={search_goal}")
+            batch = self.search_web_music(search_goal, top_k=max(top_k * 2, top_k), relevance_query=search_goal)
+            all_candidates.extend(batch)
+        else:
+            # 路由A：LLM 候选生成 → 网易云验证
+            from app.search.web_music_discovery import discover_from_llm
+            llm_tracks = discover_from_llm(
+                query=goal,
+                taste_summary=taste_summary,
+                exclusion_rules=memory.exclusion_rules,
+                library_artists=library_artists,
+                target_count=top_k,
+                llm=self.llm,
+            )
+            trace_lines.append(f"route=llm_candidates, generated={len(llm_tracks)}")
+            all_candidates.extend(llm_tracks)
+
+            # 路由B：网易云歌单搜索
+            from app.search.netease_playlist import search_and_extract
+            # 构建精炼的歌单搜索词：品味风格 + 查询意图
+            taste_genres = ""
+            if memory.taste_profile and memory.taste_profile.top_genres:
+                taste_genres = " ".join(g for g, _ in memory.taste_profile.top_genres[:2])
+            playlist_query = f"{taste_genres} {search_goal}".strip() or goal
+            playlist_tracks = search_and_extract(playlist_query, max_playlists=3, tracks_per_playlist=top_k)
+            trace_lines.append(f"route=playlist, query={playlist_query!r}, extracted={len(playlist_tracks)}")
+            all_candidates.extend(playlist_tracks)
+
+            # 路由E：Last.fm 发现 → 网易云验证（需要配置 LASTFM_API_KEY）
+            from app.search.lastfm_discovery import discover_from_lastfm
+            taste_artists = [a for a, _ in (memory.taste_profile.top_artists if memory.taste_profile else [])]
+            taste_genre_names = [g for g, _ in (memory.taste_profile.top_genres if memory.taste_profile else [])]
+            lastfm_tracks = discover_from_lastfm(
+                top_artists=taste_artists or library_artists,
+                top_genres=taste_genre_names,
+                target_count=top_k,
+            )
+            if lastfm_tracks:
+                trace_lines.append(f"route=lastfm, verified={len(lastfm_tracks)}")
+                all_candidates.extend(lastfm_tracks)
+
+        # 去重 + 过滤
         verified = [
-            track for track in online_candidates
+            track for track in _dedupe_tracks(all_candidates)
             if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track)
         ]
 
-        # 如果加上 memory_query 后搜不到，用纯 goal 再搜一次（memory_query 可能干扰搜索）
-        if not verified:
-            online_candidates = self.search_web_music(goal, top_k=max(top_k * 2, top_k))
-            verified = [
-                track for track in online_candidates
-                if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track)
-            ]
+        # 兜底：用 search_goal 再搜一次
+        if len(verified) < top_k and search_goal:
+            fallback_batch = self.search_web_music(search_goal, top_k=max(top_k * 2, top_k))
+            for track in fallback_batch:
+                if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track):
+                    if not any(_track_key(track) == _track_key(v) for v in verified):
+                        verified.append(track)
 
         if verified:
-            ranked = self._rerank_tracks(user_id, online_query, _dedupe_tracks(verified), top_k)
+            rerank_query = search_goal or goal
+            ranked = self._rerank_tracks(user_id, rerank_query, _dedupe_tracks(verified), top_k)
             self.library.record_exposure([t for t, _ in ranked])
             self.library.decay_exposure_ts([t for t, _ in ranked])
             tracks: list[RecommendedTrack] = []
@@ -1339,28 +1457,81 @@ class AudioVisualAgent:
             return DailyRecommendation(
                 user_id=user_id,
                 tracks=tracks,
-                reason_summary=f"优先采用 {len(tracks)} 首真实线上候选，经三锚精排+MMR 多样性重排；本地库只作为偏好参考。",
+                reason_summary=f"采用 {len(tracks)} 首真实线上候选（LLM候选+歌单搜索+网易云验证），经三锚精排+MMR多样性重排。",
                 agent_trace=[
-                    f"online_query={online_query}",
+                    *trace_lines,
                     f"online_verified={len(verified)}",
-                    f"fallback_candidates={sum(1 for track in online_candidates if _is_fallback_track(track))}",
-                    "reason_source=online_candidate",
                     "rerank=tri_anchor+mmr",
                 ],
             )
 
-        # 真实候选不足时诚实返回空列表，不回退到 LLM 编造歌曲（source="llm" 幻觉）。
         logger.warning("recommend_for_query: no verified online candidates for goal=%s", goal)
         return DailyRecommendation(
             user_id=user_id,
             tracks=[],
             reason_summary=f"未找到与「{goal}」匹配的真实线上候选，暂不推荐虚构歌曲。",
-            agent_trace=[
-                f"online_query={online_query}",
-                "online_verified=0",
-                "reason_source=none_real_candidates",
-            ],
+            agent_trace=[*trace_lines, "online_verified=0"],
         )
+
+    @staticmethod
+    def _query_has_entity(search_goal: str) -> bool:
+        """判断搜索目标是否包含精确实体（歌手名/歌名），而非纯情绪/场景词。
+
+        简洁策略：
+        - 英文非风格词 → True（如 Drake, Frank Ocean）
+        - 中文且包含"常见歌手姓/名模式"或已知歌手 → True
+        - 否则 → False（走 LLM 候选 + 歌单搜索）
+        """
+        if not search_goal:
+            return False
+        import re
+
+        # 英文：排除纯风格/情绪词
+        generic_en = {"chill", "lofi", "vibe", "mix", "remix", "relax", "mood", "groove",
+                       "upbeat", "slow", "fast", "happy", "sad", "deep", "party",
+                       "r&b", "soul", "pop", "rock", "rap", "hip", "hop", "jazz",
+                       "electronic", "ambient", "acoustic", "indie", "funk",
+                       "morning", "night", "evening", "summer", "winter",
+                       "playlist", "songs", "music", "recommend"}
+        english = re.findall(r"[A-Za-z][A-Za-z0-9'&\-]*", search_goal)
+        english = [t for t in english if len(t) > 1 and t.lower() not in generic_en]
+        if english:
+            return True
+
+        # 中文：检测是否包含歌手/歌名模式的词
+        # 大多数中文歌手名是 2-4 个字符的人名，而纯功能/情绪查询的特征是：
+        # 只有短(2字)的情绪/场景/时间/功能词
+        cjk_tokens = re.findall(r"[一-鿿㐀-䶿]{2,}", search_goal)
+
+        # 所有非噪声 CJK token 都在泛化词表里 → 没有实体
+        _GENERAL_WORDS = {
+            # 情绪/氛围
+            "慵懒", "律动", "放松", "治愈", "欢快", "伤感", "浪漫", "激昂", "宁静", "梦幻",
+            "轻松", "开心", "忧郁", "温馨", "热血", "安静", "舒缓", "劲爆", "性感", "温柔",
+            "甜蜜", "兴奋", "空灵", "愉悦", "感动", "舒服", "烦躁", "低沉", "吵闹",
+            # 场景
+            "跑步", "运动", "工作", "学习", "睡眠", "开车", "通勤", "派对", "咖啡",
+            "健身", "旅行", "约会", "散步", "泡澡",
+            # 时间
+            "深夜", "早晨", "下午", "夜晚", "凌晨", "熬夜", "今夜", "今晚", "周末",
+            "早上", "晚上", "白天", "午后", "傍晚",
+            # 风格/曲风（这些不是实体，是分类词）
+            "说唱", "摇滚", "电子", "古典", "爵士", "民谣", "国风", "金属", "朋克",
+            "嘻哈", "蓝调", "乡村", "雷鬼", "灵魂", "放克", "迪斯科", "浩室",
+            "独立", "后摇", "新浪潮", "实验", "氛围", "新金属",
+            # 功能/描述
+            "混搭", "推荐", "适合", "流行", "好听", "经典", "热门", "小众", "风格",
+            "陪伴", "陪你", "氛围", "感觉", "能量", "曲风", "节奏", "律动",
+            "全部", "一些", "几首", "都有", "全都有",
+            "唱歌", "跳舞", "听歌", "背景",
+            # 常见功能词
+            "从", "到", "帮", "让", "给", "想", "要", "能", "来", "去",
+            "一个人", "两个人", "朋友", "恋人", "情侣",
+            "好听的音乐", "推荐一些歌", "推荐几首歌", "帮我推荐一些歌",
+            "给我推荐", "推荐一些", "推荐几首", "帮我推荐",
+        }
+        non_general = [t for t in cjk_tokens if t not in _GENERAL_WORDS and t not in _QUERY_NOISE]
+        return bool(non_general)
 
     def _rerank_tracks(self, user_id: str, query: str, tracks: list[Any], top_k: int):
         """三锚精排 + MMR 多样性重排管线。返回 [(track, RankingBreakdown), ...]。"""
@@ -1481,6 +1652,51 @@ def _infer_playlist_count(text: str) -> int | None:
     if not match:
         return None
     return max(1, min(int(match.group(1)), 100))
+
+
+def get_time_bucket_name() -> str:
+    """返回当前时间段中文名（用于推荐目标句）。"""
+    from app.recommend.daily import get_time_bucket
+    _NAMES = {"morning": "早上", "focus": "工作学习", "afternoon": "下午",
+              "evening": "晚上", "night": "深夜"}
+    return _NAMES.get(get_time_bucket(), "今天")
+
+
+def _extract_search_query(goal: str) -> str:
+    """从自然语言目标句中提取可用于音乐平台搜索的关键词。
+
+    例如：
+      "帮我推荐几首Drake的歌" → "Drake"
+      "推荐一些周杰伦的歌曲" → "周杰伦"
+      "Drake hip hop" → "Drake hip hop"（已是关键词，原样返回）
+    """
+    # 用 noise 词表清洗：中文功能词直接替换（CJK 无词边界），
+    # 英文 noise 词用词边界 \b 避免误伤 "Drake" 里的 "a"。
+    cleaned = goal
+    # 先替换长中文功能词（避免短词先替换影响长词匹配）
+    for noise in sorted(_QUERY_NOISE, key=len, reverse=True):
+        if not noise or not all('一' <= c <= '鿿' or '㐀' <= c <= '䶿' for c in noise):
+            continue  # 跳过英文 noise，后面用 \b 处理
+        if noise in cleaned:
+            cleaned = cleaned.replace(noise, " ")
+    # 英文 noise 用词边界替换
+    for noise in sorted(_QUERY_NOISE, key=len, reverse=True):
+        if not noise or not noise.isascii():
+            continue
+        cleaned = re.sub(r'\b' + re.escape(noise) + r'\b', ' ', cleaned, flags=re.IGNORECASE)
+
+    # 先尝试提取英文词（艺人名/专辑名通常是英文）
+    english_tokens = re.findall(r"[A-Za-z][A-Za-z0-9'&\-]*", cleaned)
+    english_tokens = [t for t in english_tokens if t.lower() not in _QUERY_NOISE and len(t) > 1]
+
+    # 再提取中文实体词：从清洗后的文本中取连续 CJK 字符段
+    cjk_tokens = re.findall(r"[一-鿿㐀-䶿豈-﫿]{2,}", cleaned)
+    cjk_tokens = [t for t in cjk_tokens if t not in _QUERY_NOISE]
+
+    candidates = english_tokens + cjk_tokens
+    if candidates:
+        return " ".join(candidates)
+    return goal  # 兜底：返回原始 goal
 
 
 def _playlist_search_terms(instruction: str) -> str:
@@ -1619,30 +1835,68 @@ def _is_fallback_track(track: Asset | ExternalTrack) -> bool:
     return "fallback" in source or source in {"mock", "llm"}
 
 
-def _classify_candidate_kind(title: str, source: str) -> str:
-    """根据标题判断候选类型：track / mv / compilation。
+# 推荐卡片允许出现的候选类型：单曲 + 可绑定歌曲的官方 MV。
+# unknown 暂时保留（B站/YouTube 兜底里大量无信号标题多半是单曲，
+# 全判 unknown 会掏空兜底），噪声四类 playlist/compilation/long_mix/
+# lyrics_video 一律过滤。
+_ALLOWED_CANDIDATE_KINDS = {"track", "official_mv", "unknown"}
 
-    B站/YouTube 大量返回「合集/连播/串烧/精选集」类视频，这些不是单曲，
-    混进推荐会严重退化体验（如「推荐 The Weeknd」只出歌曲合集视频）。
-    这里用关键词识别，compilation 类在 _valid_external_track 中被丢弃。
+
+def _classify_candidate_kind(title: str, source: str) -> str:
+    """根据标题判断候选类型，七分类：
+
+    track / official_mv / lyrics_video / playlist / compilation / long_mix / unknown
+
+    B站/YouTube 大量返回「合集/连播/串烧/歌单/动态歌词/长混音」类视频，
+    这些不是单曲，混进推荐会严重退化体验（如「推荐 The Weeknd」只出合集）。
+    用关键词识别，噪声类在 _valid_external_track 中被丢弃；track 与
+    official_mv（可绑定歌曲的官方 MV/现场）保留进卡片。
+    检查顺序：最具体的噪声类优先，避免被泛词（如 mix 命中 official video）误判。
     """
     t = (title or "").lower()
-    # 合集/连播信号（中英）
+
+    # 1. 动态歌词 / 歌词版视频
+    lyrics_signals = ["动态歌词", "歌词版", "歌词视频", "lyric video", "lyrics video", "(lyrics)", "[lyrics]"]
+    if any(sig in t for sig in lyrics_signals):
+        return "lyrics_video"
+
+    # 2. 歌单类（整张歌单/榜单，不是单曲）
+    playlist_signals = ["歌单", "playlist", "排行榜", "top chart", "网易云歌单"]
+    if any(sig in t for sig in playlist_signals):
+        return "playlist"
+
+    # 3. 长混音 / 连续播放（DJ mix、N 小时连播）；排除单曲 Remix
+    long_mix_signals = [
+        "non-stop", "nonstop", "megamix", "mega mix", "dj mix",
+        "连续播放", "一直播放", "纯音乐合集", "睡眠歌单",
+    ]
+    if "remix" not in t:
+        if any(sig in t for sig in long_mix_signals):
+            return "long_mix"
+        # 以 "mix" 作词收尾的整段混音（"... EDM Mix"），但单个单词 remix 已排除
+        if re.search(r"\bmix\b\s*\d*\)?\s*$", t):
+            return "long_mix"
+    if re.search(r"\d+\s*(?:小时|hours?|hrs?)\b", t):
+        return "long_mix"
+
+    # 4. 合集 / 连播 / 串烧 / 精选集 / Greatest Hits / Full Album
     compilation_signals = [
-        "合集", "连播", "串烧", "歌曲合集", "精选集", "歌单", "全部歌曲",
+        "合集", "连播", "串烧", "歌曲合集", "精选集", "全部歌曲",
         "全部曲目", "经典回顾", "最全", "歌曲大全", "纯享合集", "金曲合集",
-        "playlist", "full album", "all songs", "greatest hits", "mix",
-        "compilation", "best of", "non-stop", "megamix", "mega mix", "歌曲串烧",
+        "full album", "all songs", "greatest hits", "compilation",
+        "best of", "歌曲串烧",
     ]
     if any(sig in t for sig in compilation_signals):
         return "compilation"
-    # 时长/数量型信号：标题里出现「N首」「N分钟」连播暗示
+    # 数量型信号：标题里出现「N首」「N songs」暗示连播合集
     if re.search(r"\d+\s*首", t) or re.search(r"\d+\s*songs?\b", t):
         return "compilation"
-    # MV/现场信号（可播，保留为 mv）
-    mv_signals = ["mv", "live", "现场", "演唱会", "官方视频", "official video", "music video"]
+
+    # 5. 官方 MV / 现场（可播，可绑定单曲，保留）
+    mv_signals = ["mv", "live", "现场", "演唱会", "官方视频", "official video", "official music video", "music video"]
     if any(sig in t for sig in mv_signals):
-        return "mv"
+        return "official_mv"
+
     return "track"
 
 
@@ -1650,6 +1904,15 @@ def _classify_candidate_kind(title: str, source: str) -> str:
 _QUERY_NOISE = {"的", "了", "在", "是", "我", "你", "他", "她", "它", "和", "与", "或",
                 "歌", "曲", "音乐", "首", "些", "几", "个", "找", "要", "想", "帮", "给",
                 "推荐", "适合", "播放", "听", "下", "不", "也", "都", "就", "还", "又",
+                "几首", "一些", "几个", "来几", "来首", "我想", "帮我", "给我", "来点",
+                "好听", "推一", "推几", "推些", "介绍", "分享", "列举", "一下",
+                # 常见功能词/动词（之前缺失导致变成相关性过滤 token 杀死搜索结果）
+                "生成", "只要", "其他", "不要", "别的", "其他", "还有", "有没有",
+                "可以", "能", "会", "让", "从", "到", "去", "来", "上", "这", "那",
+                "什么", "怎么", "哪些", "如何", "为什么", "多少", "很多", "比较",
+                "帮我搜索", "帮我找", "给我推荐", "帮我推荐", "来几首", "弄几首",
+                "做", "弄", "搞", "弄个", "做个", "生成个",
+                "songs", "song", "music", "me", "some", "please",
                 "a", "an", "the", "of", "in", "on", "is", "to", "for", "me", "my", "and",
                 "or", "it", "s", "t", "m"}
 
@@ -1663,27 +1926,49 @@ def _query_matches_track(query: str, track: ExternalTrack) -> bool:
     """
     import unicodedata
 
-    # 分词：按空格/标点拆，过滤停用词和过短 token
-    tokens = re.split(r"[\s,，、·\-|/\\]+", query.strip())
+    def _split_tokens(text: str) -> list[str]:
+        # 先按空格/标点拆，再对每段按 ASCII/CJK 边界二次拆分
+        # 例如 "帮我推荐几首Drake的歌" → ["Drake"] (中文功能词被噪声表过滤掉)
+        raw = re.split(r"[\s,，、·\-|/\\]+", text.strip())
+        result = []
+        for seg in raw:
+            # 把连续 ASCII 字符和连续 CJK 字符分开
+            sub_tokens = re.findall(r"[A-Za-z0-9]+|[一-鿿㐀-䶿豈-﫿]+", seg)
+            result.extend(sub_tokens if sub_tokens else [seg])
+        return result
+
+    tokens = _split_tokens(query)
     tokens = [t for t in tokens if t and t.lower() not in _QUERY_NOISE and len(t) > 1]
     if not tokens:
         return True  # 纯噪声查询不过滤
 
     searchable = f"{(track.title or '')} {(track.artist or '')}".lower()
 
+    matched_any = False
+    cjk_tokens: list[str] = []
+
     for token in tokens:
         lowered = token.lower()
+        is_cjk = any("CJK" in unicodedata.name(c, "") for c in token if c.strip())
         if lowered in searchable:
+            matched_any = True
             continue
-        # 英文 token 做子串模糊匹配（"drake" 匹配 "Drake、Future"）
-        # 但中文 token 必须精确子串匹配（"周杰伦" 不应匹配 "周杰"）
-        is_cjk = any("CJK" in unicodedata.name(c, "") for c in token)
-        if is_cjk:
-            if token not in searchable:
-                return False
-        else:
+        if not is_cjk:
+            # 英文/数字 token 必须命中；否则直接拒绝
             if lowered not in searchable:
                 return False
+            matched_any = True
+        else:
+            cjk_tokens.append(token)
+
+    # 有英文 token 命中时，中文功能词不再做硬过滤，避免自然语言句子误杀
+    if matched_any:
+        return True
+
+    # 纯中文查询：所有 CJK token 必须全部命中
+    for token in cjk_tokens:
+        if token not in searchable:
+            return False
     return True
 
 
@@ -1699,8 +1984,8 @@ def _valid_external_track(track: ExternalTrack, query: str) -> bool:
         return False
     if len(title) > 80 and " - " not in title:
         return False
-    # 合集/连播类视频污染推荐，直接丢弃（网易云单曲不受影响）。
-    if getattr(track, "candidate_kind", "track") == "compilation":
+    # 合集/连播/歌单/动态歌词/长混音类视频污染推荐，只保留单曲/官方MV/未知兜底。
+    if getattr(track, "candidate_kind", "track") not in _ALLOWED_CANDIDATE_KINDS:
         return False
     # 相关性过滤：搜索词的每个显著词元必须至少命中 title 或 artist 之一。
     # 否则网易云模糊搜索会返回大量歌词/评论里提到关键词但实际无关的歌曲。

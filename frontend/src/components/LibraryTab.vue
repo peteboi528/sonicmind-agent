@@ -14,6 +14,19 @@ async function load() {
   try {
     const data = await api.listAssets();
     assets.value = data.assets || [];
+    // 从后端加载已保存的评分，合并到 asset._rated 让星星点亮
+    try {
+      const ratingsData = await api.getRatings(store.userId);
+      const ratingMap = {};
+      for (const r of ratingsData.ratings || []) {
+        ratingMap[r.asset_id] = r.score;
+      }
+      for (const a of assets.value) {
+        if (ratingMap[a.asset_id] != null) {
+          a._rated = ratingMap[a.asset_id];
+        }
+      }
+    } catch { /* 评分加载失败不影响主流程 */ }
   } catch { msg.value = "加载库失败。"; }
   finally { loading.value = false; }
 }

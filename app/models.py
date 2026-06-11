@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def utc_now_iso() -> str:
@@ -103,6 +103,7 @@ class ListeningEvent(BaseModel):
 class TasteProfile(BaseModel):
     top_genres: list[tuple[str, float]] = Field(default_factory=list)
     top_moods: list[tuple[str, float]] = Field(default_factory=list)
+    top_artists: list[tuple[str, float]] = Field(default_factory=list)
     preferred_energy: float = 0.5
     preferred_tempo_range: list[int] = Field(default_factory=lambda: [80, 140])
     discovery_openness: float = 0.3
@@ -193,6 +194,24 @@ class AgentGoal(BaseModel):
     updated_at: str = Field(default_factory=utc_now_iso)
 
 
+class DialogueState(BaseModel):
+    """轻量多轮对话状态：用于"再来几首/换一批/类似这个"这类延续请求。
+
+    与 UserMemory（长期偏好）分开存储在 dialogue/{user_id}.json，只记最近一轮的
+    意图与实体，话题切换时清空。load_context 读取，plan_intent 在 LLM 未抽到实体
+    的延续指令上程序化继承，finalize 写回。
+    """
+    user_id: str
+    last_intent: str = "chat"
+    last_query: str = ""
+    entities: list[str] = Field(default_factory=list)
+    genre_tags: list[str] = Field(default_factory=list)
+    mood_tags: list[str] = Field(default_factory=list)
+    scenario_tags: list[str] = Field(default_factory=list)
+    turn_count: int = 0
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
 class RetrievalPlan(BaseModel):
     """结构化检索执行计划（对齐 SoulTuner MusicQueryPlan.retrieval_plan 思想）。
 
@@ -209,14 +228,24 @@ class RetrievalPlan(BaseModel):
 
 
 class AgentPlan(BaseModel):
-    # capability 意图：直接对齐 graph/nodes.py 的真实执行分支
-    intent: Literal["recommend", "search", "playlist", "taste", "import", "journey", "discuss", "chat"] = "chat"
+    # capability 意图：对照 app.intents.INTENT_REGISTRY 校验。
+    # 用 str + validator 而非 Literal，新增意图只需改 registry，不会因漏改
+    # 这里的 Literal 触发 Pydantic 500（历史上 discuss 就是这样炸的）。
+    # 未知意图统一降级为 chat，保证主流程不崩。
+    intent: str = "chat"
     strategy: Literal["online_first", "library_first", "memory_only", "no_search"] = "online_first"
     tools_needed: list[str] = Field(default_factory=list)
     target_count: int | None = None
     online_required: bool = True
     reasoning_summary: str = ""
     retrieval_plan: RetrievalPlan = Field(default_factory=RetrievalPlan)
+
+    @field_validator("intent", mode="before")
+    @classmethod
+    def _coerce_intent(cls, v: object) -> str:
+        from app.intents import is_valid_intent
+        s = str(v or "chat")
+        return s if is_valid_intent(s) else "chat"
 
 
 class ResourceTrack(BaseModel):
@@ -292,9 +321,18 @@ class ExternalTrack(BaseModel):
     preview_url: str | None = None
     playback_url: str | None = None
     source: str = "mock"
-    # 候选类型：track=单曲 / mv=单曲MV或现场（可播，保留）/
-    # compilation=合集连播串烧（污染源，过滤掉）。
-    candidate_kind: Literal["track", "mv", "compilation"] = "track"
+    # 候选类型（七分类）：
+    #   track        单曲（保留）
+    #   official_mv  官方 MV / 现场（可绑定单曲，保留）
+    #   lyrics_video 动态歌词/歌词版（过滤）
+    #   playlist     歌单/榜单（过滤）
+    #   compilation  合集/连播/串烧/精选集（过滤）
+    #   long_mix     长混音/连续播放/DJ mix（过滤）
+    #   unknown      无明确信号（兜底保留）
+    candidate_kind: Literal[
+        "track", "official_mv", "lyrics_video", "playlist",
+        "compilation", "long_mix", "unknown",
+    ] = "track"
 
 
 TrackOrigin = Literal["local", "netease", "bilibili", "youtube", "mock", "llm_guess"]

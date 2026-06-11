@@ -13,9 +13,40 @@ const prefEvent = ref("");
 const learning = ref(false);
 const msg = ref("");
 
+// 我的歌单
+const myPlaylists = ref([]);
+const loadingPlaylists = ref(false);
+const selectedPlaylistId = ref("");
+
+async function loadMyPlaylists() {
+  loadingPlaylists.value = true;
+  msg.value = "";
+  try {
+    const data = await api.neteasePlaylistList(store.userId);
+    if (data.error) { msg.value = data.error; return; }
+    myPlaylists.value = data.playlists || [];
+    if (myPlaylists.value.length) selectedPlaylistId.value = String(myPlaylists.value[0].id);
+  } catch { msg.value = "加载歌单失败"; }
+  finally { loadingPlaylists.value = false; }
+}
+
+async function importSelected() {
+  if (!selectedPlaylistId.value) return;
+  importing.value = true;
+  msg.value = "";
+  try {
+    const r = await api.importNetease(store.userId, selectedPlaylistId.value, importLimit.value);
+    if (r.error) msg.value = r.error;
+    else msg.value = `导入《${r.name}》：新增 ${r.imported}/${r.total} 首`;
+  } catch { msg.value = "导入失败"; }
+  finally { importing.value = false; }
+}
+
 function saveUser() {
   store.setUser(userInput.value);
   refreshAccount();
+  myPlaylists.value = [];
+  selectedPlaylistId.value = "";
   msg.value = "已切换用户：" + store.userId;
 }
 
@@ -30,6 +61,8 @@ async function unbind() {
   try {
     await api.neteaseUnbind(store.userId);
     store.setNetease({ bound: false });
+    myPlaylists.value = [];
+    selectedPlaylistId.value = "";
     msg.value = "已解绑网易云";
   } catch { msg.value = "解绑失败"; }
 }
@@ -95,6 +128,28 @@ onMounted(refreshAccount);
     <!-- 导入歌单 -->
     <div class="block">
       <div class="block-title">导入网易云歌单</div>
+
+      <!-- 已登录时：加载我的歌单 -->
+      <template v-if="store.netease.bound">
+        <button class="btn-ghost sm full" :disabled="loadingPlaylists" @click="loadMyPlaylists">
+          {{ loadingPlaylists ? "加载中…" : "加载我的歌单" }}
+        </button>
+        <template v-if="myPlaylists.length">
+          <select v-model="selectedPlaylistId" class="input sm select-pl">
+            <option v-for="pl in myPlaylists" :key="pl.id" :value="String(pl.id)">
+              {{ pl.name }}（{{ pl.count }} 首）
+            </option>
+          </select>
+          <div class="import-row">
+            <input v-model.number="importLimit" type="number" class="input sm num" min="10" max="500" />
+            <button class="btn-ghost sm" :disabled="importing || !selectedPlaylistId" @click="importSelected">
+              {{ importing ? "导入中…" : "导入选中" }}
+            </button>
+          </div>
+        </template>
+        <div class="divider-or">或手动输入</div>
+      </template>
+
       <input v-model="importRef" class="input sm" placeholder="歌单链接或 ID" />
       <div class="import-row">
         <input v-model.number="importLimit" type="number" class="input sm num" min="10" max="500" />
@@ -142,6 +197,11 @@ onMounted(refreshAccount);
 .ne-name { font-size: 0.85rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ne-vip { font-size: 0.72rem; color: var(--accent); }
 .msg { font-size: 0.8rem; color: var(--accent); background: var(--accent-dim); padding: 8px 10px; border-radius: var(--radius-sm); }
+.select-pl { width: 100%; margin-bottom: 6px; appearance: auto; }
+.divider-or { font-size: 0.72rem; color: var(--text-muted); text-align: center; margin: 8px 0 6px; position: relative; }
+.divider-or::before, .divider-or::after { content: ""; position: absolute; top: 50%; width: 38%; height: 1px; background: var(--border); }
+.divider-or::before { left: 0; }
+.divider-or::after { right: 0; }
 @media (max-width: 768px) {
   .sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; gap: 12px; }
   .block { flex: 1; min-width: 140px; }

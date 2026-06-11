@@ -3,16 +3,24 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING, Any
 
+from app.answer import (
+    collect_known_titles,
+    collect_tracks as _collect_tracks,
+    goal_progress as _goal_progress,
+    guard_answer,
+    infer_count as _infer_count,
+    song_card as _song_card,
+)
 from app.context import ContextBudgetManager, ContextSource
 from app.config import settings
 from app.graph.tag_rules import extract_tags
+from app.intents import get_intent, is_continuation, is_valid_intent, match_intent_by_keywords
 from app.llm.structured import extract_json_dict
 from app.models import AgentAnswer, AgentPlan, RetrievalPlan, StreamEvent
 from app.prompts import QUERY_PLAN_SYSTEM
-from app.react_loop import _goal_progress, guard_answer
 
 if TYPE_CHECKING:
-    from app.agent import AudioVisualAgent
+    from app.agent import AudioVisualAgent, _extract_search_query
     from app.graph.state import AgentState
 
 
@@ -20,6 +28,7 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     memory = agent.memory.get_memory(state["user_id"])
     goal = agent.memory.get_active_goal(state["user_id"])
     memory_query = agent.memory.weighted_query(memory)
+    dialogue = agent.memory.get_dialogue_state(state["user_id"])
 
     # GSSC：按优先级把用户输入/记忆/历史压进 token 预算，产出追踪报告。
     history = state.get("history") or []
@@ -37,6 +46,7 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         "active_goal": goal.model_dump(mode="json") if goal else None,
         "resource_count": len(agent.list_resource_tracks(50)),
         "budget_report": report.as_lines(),
+        "dialogue_state": dialogue.model_dump(mode="json"),
     }
     return {
         **state,
@@ -49,17 +59,66 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
 
 def plan_intent(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     query = state["query"]
-    history_text = (state.get("context") or {}).get("history_text", "")
+    context = state.get("context") or {}
+    history_text = context.get("history_text", "")
     plan = plan_with_llm(agent, query, history_text) or build_agent_plan(query)
+    plan, inherited = _apply_dialogue_continuation(plan, query, context.get("dialogue_state"))
+    trace_line = f"[plan] {plan.reasoning_summary}"
+    if inherited:
+        trace_line += f"（延续上一轮：继承 {inherited}）"
     return {
         **state,
         "plan": plan,
-        "trace": [*state.get("trace", []), f"[plan] {plan.reasoning_summary}"],
+        "trace": [*state.get("trace", []), trace_line],
         "events": [
             *state.get("events", []),
             StreamEvent(type="plan", content=plan.reasoning_summary, payload=plan.model_dump(mode="json")),
         ],
     }
+
+
+def _apply_dialogue_continuation(
+    plan: AgentPlan,
+    query: str,
+    dialogue_state: dict[str, Any] | None,
+) -> tuple[AgentPlan, str]:
+    """延续指令（再来几首/换一批/类似这个）程序化继承上一轮实体与标签。
+
+    仅当本轮被判为延续、且本轮没抽到自己的实体时才继承；返回 (新计划, 继承说明)。
+    话题切换（本轮自带新实体/明确意图）不继承——交由 finalize 时覆盖旧状态。
+    """
+    if not dialogue_state or not is_continuation(query):
+        return plan, ""
+    rp = plan.retrieval_plan
+    # 本轮已自带实体，说明用户给了新对象，不继承。
+    if rp.entities:
+        return plan, ""
+    prev_entities = dialogue_state.get("entities") or []
+    prev_intent = dialogue_state.get("last_intent") or plan.intent
+    if not prev_entities and prev_intent in {"chat"}:
+        return plan, ""
+
+    # 继承上一轮意图（除非本轮 LLM 给了更具体的非 chat 意图）。
+    intent = plan.intent if plan.intent not in {"chat"} else prev_intent
+    spec = get_intent(intent)
+    use_web = plan.online_required or spec.online_default
+    merged = RetrievalPlan(
+        use_local=rp.use_local,
+        use_vector=rp.use_vector or bool(dialogue_state.get("mood_tags") or dialogue_state.get("scenario_tags")),
+        use_web=use_web,
+        entities=prev_entities,
+        genre_filter=rp.genre_filter or dialogue_state.get("genre_tags") or [],
+        mood_filter=rp.mood_filter or dialogue_state.get("mood_tags") or [],
+        scenario_filter=rp.scenario_filter or dialogue_state.get("scenario_tags") or [],
+    )
+    new_plan = plan.model_copy(update={
+        "intent": intent,
+        "strategy": spec.strategy_for(use_web),
+        "tools_needed": spec.tools_for(use_web),
+        "online_required": use_web,
+        "retrieval_plan": merged,
+    })
+    return new_plan, "、".join(prev_entities) or prev_intent
 
 
 def execute_tools(agent: AudioVisualAgent, state: AgentState) -> AgentState:
@@ -128,8 +187,14 @@ def _run_tool(
     events: list[StreamEvent],
 ) -> None:
     events.append(StreamEvent(type="tool_start", content=f"调用 {tool}", payload={"tool": tool}))
+    # 从原始 query 中提取核心搜索词（去掉中文功能词），用于搜索 API 和相关性过滤。
+    # 不做这步的话 "帮我生成一些drake的歌" 直接发到网易云 API，搜不到结果。
+    from app.agent import _extract_search_query as _extract_core
+    search_core = _extract_core(query) or query
     if tool == "web_music_search":
-        tracks = agent.search_web_music(query, top_k=max(plan.target_count or top_k, top_k))
+        # 搜索用核心词 + plan 实体（LLM 抽取的歌手/歌名），相关性过滤只用核心词
+        search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
+        tracks = agent.search_web_music(search_q, top_k=max(plan.target_count or top_k, top_k), relevance_query=search_core)
         for track in tracks:
             if hasattr(agent, "library"):
                 agent.library.upsert_external(track)
@@ -139,6 +204,7 @@ def _run_tool(
         cards = [_song_card(t) for t in tracks]
         events.append(StreamEvent(type="candidates", content=f"候选 {len(tracks)} 个", payload={"count": len(tracks), "cards": cards}))
     elif tool == "recommend":
+        # recommend_for_query 内部会自己提取 search_goal，这里用原始 query 即可
         rec = agent.recommend_for_query(user_id, query, top_k=top_k)
         results.append({"type": "daily_recommend", "recommendation": rec})
         trace.append(f"[recommend] 生成 {len(rec.tracks)} 首推荐。")
@@ -186,9 +252,10 @@ def evaluate(agent: AudioVisualAgent, state: AgentState) -> AgentState:
 
 def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     memory_query = (state.get("context") or {}).get("memory_query", "")
+    history_text = (state.get("context") or {}).get("history_text", "")
     answer_text = compose_answer(
         state["query"], state.get("results", []), state["plan"],
-        agent=agent, memory_query=memory_query,
+        agent=agent, memory_query=memory_query, history_text=history_text,
     )
     known = collect_known_titles(state.get("results", []))
     answer_text, removed = guard_answer(answer_text, known)
@@ -201,6 +268,7 @@ def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     if removed:
         trace.append(f"[guard] 移除 {len(removed)} 个未核实歌名。")
     trace.append("[final] 输出 grounded answer。")
+    _persist_dialogue_state(agent, state)
     answer = AgentAnswer(
         answer=answer_text,
         evidences=[],
@@ -215,6 +283,29 @@ def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         "trace": trace,
         "events": [*state.get("events", []), StreamEvent(type="final", content=answer_text, payload=answer.model_dump(mode="json"))],
     }
+
+
+def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
+    """把本轮意图/实体/标签写回 DialogueState，供下一轮延续指令继承。
+
+    chat 意图视为话题中断，清空旧状态（下一轮"再来几首"无可继承对象时
+    不会错误复用过期实体）。其余意图覆盖保存最新一轮上下文。
+    """
+    plan = state["plan"]
+    user_id = state["user_id"]
+    if plan.intent == "chat":
+        agent.memory.clear_dialogue_state(user_id)
+        return
+    rp = plan.retrieval_plan
+    agent.memory.save_dialogue_state(
+        user_id,
+        intent=plan.intent,
+        query=state["query"],
+        entities=rp.entities,
+        genre_tags=rp.genre_filter,
+        mood_tags=rp.mood_filter,
+        scenario_tags=rp.scenario_filter,
+    )
 
 
 def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -> AgentPlan | None:
@@ -233,14 +324,15 @@ def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -
     except Exception:
         return None
     data = extract_json_dict(raw)
-    if not data or data.get("intent") not in _VALID_INTENTS:
+    if not data or not is_valid_intent(data.get("intent", "")):
         return None
 
     intent = data["intent"]
+    spec = get_intent(intent)
     entities = [e for e in (data.get("entities") or []) if isinstance(e, str) and e.strip()]
     use_local = bool(data.get("use_local", True))
     use_vector = bool(data.get("use_vector", False))
-    use_web = bool(data.get("use_web", intent not in {"taste", "chat"}))
+    use_web = bool(data.get("use_web", spec.online_default))
     target = data.get("target_count")
     target = int(target) if isinstance(target, (int, float)) and target else _infer_count(query)
 
@@ -256,57 +348,13 @@ def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -
     )
     return AgentPlan(
         intent=intent,
-        strategy=_strategy_for(intent, use_web),
-        tools_needed=_tools_for_intent(intent, use_web),
+        strategy=spec.strategy_for(use_web),
+        tools_needed=spec.tools_for(use_web),
         target_count=target,
         online_required=use_web,
-        reasoning_summary=(data.get("reasoning") or "").strip() or _default_summary(intent),
+        reasoning_summary=(data.get("reasoning") or "").strip() or spec.summary,
         retrieval_plan=retrieval,
     )
-
-
-_VALID_INTENTS = {"recommend", "search", "playlist", "taste", "import", "journey", "discuss", "chat"}
-
-
-def _tools_for_intent(intent: str, use_web: bool) -> list[str]:
-    if intent == "journey":
-        return ["journey"]
-    if intent == "taste":
-        return ["taste"]
-    if intent == "chat":
-        return []
-    if intent == "discuss":
-        return ["web_music_search"] if use_web else []
-    if intent == "import":
-        return ["import"]
-    if intent == "playlist":
-        return (["web_music_search"] if use_web else []) + ["playlist"]
-    if intent == "search":
-        return (["web_music_search"] if use_web else []) + ["search"]
-    # recommend
-    return (["web_music_search"] if use_web else []) + ["recommend"]
-
-
-def _strategy_for(intent: str, use_web: bool) -> str:
-    if intent in {"taste"}:
-        return "memory_only"
-    if intent == "chat":
-        return "no_search"
-    if intent == "discuss":
-        return "online_first" if use_web else "no_search"
-    return "online_first" if use_web else "library_first"
-
-
-def _default_summary(intent: str) -> str:
-    return {
-        "recommend": "用户要推荐音乐，优先获取真实线上候选，再结合记忆排序。",
-        "search": "用户要找歌，优先搜索真实平台候选，再补充本地库命中。",
-        "playlist": "用户要生成歌单，先联网扩展真实候选，再生成可追溯歌单。",
-        "taste": "用户要分析品味，只读取记忆和行为画像。",
-        "journey": "用户需要多阶段音乐编排，使用音乐旅程节点分段检索和解释。",
-        "import": "用户要导入网易云歌单作为推荐输入。",
-        "chat": "普通对话，不需要检索音乐候选。",
-    }.get(intent, "推进用户的音乐目标。")
 
 
 def _keyword_retrieval_plan(query: str, use_web: bool) -> RetrievalPlan:
@@ -322,82 +370,42 @@ def _keyword_retrieval_plan(query: str, use_web: bool) -> RetrievalPlan:
 
 
 def build_agent_plan(query: str) -> AgentPlan:
-    lowered = query.lower()
+    """关键词 fallback 规划：LLM 不可用 / 解析失败时按 registry 的关键词信号判意图。"""
     target = _infer_count(query)
     if _is_smalltalk(query):
+        spec = get_intent("chat")
         return AgentPlan(
             intent="chat",
-            strategy="no_search",
+            strategy=spec.strategy_for(False),
             tools_needed=[],
             online_required=False,
             reasoning_summary="这是普通寒暄，不需要联网搜索或音乐候选。",
         )
-    if any(token in lowered or token in query for token in ["旅程", "热身", "冲刺", "journey"]):
-        return AgentPlan(
-            intent="journey",
-            tools_needed=["journey"],
-            target_count=target,
-            reasoning_summary="用户需要多阶段音乐编排，使用音乐旅程节点分段检索和解释。",
-        )
-    if "导入" in query and ("歌单" in query or "playlist" in lowered):
-        return AgentPlan(
-            intent="import",
-            tools_needed=["import", "recommend"] if any(t in query for t in ["推荐", "挑", "适合"]) else ["import"],
-            target_count=target,
-            reasoning_summary="用户要导入网易云歌单作为推荐输入。",
-            retrieval_plan=_keyword_retrieval_plan(query, use_web=True),
-        )
-    if any(token in lowered or token in query for token in ["歌单", "playlist", "合集"]):
-        return AgentPlan(
-            intent="playlist",
-            tools_needed=["web_music_search", "playlist"],
-            target_count=target,
-            reasoning_summary="用户要生成歌单，先联网扩展真实候选，再生成可追溯歌单。",
-            retrieval_plan=_keyword_retrieval_plan(query, use_web=True),
-        )
-    if any(token in lowered or token in query for token in ["搜索", "找歌", "search", "联网", "真实", "最新"]):
-        return AgentPlan(
-            intent="search",
-            tools_needed=["web_music_search", "search"],
-            target_count=target,
-            reasoning_summary="用户要找歌，优先搜索真实平台候选，再补充本地库命中。",
-        )
-    if any(token in lowered or token in query for token in ["品味", "分析我", "taste"]):
-        return AgentPlan(
-            intent="taste",
-            strategy="memory_only",
-            tools_needed=["taste"],
-            online_required=False,
-            reasoning_summary="用户要分析品味，只需要读取记忆和行为画像。",
-        )
-    if any(token in lowered or token in query for token in ["推荐", "适合", "recommend", "chill"]):
-        return AgentPlan(
-            intent="recommend",
-            tools_needed=["web_music_search", "recommend"],
-            target_count=target,
-            reasoning_summary="用户要推荐音乐，优先获取真实线上候选，再结合记忆排序。",
-        )
-    # 音乐讨论/知识类问题：搜歌手真实曲目作为论据，再让 LLM 讨论
-    _DISCUSS_KEYWORDS = [
-        "牛逼", "怎么样", "评价", "介绍", "背景", "风格是", "什么水平", "好听吗",
-        "厉害", "经典", "代表", "值得听", "有什么歌", "有哪些歌", "成名曲",
-        "特色", "曲风", "地位", "影响", "怎么样", "如何看", "聊聊",
-        "和 ", " vs ", "对比", "谁的", "专辑", "出道", "代表作",
-    ]
-    if any(kw in query for kw in _DISCUSS_KEYWORDS):
-        return AgentPlan(
-            intent="discuss",
-            tools_needed=["web_music_search"],
-            online_required=True,
-            reasoning_summary="音乐讨论，联网搜歌手真实曲目作为讨论论据。",
-            retrieval_plan=_keyword_retrieval_plan(query, use_web=True),
-        )
+
+    intent = match_intent_by_keywords(query) or "chat"
+    spec = get_intent(intent)
+    use_web = spec.online_default
+    tools = spec.tools_for(use_web)
+
+    # import 特例：同时想"推荐/挑/适合"时，导入后接 recommend。
+    if intent == "import" and any(t in query for t in ["推荐", "挑", "适合"]):
+        tools = ["import", "recommend"]
+
+    # 需要联网/向量检索的意图带上规则填充的 retrieval_plan；纯对话/品味不带。
+    retrieval = (
+        _keyword_retrieval_plan(query, use_web=use_web)
+        if intent in {"import", "playlist", "discuss"}
+        else RetrievalPlan()
+    )
+
     return AgentPlan(
-        intent="chat",
-        strategy="no_search",
-        tools_needed=[],
-        online_required=False,
-        reasoning_summary="这是普通对话，不需要检索音乐候选。",
+        intent=intent,
+        strategy=spec.strategy_for(use_web),
+        tools_needed=tools,
+        target_count=target if intent != "chat" else None,
+        online_required=use_web,
+        reasoning_summary=spec.summary,
+        retrieval_plan=retrieval,
     )
 
 
@@ -420,12 +428,13 @@ def compose_answer(
     plan: AgentPlan,
     agent: AudioVisualAgent | None = None,
     memory_query: str = "",
+    history_text: str = "",
 ) -> str:
     if plan.intent == "chat":
-        return _compose_chat_response(query, agent) or "你好，我在。有什么音乐上的事可以帮你?"
+        return _compose_chat_response(query, agent, history_text) or "你好，我在。有什么音乐上的事可以帮你?"
     if plan.intent == "discuss":
         tracks = _collect_tracks(results)
-        return _compose_discussion(query, tracks, agent) or "抱歉，我暂时无法讨论这个话题。"
+        return _compose_discussion(query, tracks, agent, history_text) or "抱歉，我暂时无法讨论这个话题。"
     if plan.intent == "taste":
         return next((r["summary"] for r in results if r.get("type") == "taste"), "还没有足够品味数据。")
     if plan.intent == "journey":
@@ -437,15 +446,18 @@ def compose_answer(
             titles = "、".join(f"《{t['title']}》" for t in phase["tracks"])
             lines.append(f"- {phase['name']}：{phase['goal']}。{titles or '暂无候选'}")
         return "\n".join(lines)
+    # 歌单意图：用 LLM 精选的 playlist 结果，保留歌单名和描述
+    if plan.intent == "playlist":
+        return _compose_playlist_answer(query, results, plan, agent, memory_query, history_text)
     tracks = _collect_tracks(results)
     if not tracks:
         return "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。"
     if plan.target_count:
         tracks = tracks[: plan.target_count]
     shortfall = bool(plan.target_count and len(tracks) < plan.target_count)
-    # 引言：优先让 LLM 结合记忆生成有温度的开场；失败回退确定性模板。
+    # 引言：优先让 LLM 结合记忆+历史生成有温度的开场；失败回退确定性模板。
     # 歌曲清单始终由真实候选确定性拼接——LLM 绝不参与歌名生成（防幻觉）。
-    intro = _compose_intro(query, tracks, plan, agent, memory_query, shortfall)
+    intro = _compose_intro(query, tracks, plan, agent, memory_query, shortfall, history_text)
     lines = [
         f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}（{getattr(track, 'source', 'local')}）"
         for idx, track in enumerate(tracks[: plan.target_count or 12], start=1)
@@ -460,8 +472,9 @@ def _compose_intro(
     agent: AudioVisualAgent | None,
     memory_query: str,
     shortfall: bool,
+    history_text: str = "",
 ) -> str:
-    """生成推荐引言。LLM 可用时结合记忆个性化，否则用确定性模板。"""
+    """生成推荐引言。LLM 可用时结合记忆+对话历史个性化，否则用确定性模板。"""
     fallback = f"我按在线优先策略整理了 {len(tracks)} 个可追溯候选："
     if shortfall:
         fallback += f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
@@ -471,11 +484,18 @@ def _compose_intro(
 
     titles_preview = "、".join(getattr(t, "title", "") for t in tracks[:5])
     mem_hint = f"用户偏好：{memory_query[:150]}" if memory_query else "暂无明确偏好记录"
+    history_hint = ""
+    if history_text:
+        # 只取最近几行避免过长
+        recent_lines = history_text.strip().split("\n")[-6:]
+        history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
     prompt = (
+        f"{history_hint}"
         f"用户请求：{query}\n"
         f"我已找到 {len(tracks)} 首真实候选，前几首：{titles_preview}\n"
         f"{mem_hint}\n\n"
-        "请写一句自然、简短（40字内）的推荐开场白，体现你理解了用户的需求和偏好。"
+        "请写一句自然、有温度的推荐开场白（80字内），体现你理解了用户的需求、偏好和对话上下文。"
+        "如果用户之前聊过相关话题，体现连贯性。"
         "不要列歌名，不要编造任何歌曲，不要用书名号。只输出这一句话。"
     )
     try:
@@ -483,28 +503,34 @@ def _compose_intro(
     except Exception:
         return fallback
     # LLM 兜底：异常输出（空/过长/含书名号疑似编造歌名）一律回退模板
-    if not text or len(text) > 120 or "《" in text:
+    if not text or len(text) > 200 or "《" in text:
         return fallback
     if shortfall:
         text += f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
     return text
 
 
-def _compose_chat_response(query: str, agent: AudioVisualAgent | None) -> str | None:
+def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_text: str = "") -> str | None:
     """让 LLM 自然回复寒暄/闲聊，而非返回硬编码模板。"""
     if agent is None or getattr(agent, "llm", None) is None:
         return None
+    history_hint = ""
+    if history_text:
+        recent_lines = history_text.strip().split("\n")[-6:]
+        history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
     prompt = (
+        f"{history_hint}"
         f"用户说：{query}\n\n"
-        "你是用户的私人音乐搭子，用中文自然简短地回复。"
+        "你是用户的私人音乐搭子，用中文自然、友好地回复。"
         "如果用户只是在打招呼，友好回应并提示你可以帮他做什么音乐相关的事。"
-        "不要每次用同一句话。20字以内。"
+        "如果用户提到了某个歌手/歌曲/风格，可以简短聊聊你的看法。"
+        "不要每次用同一句话，语气要自然口语化。50-100字。"
     )
     try:
         text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
         return None
-    if not text or len(text) > 200:
+    if not text or len(text) > 300:
         return None
     return text
 
@@ -513,85 +539,99 @@ def _compose_discussion(
     query: str,
     tracks: list[Any],
     agent: AudioVisualAgent | None,
+    history_text: str = "",
 ) -> str | None:
-    """让 LLM 基于搜到的真实曲目 + 自身知识自然讨论音乐话题。"""
+    """让 LLM 基于搜到的真实曲目讨论音乐话题。
+
+    关键反幻觉策略（对齐 SoulTuner + 比它更严格）：
+    - 没有搜到真实数据 → 直接拒绝回答，不编造
+    - 搜到了 → LLM 只能基于真实曲目回答，不确定的说不知道
+    - 限制 100 字（SoulTuner 的 general_chat 也是 100 字）
+    """
     if agent is None or getattr(agent, "llm", None) is None:
         return None
     track_hint = ""
     if tracks:
         items = []
-        for t in tracks[:8]:
+        for t in tracks[:10]:
             title = getattr(t, "title", "")
             artist = getattr(t, "artist", "") or ""
             items.append(f"《{title}》{artist}")
-        track_hint = f"已搜到该歌手/专辑的真实曲目：{'、'.join(items)}\n"
+        track_hint = f"已搜到的真实曲目（网易云验证过）：{'、'.join(items)}\n"
+    else:
+        # 没有搜到真实数据 → 拒绝编造
+        return "我暂时没找到关于这个话题的可靠音乐数据，不想编，怕误导你。你可以试试换个关键词再问我。"
+    history_hint = ""
+    if history_text:
+        recent_lines = history_text.strip().split("\n")[-6:]
+        history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
     prompt = (
+        f"{history_hint}"
         f"{track_hint}"
         f"用户问：{query}\n\n"
-        "请用中文自然地回答，像一个懂音乐的朋友在聊天。"
-        "可以讲风格特点、代表作品、在音乐圈的地位、适合听什么场景等。"
-        "如果搜到了真实曲目，可以挑几首重点推荐并说明理由。"
-        "不要编造不存在的歌名。40-200字。"
+        "请用中文自然地回答，像一个懂音乐的朋友在聊天。\n"
+        "严格规则：\n"
+        "1. 只讨论上面列出的真实曲目和你能确认的事实\n"
+        "2. 不要编造专辑评价、歌曲细节、发行时间、排名等你不确定的信息\n"
+        "3. 不确定的就说\"我不太确定\"，不要猜测\n"
+        "4. 如果之前聊过相关话题，体现连贯性\n"
+        "5. 100字以内\n"
+        "6. 可以挑几首真实曲目推荐并说明理由"
     )
     try:
         text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
         return None
-    if not text or len(text) > 500:
+    if not text or len(text) > 300:
         return None
     return text
 
 
-def collect_known_titles(results: list[dict[str, Any]]) -> set[str]:
-    return {getattr(track, "title", "") for track in _collect_tracks(results) if getattr(track, "title", "")}
+def _compose_playlist_answer(
+    query: str,
+    results: list[dict[str, Any]],
+    plan: AgentPlan,
+    agent: AudioVisualAgent | None,
+    memory_query: str,
+    history_text: str,
+) -> str:
+    """歌单意图专用回答：保留歌单名/描述，只用 LLM 精选的 playlist 曲目，
+    不混入原始搜索结果。
 
+    compose_answer 的通用路径会 _collect_tracks(results) 把 web_music_search
+    的原始结果和 playlist 的精选结果混在一起，且丢弃歌单名和描述。
+    歌单场景需要区分：用户要的是「LLM 精心挑选的歌单」，不是「一堆搜索结果」。
+    """
+    playlist_result = next((r for r in results if r.get("type") == "playlist"), None)
+    if not playlist_result:
+        # 没有 playlist 结果，降级到通用路径
+        tracks = _collect_tracks(results)
+        if not tracks:
+            return "这轮没有生成可追溯的歌单。"
+        return "歌单生成未成功，以下是搜索到的候选：\n" + "\n".join(
+            f"{i}. 《{getattr(t, 'title', '')}》 - {getattr(t, 'artist', '') or '未知'}"
+            for i, t in enumerate(tracks[:12], 1)
+        )
 
-def _song_card(track: Any, reason: str = "", score: float | None = None, components: dict | None = None) -> dict[str, Any]:
-    """把一个 track 压成前端歌曲卡片所需的精简字段。"""
-    return {
-        "title": getattr(track, "title", ""),
-        "artist": getattr(track, "artist", "") or "未知",
-        "source": getattr(track, "source", "local"),
-        "playback_url": getattr(track, "playback_url", None) or getattr(track, "source_url", None),
-        "genre": getattr(track, "genre", []) or [],
-        "mood": getattr(track, "mood", []) or [],
-        "reason": reason,
-        "score": score,
-        "components": components or {},
-    }
+    pl = playlist_result["playlist"]
+    tracks = pl.tracks
+    if not tracks:
+        return f"歌单《{pl.name}》生成了但暂无可追溯曲目。"
 
+    # 引言：用 LLM 生成有温度的歌单介绍
+    intro = _compose_intro(query, tracks, plan, agent, memory_query,
+                           shortfall=bool(plan.target_count and len(tracks) < plan.target_count),
+                           history_text=history_text)
+    # 歌单元信息
+    header = f"歌单《{pl.name}》"
+    if pl.description:
+        header += f"：{pl.description}"
 
-def _collect_tracks(results: list[dict[str, Any]]) -> list[Any]:
-    tracks: list[Any] = []
-    for result in results:
-        t = result.get("type")
-        if t == "web_music_search":
-            tracks.extend(result["tracks"])
-        elif t == "daily_recommend":
-            tracks.extend(item.asset for item in result["recommendation"].tracks)
-        elif t == "playlist":
-            tracks.extend(result["playlist"].tracks)
-        elif t == "search":
-            tracks.extend(result["response"].external)
-            tracks.extend(result["response"].local)
-        elif t == "import_netease_playlist":
-            tracks.extend(result["result"].get("tracks", []))
-    seen: set[str] = set()
-    unique: list[Any] = []
-    for track in tracks:
-        key = f"{getattr(track, 'source', 'local')}|{getattr(track, 'title', '').lower()}|{getattr(track, 'artist', '') or ''}"
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(track)
-    return unique
-
-
-def _infer_count(text: str) -> int | None:
-    match = re.search(r"(\d{1,3})\s*(?:首|个|tracks?|songs?)?", text, re.IGNORECASE)
-    if not match:
-        return None
-    return max(1, min(int(match.group(1)), 100))
+    lines = [
+        f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}（{getattr(track, 'source', 'local')}）"
+        for idx, track in enumerate(tracks[: plan.target_count or 30], start=1)
+    ]
+    return f"{intro}\n{header}\n" + "\n".join(lines)
 
 
 def _is_smalltalk(text: str) -> bool:

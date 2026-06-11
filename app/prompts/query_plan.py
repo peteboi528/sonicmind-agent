@@ -2,22 +2,18 @@
 
 LLM 只负责：选意图类型 + 抽取实体名（歌手/歌名）+ 给检索策略开关。
 genre/mood/scenario 标签由确定性规则（app/graph/tag_rules.py）填充，不让 LLM 编。
+
+意图清单由 app.intents.INTENT_REGISTRY 动态生成，避免与代码漂移。
 """
 
-QUERY_PLAN_VERSION = "v1-2026-06-09"
+from app.intents import intent_prompt_block
+
+QUERY_PLAN_VERSION = "v2-2026-06-11"
 
 QUERY_PLAN_SYSTEM = """\
 你是音乐推荐 Agent 的意图规划器。阅读用户输入，输出一个 JSON 规划对象。
 
-意图类型 intent（八选一）：
-- recommend：推荐音乐 / 每日推荐 / 按心情或场景推荐
-- search：搜索特定歌曲或歌手
-- playlist：生成歌单 / 播放列表 / 合集
-- taste：分析用户品味、查看偏好档案（只读记忆，无需联网）
-- import：导入网易云歌单
-- journey：多阶段音乐旅程（如"热身→冲刺→放松"，有明显情绪曲线）
-- discuss：讨论歌手/乐队风格、专辑背景、音乐评价、创作故事等音乐知识话题（需联网搜真实曲目作论据）
-- chat：普通寒暄或与音乐无关的对话
+{intent_block}
 
 检索策略（布尔开关，按意图合理设置）：
 - use_local：是否检索本地库/候选资源库
@@ -32,31 +28,32 @@ QUERY_PLAN_SYSTEM = """\
 
 few-shot 示例：
 用户：给我推荐几首适合跑步的歌
-输出：{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":null,"reasoning":"按场景推荐，需要语义匹配+联网真实候选"}
+输出：{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":null,"reasoning":"按场景推荐，需要语义匹配+联网真实候选"}}
 
 用户：找一些 Beyond 的歌
-输出：{"intent":"search","entities":["Beyond"],"use_local":true,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"搜索特定歌手，优先实体匹配+联网"}
+输出：{{"intent":"search","entities":["Beyond"],"use_local":true,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"搜索特定歌手，优先实体匹配+联网"}}
 
 用户：帮我做 20 首 chill 歌单
-输出：{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":20,"reasoning":"生成歌单，需要 20 首真实候选"}
+输出：{{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":20,"reasoning":"生成歌单，需要 20 首真实候选"}}
 
 用户：分析下我的音乐品味
-输出：{"intent":"taste","entities":[],"use_local":false,"use_vector":false,"use_web":false,"target_count":null,"reasoning":"只读记忆画像"}
+输出：{{"intent":"taste","entities":[],"use_local":false,"use_vector":false,"use_web":false,"target_count":null,"reasoning":"只读记忆画像"}}
 
 用户：做一个从清晨到深夜的音乐旅程
-输出：{"intent":"journey","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":null,"reasoning":"多阶段情绪曲线编排"}
+输出：{{"intent":"journey","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":null,"reasoning":"多阶段情绪曲线编排"}}
 
 用户：你好
-输出：{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"target_count":null,"reasoning":"普通寒暄"}
+输出：{{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"target_count":null,"reasoning":"普通寒暄"}}
 
 用户：asen牛逼吗
-输出：{"intent":"discuss","entities":["Asen"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"讨论歌手风格和地位，联网搜真实曲目作论据"}
+输出：{{"intent":"discuss","entities":["Asen"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"讨论歌手风格和地位，联网搜真实曲目作论据"}}
 
 用户：Blonde 这张专辑的创作背景是什么
-输出：{"intent":"discuss","entities":["Blonde","Frank Ocean"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"讨论专辑背景，联网搜相关曲目"}
+输出：{{"intent":"discuss","entities":["Blonde","Frank Ocean"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"讨论专辑背景，联网搜相关曲目"}}
 
 用户：Pitchfork 怎么评价 The Weeknd 的 After Hours
-输出：{"intent":"discuss","entities":["The Weeknd","After Hours"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"讨论乐评，联网搜相关曲目"}
+输出：{{"intent":"discuss","entities":["The Weeknd","After Hours"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"讨论乐评，联网搜相关曲目"}}
 
 只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, target_count, reasoning。
-"""
+""".format(intent_block=intent_prompt_block())
+

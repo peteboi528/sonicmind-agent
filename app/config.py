@@ -22,6 +22,7 @@ class Settings:
         self.dialog_temperature: float = float(os.getenv("DIALOG_TEMPERATURE", "0.6"))
         self.generation_temperature: float = float(os.getenv("GENERATION_TEMPERATURE", "0.7"))
         self.external_source: str = os.getenv("EXTERNAL_SOURCE", "netease")
+        self.lastfm_api_key: str = os.getenv("LASTFM_API_KEY", "")
         self.store_root: str = os.getenv("STORE_ROOT", "data/store")
         self.media_root: str = os.getenv("MEDIA_ROOT", "data/media")
         self.resource_library_path: str = os.getenv("RESOURCE_LIBRARY_PATH", "data/resource_library.sqlite")

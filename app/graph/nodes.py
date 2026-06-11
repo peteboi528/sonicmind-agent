@@ -63,6 +63,8 @@ def plan_intent(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     history_text = context.get("history_text", "")
     plan = plan_with_llm(agent, query, history_text) or build_agent_plan(query)
     plan, inherited = _apply_dialogue_continuation(plan, query, context.get("dialogue_state"))
+    # 安全网：LLM 可能把介绍/百科类问题误判为 discuss，检查关键词自动升级
+    plan = _upgrade_artist_info(plan, query)
     trace_line = f"[plan] {plan.reasoning_summary}"
     if inherited:
         trace_line += f"（延续上一轮：继承 {inherited}）"
@@ -123,6 +125,27 @@ def _apply_dialogue_continuation(
     if prev_shown:
         new_plan._excluded_tracks = prev_shown  # type: ignore[attr-defined]
     return new_plan, "、".join(prev_entities) or prev_intent
+
+
+# artist_info 安全网信号——命中时从 discuss 升级到 artist_info
+_ARTIST_INFO_SIGNALS = ("介绍", "背景", "成员", "出道", "简介", "资料", "百科", "是谁", "什么团", "biography", "about")
+
+
+def _upgrade_artist_info(plan: AgentPlan, query: str) -> AgentPlan:
+    """LLM 可能把介绍/百科类问题误判为 discuss；检查关键词自动升级到 artist_info。"""
+    if plan.intent != "discuss":
+        return plan
+    lowered = query.lower()
+    if any(sig in lowered or sig in query for sig in _ARTIST_INFO_SIGNALS):
+        spec = get_intent("artist_info")
+        return plan.model_copy(update={
+            "intent": "artist_info",
+            "strategy": spec.strategy_for(True),
+            "tools_needed": spec.tools_for(True),
+            "online_required": True,
+            "reasoning_summary": f"检测到百科类信号，升级为 artist_info。{plan.reasoning_summary}",
+        })
+    return plan
 
 
 def execute_tools(agent: AudioVisualAgent, state: AgentState) -> AgentState:

@@ -43,7 +43,8 @@ QUERY_PLAN_SYSTEM = """\
 6. "导入/网易云歌单" → intent=import
 7. "音乐旅程/从X到Y" → intent=journey
 8. 纯寒暄/与音乐无关 → intent=chat, 所有开关 false
-9. 歌手/乐队名 + 介绍/背景/成员/出道/简介/百科 → intent=artist_info（用搜索引擎查百科，不走网易云）
+9. ⭐ 用户要了解歌手/乐队信息（介绍/背景/成员/出道/简介/百科/是谁/about/biography）→ intent=artist_info（用搜索引擎查百科，不走网易云）。**此规则优先于 discuss**——当用户问的是"是什么/介绍/百科"等事实性问题，而非"怎么看/评价/聊聊"等主观讨论时，必须选 artist_info。
+   例："介绍NewJeans""Taylor Swift的背景""Adele是谁""Coldplay出道经历"
 10. 明确要MV/现场/演唱会/视频/Live → intent=video（直接搜B站/YouTube，不走网易云）
 
 ## 多轮对话规则

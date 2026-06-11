@@ -47,7 +47,7 @@ _DISCUSS_KEYWORDS = (
     "牛逼", "怎么样", "评价", "风格是", "什么水平", "好听吗",
     "厉害", "经典", "代表", "值得听", "有什么歌", "有哪些歌", "成名曲",
     "特色", "曲风", "地位", "影响", "如何看", "聊聊",
-    "和 ", " vs ", "对比", "谁的", "专辑", "出道", "代表作",
+    "和 ", " vs ", "对比", "谁的", "谁更", "更牛", "专辑", "出道", "代表作",
 )
 
 INTENT_REGISTRY: dict[str, IntentDef] = {
@@ -65,7 +65,7 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         prompt_desc="search：搜索特定歌曲或歌手",
         base_tools=("search",),
         prepend_web_search=True,
-        keyword_signals=("搜索", "找歌", "search", "联网", "真实", "最新"),
+        keyword_signals=("搜索", "找歌", "找一首", "找几首", "帮我找", "search", "联网", "真实", "最新"),
     ),
     "playlist": IntentDef(
         name="playlist",

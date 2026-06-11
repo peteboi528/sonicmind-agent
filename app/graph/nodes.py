@@ -128,7 +128,11 @@ def _apply_dialogue_continuation(
 
 
 # artist_info 安全网信号——命中时从 discuss 升级到 artist_info
-_ARTIST_INFO_SIGNALS = ("介绍", "背景", "成员", "出道", "简介", "资料", "百科", "是谁", "什么团", "biography", "about")
+_ARTIST_INFO_SIGNALS = (
+    "介绍", "背景", "成员", "出道", "简介", "资料", "百科", "是谁", "什么团",
+    "来头", "历史", "故事", "怎么火", "怎么出", "经历", "生平",
+    "biography", "about", "history",
+)
 
 
 def _upgrade_artist_info(plan: AgentPlan, query: str) -> AgentPlan:

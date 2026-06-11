@@ -41,13 +41,13 @@ class IntentDef:
 # 关键词 fallback 的匹配优先级（从具体到泛化）：journey/import 要早于
 # playlist（"导入歌单""音乐旅程"含子串），discuss 作为音乐知识类兜底放在
 # recommend 之后、chat 之前。
-_INTENT_PRIORITY = ("journey", "import", "playlist", "search", "video", "taste", "recommend", "artist_info", "discuss")
+_INTENT_PRIORITY = ("journey", "import", "playlist", "video", "search", "taste", "recommend", "artist_info", "discuss")
 
 _DISCUSS_KEYWORDS = (
     "牛逼", "怎么样", "评价", "风格是", "什么水平", "好听吗",
     "厉害", "经典", "代表", "值得听", "有什么歌", "有哪些歌", "成名曲",
     "特色", "曲风", "地位", "影响", "如何看", "聊聊",
-    "和 ", " vs ", "对比", "谁的", "谁更", "更牛", "专辑", "出道", "代表作",
+    "和 ", " vs ", "对比", "谁的", "谁更", "更牛", "专辑", "出道", "代表作", "区别",
 )
 
 INTENT_REGISTRY: dict[str, IntentDef] = {
@@ -57,7 +57,7 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         prompt_desc="recommend：推荐音乐 / 每日推荐 / 按心情或场景推荐",
         base_tools=("recommend",),
         prepend_web_search=True,
-        keyword_signals=("推荐", "适合", "recommend", "chill"),
+        keyword_signals=("推荐", "适合", "recommend", "chill", "来点", "来几首", "给我来", "放松"),
     ),
     "search": IntentDef(
         name="search",
@@ -65,7 +65,7 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         prompt_desc="search：搜索特定歌曲或歌手",
         base_tools=("search",),
         prepend_web_search=True,
-        keyword_signals=("搜索", "找歌", "找一首", "找几首", "帮我找", "search", "联网", "真实", "最新"),
+        keyword_signals=("搜索", "找歌", "找一首", "找几首", "帮我找", "搜歌", "搜一下", "找到", "search", "联网", "真实", "最新"),
     ),
     "playlist": IntentDef(
         name="playlist",
@@ -84,7 +84,7 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         strategy_web="memory_only",
         strategy_no_web="memory_only",
         online_default=False,
-        keyword_signals=("品味", "分析我", "taste"),
+        keyword_signals=("品味", "分析我", "taste", "听听什么"),
     ),
     "import": IntentDef(
         name="import",
@@ -197,10 +197,25 @@ def is_continuation(query: str) -> bool:
     1. 明确的延续信号（再来/换一批/继续等）
     2. 指代消解（"他的歌"/"只要他的"/"不要其他的"），需要继承前文实体
     仅在输入较短时才认定为延续，避免长查询（自带新实体）误判。
+    注意：如果 query 包含明确的新意图信号（MV/视频/介绍/搜索等），
+    即使含指代也不判为延续——用户是在切换意图。
     """
     q = query.strip().lower()
     if len(query.strip()) > 30:
         return False
+
+    # 检查是否包含明确的新意图信号——有则不是延续，而是意图切换
+    _NEW_INTENT_SIGNALS = (
+        "MV", "mv", "现场", "live", "演唱会", "concert", "视频", "video", "演出", "tour",
+        "介绍", "背景", "成员", "出道", "简介", "百科", "biography", "about",
+        "歌单", "playlist", "合集",
+        "导入", "旅程",
+        "品味", "taste",
+        "搜索", "搜", "search",
+    )
+    if any(sig in q or sig in query for sig in _NEW_INTENT_SIGNALS):
+        return False
+
     # 明确延续信号
     if any(sig in q or sig in query for sig in _CONTINUATION_SIGNALS):
         return True

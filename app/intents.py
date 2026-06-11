@@ -41,10 +41,10 @@ class IntentDef:
 # 关键词 fallback 的匹配优先级（从具体到泛化）：journey/import 要早于
 # playlist（"导入歌单""音乐旅程"含子串），discuss 作为音乐知识类兜底放在
 # recommend 之后、chat 之前。
-_INTENT_PRIORITY = ("journey", "import", "playlist", "search", "taste", "recommend", "discuss")
+_INTENT_PRIORITY = ("journey", "import", "playlist", "search", "video", "taste", "recommend", "artist_info", "discuss")
 
 _DISCUSS_KEYWORDS = (
-    "牛逼", "怎么样", "评价", "介绍", "背景", "风格是", "什么水平", "好听吗",
+    "牛逼", "怎么样", "评价", "风格是", "什么水平", "好听吗",
     "厉害", "经典", "代表", "值得听", "有什么歌", "有哪些歌", "成名曲",
     "特色", "曲风", "地位", "影响", "如何看", "聊聊",
     "和 ", " vs ", "对比", "谁的", "专辑", "出道", "代表作",
@@ -111,6 +111,26 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         strategy_web="online_first",
         strategy_no_web="no_search",
         keyword_signals=_DISCUSS_KEYWORDS,
+    ),
+    "video": IntentDef(
+        name="video",
+        summary="用户要找MV/现场/演唱会视频，直接搜索B站/YouTube。",
+        prompt_desc="video：找MV/现场版/演唱会/Live视频（直接搜B站/YouTube，不走网易云）",
+        base_tools=("video_search",),
+        prepend_web_search=False,
+        strategy_web="online_first",
+        strategy_no_web="no_search",
+        keyword_signals=("MV", "mv", "现场", "live", "演唱会", "concert", "视频", "video", "演出", "tour", "Live"),
+    ),
+    "artist_info": IntentDef(
+        name="artist_info",
+        summary="用户要了解歌手/乐队信息，用搜索引擎获取真实百科资料。",
+        prompt_desc="artist_info：了解歌手/乐队背景资料、成员介绍、出道经历、音乐风格介绍等（用搜索引擎查百科）",
+        base_tools=("web_info_search",),
+        prepend_web_search=False,
+        strategy_web="online_first",
+        strategy_no_web="no_search",
+        keyword_signals=("介绍", "背景", "成员", "出道", "简介", "资料", "百科", "是谁", "什么团", "biography", "about"),
     ),
     "chat": IntentDef(
         name="chat",

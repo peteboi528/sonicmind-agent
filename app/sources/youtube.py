@@ -34,6 +34,15 @@ def fetch_youtube_title(url: str) -> str | None:
 
 
 def search_youtube_video(query: str) -> str | None:
+    results = search_youtube_many(query, limit=1)
+    return results[0]["video_id"] if results else None
+
+
+def search_youtube_many(query: str, limit: int = 3) -> list[dict[str, str]]:
+    """Search YouTube and return multiple video results.
+
+    Returns list of {"video_id", "title"} dicts.
+    """
     search_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
@@ -45,7 +54,9 @@ def search_youtube_video(query: str) -> str | None:
             html = response.read().decode("utf-8")
     except Exception:
         logger.debug("YouTube search request failed", exc_info=True)
-        return None
+        return []
+
+    items: list[dict[str, str]] = []
 
     match = re.search(r"var ytInitialData\s*=\s*(\{.+?\});\s*</script>", html, re.DOTALL)
     if match:
@@ -60,11 +71,23 @@ def search_youtube_video(query: str) -> str | None:
             )
             for tab in tabs:
                 for item in tab.get("itemSectionRenderer", {}).get("contents", []):
-                    video_id = item.get("videoRenderer", {}).get("videoId")
+                    renderer = item.get("videoRenderer", {})
+                    video_id = renderer.get("videoId")
+                    title_runs = renderer.get("title", {}).get("runs", [])
+                    title = title_runs[0].get("text", "") if title_runs else ""
                     if video_id:
-                        return video_id
+                        items.append({"video_id": video_id, "title": title})
+                    if len(items) >= limit:
+                        return items
         except (KeyError, IndexError, TypeError, json.JSONDecodeError):
             logger.debug("YouTube initial data parse failed", exc_info=True)
 
-    ids = re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html)
-    return ids[0] if ids else None
+    # Regex fallback
+    seen_ids: set[str] = set()
+    for vid in re.findall(r'"videoId":"([a-zA-Z0-9_-]{11})"', html):
+        if vid not in seen_ids:
+            seen_ids.add(vid)
+            items.append({"video_id": vid, "title": ""})
+            if len(items) >= limit:
+                break
+    return items

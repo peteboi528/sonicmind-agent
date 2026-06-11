@@ -296,6 +296,23 @@ def _run_tool(
         journey = agent.generate_music_journey(user_id, query)
         results.append({"type": "journey", "journey": journey})
         trace.append(f"[journey] 生成 {len(journey.get('phases', []))} 个音乐旅程阶段。")
+    elif tool == "video_search":
+        # video 意图：直接搜 B站/YouTube，不走网易云
+        search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
+        tracks = agent.search_videos(search_q, top_k=plan.target_count or top_k)
+        for track in tracks:
+            if hasattr(agent, "library"):
+                agent.library.upsert_external(track)
+        results.append({"type": "video_search", "tracks": tracks})
+        trace.append(f"[video_search] 获取 {len(tracks)} 个视频结果（B站+YouTube）。")
+        cards = [_song_card(t) for t in tracks]
+        events.append(StreamEvent(type="candidates", content=f"视频 {len(tracks)} 个", payload={"count": len(tracks), "cards": cards}))
+    elif tool == "web_info_search":
+        # artist_info 意图：用搜索引擎查百科
+        search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
+        search_results = agent.search_artist_info(search_q)
+        results.append({"type": "web_info_search", "search_results": search_results})
+        trace.append(f"[web_info_search] 获取 {len(search_results)} 条搜索结果。")
     events.append(StreamEvent(type="tool_result", content=trace[-1], payload={"tool": tool}))
 
 
@@ -366,7 +383,7 @@ def _select_listed_tracks(results: list[dict[str, Any]], plan: AgentPlan) -> lis
         pl = next((r["playlist"] for r in results if r.get("type") == "playlist"), None)
         tracks = list(pl.tracks) if pl and pl.tracks else _collect_tracks(results)
         return tracks[: plan.target_count or 30]
-    if plan.intent in {"recommend", "search"}:
+    if plan.intent in {"recommend", "search", "video"}:
         tracks = _collect_tracks(results)
         if plan.target_count:
             tracks = tracks[: plan.target_count]
@@ -545,6 +562,8 @@ def _completed_actions(results: list[dict[str, Any]]) -> list[str]:
         "taste": "taste",
         "journey": "playlist",
         "import_netease_playlist": "import_netease_playlist",
+        "video_search": "video_search",
+        "web_info_search": "web_info_search",
     }
     return [mapping.get(result.get("type", ""), result.get("type", "")) for result in results]
 
@@ -563,6 +582,11 @@ def compose_answer(
     if plan.intent == "discuss":
         tracks = _collect_tracks(results)
         return _compose_discussion(query, tracks, agent, history_text) or "抱歉，我暂时无法讨论这个话题。"
+    if plan.intent == "video":
+        tracks = _collect_tracks(results)
+        return _compose_video_answer(query, tracks, agent, history_text) or "这轮没有搜到视频结果。"
+    if plan.intent == "artist_info":
+        return _compose_artist_info_answer(query, results, agent, history_text) or "抱歉，暂时没找到相关信息。"
     if plan.intent == "taste":
         return next((r["summary"] for r in results if r.get("type") == "taste"), "还没有足够品味数据。")
     if plan.intent == "journey":
@@ -724,6 +748,104 @@ def _compose_discussion(
         return None
     if not text or len(text) > 300:
         return None
+    return text
+
+
+def _compose_video_answer(
+    query: str,
+    tracks: list[Any],
+    agent: AudioVisualAgent | None,
+    history_text: str = "",
+) -> str | None:
+    """video 意图专用回答：视频推荐开场白 + 视频列表。"""
+    if not tracks:
+        return None
+    # 构建 LLM 开场白
+    intro = "我帮你搜到了这些视频："
+    if agent is not None and getattr(agent, "llm", None) is not None:
+        titles_preview = "、".join(getattr(t, "title", "") for t in tracks[:5])
+        history_hint = ""
+        if history_text:
+            recent_lines = history_text.strip().split("\n")[-4:]
+            history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
+        prompt = (
+            f"{history_hint}"
+            f"用户请求：{query}\n"
+            f"我已找到 {len(tracks)} 个真实视频，前几个：{titles_preview}\n\n"
+            "请写一句自然、有温度的视频推荐开场白（60字内），体现你理解了用户要看MV/现场/演唱会的需求。"
+            "不要列视频名，不要编造信息，不要用书名号。只输出这一句话。"
+        )
+        try:
+            text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+            if text and len(text) <= 150 and "《" not in text:
+                intro = text
+        except Exception:
+            pass
+    # 视频列表（确定性拼接）
+    lines = [
+        f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}"
+        f"（{getattr(track, 'source', 'local')}）"
+        for idx, track in enumerate(tracks[:10], start=1)
+    ]
+    return f"{intro}\n" + "\n".join(lines)
+
+
+def _compose_artist_info_answer(
+    query: str,
+    results: list[dict[str, Any]],
+    agent: AudioVisualAgent | None,
+    history_text: str = "",
+) -> str | None:
+    """artist_info 意图专用回答：基于搜索引擎结果生成百科式介绍。"""
+    search_results = next(
+        (r.get("search_results", []) for r in results if r.get("type") == "web_info_search"),
+        [],
+    )
+    if not search_results:
+        # 搜索无结果，降级到 discuss 模式
+        return None
+
+    # 把搜索摘要拼接成上下文
+    context_parts: list[str] = []
+    for i, item in enumerate(search_results[:5], 1):
+        title = item.get("title", "")
+        content = item.get("content", "")
+        url = item.get("url", "")
+        if content:
+            context_parts.append(f"[{i}] {title}\n{content}")
+    search_context = "\n\n".join(context_parts)
+    source_urls = [item["url"] for item in search_results if item.get("url")]
+
+    if agent is None or getattr(agent, "llm", None) is None:
+        # 无 LLM，直接输出搜索摘要
+        return search_context
+
+    history_hint = ""
+    if history_text:
+        recent_lines = history_text.strip().split("\n")[-4:]
+        history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
+
+    prompt = (
+        f"{history_hint}"
+        f"用户问：{query}\n\n"
+        f"以下是搜索引擎返回的真实资料：\n{search_context}\n\n"
+        "请用中文基于以上真实资料写一段介绍，像一个懂音乐的朋友在讲解（200-400字）。\n"
+        "严格规则：\n"
+        "1. 只使用上面列出的真实信息，不确定的说\"我不太确定\"\n"
+        "2. 不要编造排名、销量、具体日期等未提及的数据\n"
+        "3. 自然流畅，不要像百科词条那样枯燥\n"
+        "4. 如果资料足够，可以涵盖：简介、成员、风格特点、代表作、影响力等\n"
+        "5. 末尾附上参考来源链接"
+    )
+    try:
+        text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+    except Exception:
+        return search_context
+    if not text or len(text) > 800:
+        return search_context
+    # 追加来源链接
+    if source_urls:
+        text += "\n\n📎 参考来源：\n" + "\n".join(f"- {url}" for url in source_urls[:3])
     return text
 
 

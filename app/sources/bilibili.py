@@ -53,6 +53,15 @@ def fetch_bilibili_title(url: str) -> str | None:
 
 def search_bilibili_detail(query: str) -> dict[str, Any] | None:
     """Search Bilibili and return real video title/author metadata."""
+    results = search_bilibili_many(query, limit=1)
+    return results[0] if results else None
+
+
+def search_bilibili_many(query: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Search Bilibili and return multiple video results.
+
+    Returns list of {"bvid", "title", "author", "description"} dicts.
+    """
     search_url = (
         "https://api.bilibili.com/x/web-interface/search/type"
         f"?search_type=video&keyword={urllib.parse.quote(query)}"
@@ -62,17 +71,20 @@ def search_bilibili_detail(query: str) -> dict[str, Any] | None:
         with urllib.request.urlopen(req, timeout=8) as response:
             data = json.loads(response.read().decode())
         if data.get("code") != 0:
-            return None
-        for item in (data.get("data", {}).get("result", []) or []):
+            return []
+        items: list[dict[str, Any]] = []
+        for item in (data.get("data", {}).get("result", []) or [])[:limit]:
             bvid = item.get("bvid")
             title = item.get("title")
             if bvid and title:
                 clean_title = unescape(re.sub(r"</?em[^>]*>", "", title).strip())
-                return {
+                items.append({
                     "bvid": bvid,
                     "title": clean_title,
                     "author": (item.get("author") or "").strip(),
-                }
+                    "description": unescape(re.sub(r"</?em[^>]*>", "", (item.get("description") or "")).strip()),
+                })
+        return items
     except Exception:
         logger.debug("Bilibili search request failed", exc_info=True)
-    return None
+        return []

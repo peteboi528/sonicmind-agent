@@ -50,6 +50,7 @@ from app.sources.mock_source import MockSource
 from app.sources.netease_source import NeteaseSource
 from app.sources import bilibili as bilibili_source
 from app.sources import netease as netease_source
+from app.sources import web_search as web_search_source
 from app.sources import youtube as youtube_source
 from app.sources.protocol import ExternalSource
 from app.storage import JsonStore
@@ -703,6 +704,70 @@ class AudioVisualAgent:
         for track in selected:
             self.library.upsert_external(track)
         return selected
+
+    def search_videos(self, query: str, top_k: int = 5) -> list[ExternalTrack]:
+        """搜索 MV/现场/演唱会视频，B站优先、YouTube 补位。不走网易云。
+
+        用于 video 意图：用户明确要 MV/现场/Live 视频时调用。
+        """
+        tracks: list[ExternalTrack] = []
+
+        # B站优先：华语 MV/现场命中率高，嵌入稳定
+        try:
+            bili_results = bilibili_source.search_bilibili_many(query, limit=min(top_k, 5))
+            for item in bili_results:
+                tracks.append(ExternalTrack(
+                    external_id=item["bvid"],
+                    title=item["title"],
+                    artist=item.get("author", ""),
+                    source="bilibili",
+                    candidate_kind=_classify_candidate_kind(item["title"], "bilibili"),
+                    playback_url=f"https://player.bilibili.com/player.html?bvid={item['bvid']}&autoplay=0&high_quality=1&danmaku=0",
+                ))
+        except Exception:
+            logger.debug("Bilibili video search failed for query=%s", query, exc_info=True)
+
+        # YouTube 补位：国际音乐覆盖
+        remaining = max(top_k - len(tracks), 0)
+        if remaining > 0:
+            try:
+                yt_results = youtube_source.search_youtube_many(query, limit=min(remaining, 3))
+                for item in yt_results:
+                    vid = item["video_id"]
+                    title = item.get("title") or youtube_source.fetch_youtube_title(
+                        f"https://www.youtube.com/watch?v={vid}"
+                    ) or ""
+                    tracks.append(ExternalTrack(
+                        external_id=vid,
+                        title=title,
+                        artist="",
+                        source="youtube",
+                        candidate_kind=_classify_candidate_kind(title, "youtube"),
+                        playback_url=f"https://www.youtube.com/embed/{vid}?autoplay=1&rel=0",
+                    ))
+            except Exception:
+                logger.debug("YouTube video search failed for query=%s", query, exc_info=True)
+
+        # 去重
+        seen: set[tuple[str, str]] = set()
+        unique: list[ExternalTrack] = []
+        for track in tracks:
+            key = (track.source, track.external_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(track)
+        return unique[:top_k]
+
+    def search_artist_info(self, query: str) -> list[dict[str, str]]:
+        """用 Tavily/DuckDuckGo 搜索歌手/乐队百科信息。
+
+        用于 artist_info 意图：用户要了解歌手背景时调用。
+        返回 [{"title": ..., "content": ..., "url": ...}] 搜索摘要列表。
+        """
+        return web_search_source.search_web_info(
+            query, max_results=5, api_key=settings.tavily_api_key,
+        )
 
     def fetch_track_metadata(
         self,

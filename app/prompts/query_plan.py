@@ -43,6 +43,8 @@ QUERY_PLAN_SYSTEM = """\
 6. "导入/网易云歌单" → intent=import
 7. "音乐旅程/从X到Y" → intent=journey
 8. 纯寒暄/与音乐无关 → intent=chat, 所有开关 false
+9. 歌手/乐队名 + 介绍/背景/成员/出道/简介/百科 → intent=artist_info（用搜索引擎查百科，不走网易云）
+10. 明确要MV/现场/演唱会/视频/Live → intent=video（直接搜B站/YouTube，不走网易云）
 
 ## 多轮对话规则
 - 若提供了【最近对话】，且本轮输入是"再来几首""换一批""还要""类似这个"等延续指令：
@@ -95,6 +97,15 @@ QUERY_PLAN_SYSTEM = """\
 
 用户：我想听 keshi 的歌
 {{"intent":"recommend","entities":["keshi"],"use_local":true,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"歌手推荐，实体+联网"}}
+
+用户：帮我找 The Weeknd 的 MV
+{{"intent":"video","entities":["The Weeknd"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"找MV，搜视频平台"}}
+
+用户：介绍一下 NewJeans 这个团体
+{{"intent":"artist_info","entities":["NewJeans"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"了解歌手背景，用搜索引擎"}}
+
+用户：有没有 Adele 的现场演唱视频
+{{"intent":"video","entities":["Adele"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"现场视频，搜B站/YouTube"}}
 
 只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, target_count, reasoning。
 """.format(intent_block=intent_prompt_block())

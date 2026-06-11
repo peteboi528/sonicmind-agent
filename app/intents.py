@@ -48,6 +48,7 @@ _DISCUSS_KEYWORDS = (
     "厉害", "经典", "代表", "值得听", "有什么歌", "有哪些歌", "成名曲",
     "特色", "曲风", "地位", "影响", "如何看", "聊聊",
     "和 ", " vs ", "对比", "谁的", "谁更", "更牛", "专辑", "出道", "代表作", "区别",
+    "同一", "一样", "是不是", "think", "opinion", "feel about",
 )
 
 INTENT_REGISTRY: dict[str, IntentDef] = {
@@ -57,7 +58,7 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         prompt_desc="recommend：推荐音乐 / 每日推荐 / 按心情或场景推荐",
         base_tools=("recommend",),
         prepend_web_search=True,
-        keyword_signals=("推荐", "适合", "recommend", "chill", "来点", "来几首", "给我来", "放松"),
+        keyword_signals=("推荐", "适合", "recommend", "chill", "来点", "来几首", "给我来", "放松", "类似", "像"),
     ),
     "search": IntentDef(
         name="search",
@@ -92,7 +93,7 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         prompt_desc="import：导入网易云歌单",
         base_tools=("import",),
         prepend_web_search=False,
-        keyword_signals=("导入",),
+        keyword_signals=("导入", "import"),
     ),
     "journey": IntentDef(
         name="journey",
@@ -130,7 +131,11 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         prepend_web_search=False,
         strategy_web="online_first",
         strategy_no_web="no_search",
-        keyword_signals=("介绍", "背景", "成员", "出道", "简介", "资料", "百科", "是谁", "什么团", "biography", "about"),
+        keyword_signals=(
+            "介绍", "背景", "成员", "出道", "简介", "资料", "百科", "是谁",
+            "什么团", "这个团", "哪个团", "谁啊", "来头", "讲讲", "查查",
+            "biography",
+        ),
     ),
     "chat": IntentDef(
         name="chat",
@@ -171,8 +176,9 @@ def match_intent_by_keywords(query: str) -> str | None:
 
 # 延续指令信号：本轮省略实体、依赖上一轮上下文的"接着上文"类输入。
 _CONTINUATION_SIGNALS = (
-    "再来", "再推", "再给", "换一批", "换一首", "换几首", "还要", "还想",
+    "再来", "再推", "再给", "换一批", "换一首", "换几首", "还要", "还想", "还有",
     "多来", "多给", "类似", "差不多", "类似这个", "像这样", "像这个", "继续",
+    "更多", "再来点", "再来些",
     "more", "another", "similar", "same vibe", "keep going",
 )
 
@@ -209,11 +215,18 @@ def is_continuation(query: str) -> bool:
         "MV", "mv", "现场", "live", "演唱会", "concert", "视频", "video", "演出", "tour",
         "介绍", "背景", "成员", "出道", "简介", "百科", "biography", "about",
         "歌单", "playlist", "合集",
-        "导入", "旅程",
+        "导入", "import", "旅程",
         "品味", "taste",
         "搜索", "搜", "search",
     )
     if any(sig in q or sig in query for sig in _NEW_INTENT_SIGNALS):
+        return False
+
+    # 自带英文实体（看起来像歌手名）→ 不是延续，是新意图
+    # 排除延续信号里的英文词（more/another/similar/keep 等）
+    _ENG_CONTINUATION_WORDS = {"more", "another", "similar", "same", "keep", "going", "vibe", "please", "give"}
+    eng_words = set(w.lower() for w in re.findall(r"[A-Za-z]{3,}", query))
+    if eng_words and not eng_words.issubset(_ENG_CONTINUATION_WORDS):
         return False
 
     # 明确延续信号

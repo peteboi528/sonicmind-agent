@@ -608,7 +608,7 @@ class AudioVisualAgent:
             ],
         )
 
-    def search_web_music(self, query: str, top_k: int = 5, relevance_query: str = "") -> list[ExternalTrack]:
+    def search_web_music(self, query: str, top_k: int = 5, relevance_query: str = "", include_video_sources: bool = False) -> list[ExternalTrack]:
         """Agent tool wrapper for explicit online search.
 
         The default product flow remains offline-first. This method is only
@@ -620,9 +620,8 @@ class AudioVisualAgent:
             query: 传给搜索 API 的完整查询词（可含 memory 扩展词，获取更广结果）。
             top_k: 目标候选数量。
             relevance_query: 相关性过滤用的核心查询词。为空时默认等于 query。
-                当 query 包含 memory 扩展词（如风格/情绪标签 "Rock Pop chill"）时，
-                这些词不应该作为歌名匹配条件——它们搜得到、但不该决定去留。
-                传核心词（如歌手名）可避免 memory 扩展词误杀真实候选。
+            include_video_sources: 是否包含 B站/YouTube 视频源。默认 False，
+                只返回网易云歌曲。用户明确要 MV/视频时才传 True。
         """
         tracks: list[ExternalTrack] = []
 
@@ -646,43 +645,42 @@ class AudioVisualAgent:
         except Exception:
             logger.debug("NetEase web music search failed for query=%s", query, exc_info=True)
 
-        # B站/YouTube 仅在网易云候选不足时补充（且会被合集过滤），不再作为主力。
-        if len(tracks) < top_k:
-            try:
-                bili = self._search_bilibili_detail(query)
-                if bili and bili.get("title"):
-                    tracks.append(ExternalTrack(
-                        external_id=bili["bvid"],
-                        title=bili["title"],
-                        artist=bili.get("author", ""),
-                        source="bilibili",
-                        candidate_kind=_classify_candidate_kind(bili["title"], "bilibili"),
-                        playback_url=f"https://player.bilibili.com/player.html?bvid={bili['bvid']}&autoplay=0&high_quality=1&danmaku=0",
-                    ))
-            except Exception:
-                logger.debug("Bilibili web music search failed for query=%s", query, exc_info=True)
-
-        if len(tracks) < top_k:
-            try:
-                video_id = self._search_youtube_video(query)
-                if video_id:
-                    url = f"https://www.youtube.com/watch?v={video_id}"
-                    title = youtube_source.fetch_youtube_title(url)
-                    if title:
+        # B站/YouTube 仅在用户明确要视频内容时才补充，纯歌曲推荐不包含视频源。
+        if include_video_sources:
+            if len(tracks) < top_k:
+                try:
+                    bili = self._search_bilibili_detail(query)
+                    if bili and bili.get("title"):
                         tracks.append(ExternalTrack(
-                            external_id=video_id,
-                            title=title,
-                            artist="",
-                            source="youtube",
-                            candidate_kind=_classify_candidate_kind(title, "youtube"),
-                            playback_url=f"https://www.youtube.com/embed/{video_id}?autoplay=1&rel=0",
+                            external_id=bili["bvid"],
+                            title=bili["title"],
+                            artist=bili.get("author", ""),
+                            source="bilibili",
+                            candidate_kind=_classify_candidate_kind(bili["title"], "bilibili"),
+                            playback_url=f"https://player.bilibili.com/player.html?bvid={bili['bvid']}&autoplay=0&high_quality=1&danmaku=0",
                         ))
-            except Exception:
-                logger.debug("YouTube web music search failed for query=%s", query, exc_info=True)
+                except Exception:
+                    logger.debug("Bilibili web music search failed for query=%s", query, exc_info=True)
+
+            if len(tracks) < top_k:
+                try:
+                    video_id = self._search_youtube_video(query)
+                    if video_id:
+                        url = f"https://www.youtube.com/watch?v={video_id}"
+                        title = youtube_source.fetch_youtube_title(url)
+                        if title:
+                            tracks.append(ExternalTrack(
+                                external_id=video_id,
+                                title=title,
+                                artist="",
+                                source="youtube",
+                                candidate_kind=_classify_candidate_kind(title, "youtube"),
+                                playback_url=f"https://www.youtube.com/embed/{video_id}?autoplay=1&rel=0",
+                            ))
+                except Exception:
+                    logger.debug("YouTube web music search failed for query=%s", query, exc_info=True)
 
         # 相关性过滤：用 relevance_query（核心词）而非完整 query（含 memory 扩展词）。
-        # memory 扩展词如 "Rock Pop chill" 用于引导搜索 API 返回更广结果，
-        # 但不应要求出现在每首歌的 title/artist 里，否则几乎所有候选被误杀。
         rel_q = relevance_query or query
         tracks = [track for track in tracks if _valid_external_track(track, rel_q)]
 
@@ -1389,7 +1387,18 @@ class AudioVisualAgent:
             batch = self.search_web_music(search_goal, top_k=max(top_k * 2, top_k), relevance_query=search_goal)
             all_candidates.extend(batch)
         else:
-            # 路由A：LLM 候选生成 → 网易云验证
+            # 路由B（优先）：网易云歌单搜索——真人策划歌单，质量最高
+            from app.search.netease_playlist import search_and_extract
+            # 构建精炼的歌单搜索词：品味风格 + 查询意图
+            taste_genres = ""
+            if memory.taste_profile and memory.taste_profile.top_genres:
+                taste_genres = " ".join(g for g, _ in memory.taste_profile.top_genres[:2])
+            playlist_query = f"{taste_genres} {search_goal}".strip() or goal
+            playlist_tracks = search_and_extract(playlist_query, max_playlists=3, tracks_per_playlist=top_k)
+            trace_lines.append(f"route=playlist, query={playlist_query!r}, extracted={len(playlist_tracks)}")
+            all_candidates.extend(playlist_tracks)
+
+            # 路由A（补位）：LLM 候选生成 → 网易云验证（歌单不够时补充）
             from app.search.web_music_discovery import discover_from_llm
             llm_tracks = discover_from_llm(
                 query=goal,
@@ -1401,17 +1410,6 @@ class AudioVisualAgent:
             )
             trace_lines.append(f"route=llm_candidates, generated={len(llm_tracks)}")
             all_candidates.extend(llm_tracks)
-
-            # 路由B：网易云歌单搜索
-            from app.search.netease_playlist import search_and_extract
-            # 构建精炼的歌单搜索词：品味风格 + 查询意图
-            taste_genres = ""
-            if memory.taste_profile and memory.taste_profile.top_genres:
-                taste_genres = " ".join(g for g, _ in memory.taste_profile.top_genres[:2])
-            playlist_query = f"{taste_genres} {search_goal}".strip() or goal
-            playlist_tracks = search_and_extract(playlist_query, max_playlists=3, tracks_per_playlist=top_k)
-            trace_lines.append(f"route=playlist, query={playlist_query!r}, extracted={len(playlist_tracks)}")
-            all_candidates.extend(playlist_tracks)
 
             # 路由E：Last.fm 发现 → 网易云验证（需要配置 LASTFM_API_KEY）
             from app.search.lastfm_discovery import discover_from_lastfm
@@ -1571,8 +1569,14 @@ class AudioVisualAgent:
 
     @staticmethod
     def _enrich_candidate_tags(tracks: list[Any]) -> None:
-        """给缺 genre/mood 的候选用关键词规则就地补全（不写库，仅供本次精排）。"""
-        from app.graph.tag_rules import extract_genre, extract_mood
+        """给缺 genre/mood 的候选用关键词规则就地补全（不写库，仅供本次精排）。
+
+        三层补全（复用 _ensure_track_tags 的模式）：
+        1. 标题+歌手关键词规则（extract_genre/extract_mood）
+        2. 歌手名→风格映射表（extract_genre_from_artist，~140 艺人覆盖）
+        3. 歌手名→情绪映射表（extract_mood 补充）
+        """
+        from app.graph.tag_rules import extract_genre, extract_genre_from_artist, extract_mood
 
         for t in tracks:
             text = f"{getattr(t, 'title', '')} {getattr(t, 'artist', '') or ''}"
@@ -1583,6 +1587,16 @@ class AudioVisualAgent:
                         t.genre = inferred
                     except Exception:
                         pass
+            # 歌手名→风格映射兜底（覆盖 Drake→说唱, The Weeknd→R&B 等已知艺人）
+            if not getattr(t, "genre", None):
+                artist = getattr(t, "artist", "") or ""
+                if artist:
+                    inferred = extract_genre_from_artist(artist)
+                    if inferred and hasattr(t, "genre"):
+                        try:
+                            t.genre = inferred
+                        except Exception:
+                            pass
             if not getattr(t, "mood", None):
                 inferred = extract_mood(text)
                 if inferred and hasattr(t, "mood"):
@@ -1827,7 +1841,8 @@ def _track_key(track: Asset | ExternalTrack | dict[str, Any]) -> str:
 
 
 def _is_verified_online_track(track: Asset | ExternalTrack) -> bool:
-    return isinstance(track, ExternalTrack) and track.source in {"netease", "bilibili", "youtube"}
+    """验证是否为真实线上曲目。纯歌曲推荐只认网易云；视频源仅 MV 搜索时使用。"""
+    return isinstance(track, ExternalTrack) and track.source == "netease"
 
 
 def _is_fallback_track(track: Asset | ExternalTrack) -> bool:
@@ -1918,11 +1933,17 @@ _QUERY_NOISE = {"的", "了", "在", "是", "我", "你", "他", "她", "它", "
 
 
 def _query_matches_track(query: str, track: ExternalTrack) -> bool:
-    """搜索词的每个显著词元必须至少命中 title 或 artist 之一。
+    """搜索相关性过滤：基于 entity 锚点的宽松匹配。
 
     网易云搜索 API 做全字段模糊匹配（歌词/评论/标签都会命中），
     导致搜 "Drake" 返回一堆歌名里根本没有 Drake 的中文歌。
-    这里做严格过滤：每个非停用词 token 必须在 title+artist 中出现。
+
+    策略（v2 — 精排友好型）：
+    1. 将 token 分为 entity 类（英文专有名词 >2 字符）和泛化类（CJK/短 token）。
+    2. 如果至少 1 个 entity 类 token 命中了 title+artist → 放行。
+       entity 是锚点（歌手名），歌曲标题不含歌手名是正常的（如 "God's Plan"），
+       相关性交给下游三锚精排处理。
+    3. 如果 0 个 entity 命中 → 保持严格：所有 token 必须命中（防止 API 垃圾）。
     """
     import unicodedata
 
@@ -1944,30 +1965,31 @@ def _query_matches_track(query: str, track: ExternalTrack) -> bool:
 
     searchable = f"{(track.title or '')} {(track.artist or '')}".lower()
 
-    matched_any = False
-    cjk_tokens: list[str] = []
-
+    # 分离 entity 类 token（英文专有名词）和泛化类 token（CJK + 短英文）
+    entity_tokens: list[str] = []  # 英文 >2 字符，可能是歌手名/乐队名
+    general_tokens: list[str] = []  # CJK token 或短英文
     for token in tokens:
         lowered = token.lower()
-        is_cjk = any("CJK" in unicodedata.name(c, "") for c in token if c.strip())
-        if lowered in searchable:
-            matched_any = True
-            continue
-        if not is_cjk:
-            # 英文/数字 token 必须命中；否则直接拒绝
-            if lowered not in searchable:
-                return False
-            matched_any = True
+        is_ascii = bool(re.fullmatch(r"[A-Za-z0-9]+", token))
+        if is_ascii and len(token) > 2:
+            entity_tokens.append(lowered)
         else:
-            cjk_tokens.append(token)
+            general_tokens.append(token)
 
-    # 有英文 token 命中时，中文功能词不再做硬过滤，避免自然语言句子误杀
-    if matched_any:
+    # 检查 entity 类 token 是否命中
+    entity_hit = any(e in searchable for e in entity_tokens)
+
+    # 如果有 entity 命中 → 放行（entity 是歌手名锚点，歌曲标题不含歌手名是正常的）
+    if entity_hit:
         return True
 
-    # 纯中文查询：所有 CJK token 必须全部命中
-    for token in cjk_tokens:
-        if token not in searchable:
+    # 无 entity 命中：泛化类 token 全部必须命中（保持严格，防止 API 垃圾）
+    if not general_tokens:
+        # 只有 entity token 但都没命中 → 拒绝
+        return False
+
+    for token in general_tokens:
+        if token.lower() not in searchable:
             return False
     return True
 

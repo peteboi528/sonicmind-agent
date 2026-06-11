@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -17,21 +18,50 @@ _HEADERS = {
     "Referer": "https://music.163.com/",
 }
 
+# 网易云搜索接口会间歇性限流：同一查询有时返回结果、有时返回空 songs（HTTP 200
+# 但 result.songs 为 []）。一次空就放弃会导致大量真实查询掉到 mock fallback，
+# 用户看到一堆 netease-fallback 假候选（播不了）。这里多端点轮询 + 带退避重试，
+# 把限流抖动滤掉（实测 search/get、cloudsearch/pc 比旧的 search/get/web 稳得多）。
+_SEARCH_ENDPOINTS = (
+    "https://music.163.com/api/search/get",
+    "https://music.163.com/api/cloudsearch/pc",
+    "https://music.163.com/api/search/get/web",
+)
+_SEARCH_RETRIES = 2
+_SEARCH_BACKOFF = 0.5
+
+
+def _fetch_netease_songs(query: str, limit: int) -> list[dict[str, Any]]:
+    """请求网易云搜索接口，返回原始 songs 列表。多端点轮询 + 重试以抵抗间歇性限流。
+
+    依次尝试多个搜索端点；每个端点请求成功且非空即返回。全部端点本轮都空/失败时
+    退避后重试，重试次数用尽仍空才返回 []。
+    """
+    headers = dict(_HEADERS)
+    encoded = urllib.parse.quote(query)
+
+    for attempt in range(_SEARCH_RETRIES):
+        for base in _SEARCH_ENDPOINTS:
+            search_url = f"{base}?s={encoded}&type=1&limit={limit}&offset=0"
+            try:
+                req = urllib.request.Request(search_url, headers=headers)
+                with urllib.request.urlopen(req, timeout=8) as response:
+                    data = json.loads(response.read().decode())
+                songs = data.get("result", {}).get("songs", []) or []
+                if songs:
+                    return songs
+            except Exception:
+                logger.debug("NetEase search failed for %s via %s, attempt %d", query, base, attempt + 1, exc_info=True)
+        logger.debug("NetEase search empty (rate-limited?) for %s, attempt %d", query, attempt + 1)
+        if attempt < _SEARCH_RETRIES - 1:
+            time.sleep(_SEARCH_BACKOFF * (attempt + 1))
+    return []
+
 
 def search_netease(query: str) -> str | None:
-    search_url = (
-        "https://music.163.com/api/search/get/web"
-        f"?s={urllib.parse.quote(query)}&type=1&limit=1&offset=0"
-    )
-    try:
-        req = urllib.request.Request(search_url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=8) as response:
-            data = json.loads(response.read().decode())
-        songs = data.get("result", {}).get("songs", [])
-        if songs:
-            return str(songs[0]["id"])
-    except Exception:
-        logger.debug("NetEase search request failed", exc_info=True)
+    songs = _fetch_netease_songs(query, limit=1)
+    if songs:
+        return str(songs[0]["id"])
     return None
 
 
@@ -40,18 +70,7 @@ def search_netease_many(query: str, limit: int = 20) -> list[dict[str, Any]]:
 
     每项 {"song_id","title","artist","album","cover"}。失败返回空列表。
     """
-    search_url = (
-        "https://music.163.com/api/search/get/web"
-        f"?s={urllib.parse.quote(query)}&type=1&limit={limit}&offset=0"
-    )
-    try:
-        req = urllib.request.Request(search_url, headers=_HEADERS)
-        with urllib.request.urlopen(req, timeout=8) as response:
-            data = json.loads(response.read().decode())
-        songs = data.get("result", {}).get("songs", []) or []
-    except Exception:
-        logger.debug("NetEase multi-search failed for %s", query, exc_info=True)
-        return []
+    songs = _fetch_netease_songs(query, limit=limit)
 
     results: list[dict[str, Any]] = []
     for song in songs:

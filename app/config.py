@@ -28,8 +28,8 @@ class Settings:
         self.resource_library_path: str = os.getenv("RESOURCE_LIBRARY_PATH", "data/resource_library.sqlite")
         self.daily_rec_count: int = int(os.getenv("DAILY_REC_COUNT", "25"))
         self.enable_online_enrich: bool = os.getenv("ENABLE_ONLINE_ENRICH", "false").lower() == "true"
-        # Phase 3：embedding 检索。默认关闭，缺依赖/加载失败时自动回退 TF cosine。
-        self.enable_embeddings: bool = os.getenv("ENABLE_EMBEDDINGS", "false").lower() == "true"
+        # Phase 3：embedding 检索。默认 auto：装了 sentence-transformers 自动启用，否则回退 TF cosine + 同义词 boost。
+        self.enable_embeddings: bool = os.getenv("ENABLE_EMBEDDINGS", "auto").lower() in ("true", "auto", "1")
         self.embedding_model: str = os.getenv("EMBEDDING_MODEL", "paraphrase-multilingual-MiniLM-L12-v2")
         # Phase 1：三锚精排权重（自动归一化；缺项时重分配给其余锚）。
         self.tri_anchor_w_semantic: float = float(os.getenv("TRI_ANCHOR_W_SEMANTIC", "0.45"))

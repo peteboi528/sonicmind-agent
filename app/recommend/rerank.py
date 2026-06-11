@@ -59,6 +59,51 @@ def _tokens(text: str) -> set[str]:
     return en | set(zh_chars) | bigrams
 
 
+# 同义词组：跨语言/跨维度的情绪-风格关联，让 TF 回退不再纯随机。
+# 每组内的词互为同义，query 和 track 分别命中间组的不同词时给 boost。
+_SYNONYM_GROUPS: list[set[str]] = [
+    # 情绪/氛围
+    {"chill", "放松", "慵懒", "lofi", "relax", "relaxing", "舒缓"},
+    {"伤感", "sad", "悲伤", "忧郁", "低落", "emo"},
+    {"欢快", "happy", "开心", "轻松", "upbeat"},
+    {"治愈", "healing", "温暖", "温柔", "comfort"},
+    {"激昂", "热血", "energetic", "pump", "intense", "兴奋"},
+    {"浪漫", "romantic", "浪漫的", "甜蜜", "romance"},
+    {"梦幻", "dreamy", "dream", "空灵", "ethereal"},
+    {"孤独", "lonely", "alone", "寂寞"},
+    {"律动", "groove", "groovy", "rhythmic", "节奏"},
+    {"暗黑", "dark", "暗夜", "midnight"},
+    # 曲风
+    {"说唱", "rap", "hip-hop", "hiphop", "hip hop", "trap"},
+    {"r&b", "rnb", "soul", "neo-soul", "neosoul", "r and b"},
+    {"电子", "electronic", "edm", "techno", "house", "electro"},
+    {"摇滚", "rock", "rocknroll", "punk"},
+    {"爵士", "jazz", "jazzy", "swing"},
+    {"民谣", "folk", "acoustic", "indie folk"},
+    {"流行", "pop", "popular", "mainstream"},
+    {"古典", "classical", "classic", "orchestra"},
+    {"国风", "古风", "中国风", "chinese traditional"},
+    {"金属", "metal", "heavy metal", "metalcore"},
+    # 场景
+    {"运动", "跑步", "workout", "running", "exercise", "gym", "健身"},
+    {"学习", "study", "studying", "专注", "focus", "concentrate"},
+    {"睡眠", "sleep", "睡前", "asleep", "助眠"},
+    {"派对", "party", "club", "聚会", "蹦迪"},
+]
+
+
+def _synonym_boost(query_tokens: set[str], track_tokens: set[str]) -> float:
+    """检查 query 和 track 是否有同义词组重叠，有则返回 boost 分。"""
+    q_lower = {t.lower() for t in query_tokens}
+    t_lower = {t.lower() for t in track_tokens}
+    for group in _SYNONYM_GROUPS:
+        q_hit = bool(q_lower & group)
+        t_hit = bool(t_lower & group)
+        if q_hit and t_hit:
+            return 0.3  # 同义词组重叠 → 温和 boost
+    return 0.0
+
+
 def _jaccard(a: set[str], b: set[str]) -> float:
     if not a or not b:
         return 0.0
@@ -135,8 +180,8 @@ def _track_id(track: Any) -> str:
 def _semantic_anchor(query: str, tracks: list[Any]) -> tuple[list[float], bool]:
     """返回 (每个候选的语义分[0,1], 是否可用)。
 
-    优先 dense 向量；不可用时回退 TF 词项 Jaccard，并标记 available=False
-    （TF 回退质量较弱，作为弱锚——但仍参与，不直接丢权重）。
+    优先 dense 向量；不可用时回退 TF 词项 Jaccard + 同义词 boost，并标记
+    available=False（TF 回退质量较弱，作为弱锚——但仍参与，不直接丢权重）。
     """
     texts = [_track_text(t) for t in tracks]
     try:
@@ -147,9 +192,14 @@ def _semantic_anchor(query: str, tracks: list[Any]) -> tuple[list[float], bool]:
         dense = None
     if dense is not None:
         return dense, True
-    # TF 回退
+    # TF 回退 + 同义词 boost
     q_tokens = _tokens(query)
-    return [_jaccard(q_tokens, _tokens(text)) for text in texts], False
+    scores: list[float] = []
+    for text in texts:
+        base = _jaccard(q_tokens, _tokens(text))
+        boost = _synonym_boost(q_tokens, _tokens(text))
+        scores.append(min(base + boost, 1.0))
+    return scores, False
 
 
 def _personalize_anchor(tracks: list[Any], profile: PreferenceProfile) -> list[float]:

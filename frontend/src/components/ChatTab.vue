@@ -53,6 +53,13 @@ async function send(text) {
           botMsg.cards.push(event.payload || {});
         } else if (event.type === "final") {
           finalText = event.content || "";
+          // final 携带权威卡片：与答案文本列出的曲目严格一一对应，
+          // 替换流式预览卡片，保证「文本列几首 = 底部几张卡」。
+          const finalCards = event.payload?.cards;
+          if (Array.isArray(finalCards)) {
+            botMsg.cards.splice(0, botMsg.cards.length, ...finalCards);
+            if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
+          }
         } else if (event.type === "error") {
           finalText = "⚠️ " + (event.content || "出错了，请重试");
         }

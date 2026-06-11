@@ -175,6 +175,23 @@ def _needs_web_fallback(plan: AgentPlan, results: list[dict[str, Any]], executed
     return len(verified) < need
 
 
+def _query_with_entities(query: str, plan: AgentPlan) -> str:
+    """把 plan 里的实体拼进 query。延续指令（"多来几首"）本身不含实体，
+    实体是从上一轮 DialogueState 继承到 retrieval_plan 的；不拼进 query 的话
+    recommend/search/playlist 工具拿不到实体，会走情绪/场景路由搜空。
+
+    实体已出现在 query 中则不重复拼接（避免 "找 The Weeknd The Weeknd"）。
+    """
+    entities = plan.retrieval_plan.entities
+    if not entities:
+        return query
+    lowered = query.lower()
+    extra = [e for e in entities if e and e.lower() not in lowered]
+    if not extra:
+        return query
+    return " ".join([query, *extra]).strip()
+
+
 def _run_tool(
     agent: AudioVisualAgent,
     tool: str,
@@ -204,21 +221,22 @@ def _run_tool(
         cards = [_song_card(t) for t in tracks]
         events.append(StreamEvent(type="candidates", content=f"候选 {len(tracks)} 个", payload={"count": len(tracks), "cards": cards}))
     elif tool == "recommend":
-        # recommend_for_query 内部会自己提取 search_goal，这里用原始 query 即可
-        rec = agent.recommend_for_query(user_id, query, top_k=top_k)
+        # 延续指令（"多来几首"）本身不含实体，但 plan 从上一轮继承了实体；
+        # 拼进 query 让 recommend_for_query 走精确搜索而非情绪/场景路由（否则搜空）。
+        rec = agent.recommend_for_query(user_id, _query_with_entities(query, plan), top_k=top_k)
         results.append({"type": "daily_recommend", "recommendation": rec})
         trace.append(f"[recommend] 生成 {len(rec.tracks)} 首推荐。")
         cards = [_song_card(item.asset, reason=item.reason, score=item.score, components=item.components) for item in rec.tracks]
         events.append(StreamEvent(type="candidates", content=f"推荐 {len(cards)} 首", payload={"count": len(cards), "cards": cards}))
     elif tool == "playlist":
         seed_tracks = _collect_tracks(results)
-        playlist = agent.generate_playlist(user_id, query, seed_tracks=seed_tracks, target_count=plan.target_count)
+        playlist = agent.generate_playlist(user_id, _query_with_entities(query, plan), seed_tracks=seed_tracks, target_count=plan.target_count)
         results.append({"type": "playlist", "playlist": playlist})
         trace.append(f"[playlist] 生成 {len(playlist.tracks)} 首歌单。")
         cards = [_song_card(t) for t in playlist.tracks]
         events.append(StreamEvent(type="candidates", content=f"歌单 {len(cards)} 首", payload={"count": len(cards), "cards": cards}))
     elif tool == "search":
-        search = agent.search(user_id, query, include_external=True, top_k=max(top_k, 12))
+        search = agent.search(user_id, _query_with_entities(query, plan), include_external=True, top_k=max(top_k, 12))
         results.append({"type": "search", "response": search})
         trace.append(f"[search] 本地 {len(search.local)} 首，外部 {len(search.external)} 首。")
     elif tool == "taste":
@@ -256,6 +274,7 @@ def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     answer_text = compose_answer(
         state["query"], state.get("results", []), state["plan"],
         agent=agent, memory_query=memory_query, history_text=history_text,
+        user_id=state["user_id"],
     )
     known = collect_known_titles(state.get("results", []))
     answer_text, removed = guard_answer(answer_text, known)
@@ -277,12 +296,62 @@ def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         pending_goal=goal.goal if goal and goal.status == "active" else None,
         goal_progress=_goal_progress(goal),
     )
+    # 权威卡片：与答案文本实际列出的曲目严格一一对应，挂到 final 事件。
+    # 前端收到后替换流式预览卡片，保证「文本列几首 = 底部几张卡」。
+    final_payload = answer.model_dump(mode="json")
+    listed = _select_listed_tracks(state.get("results", []), state["plan"])
+    if listed:
+        final_payload["cards"] = _aligned_cards(listed, state.get("events", []))
     return {
         **state,
         "answer": answer,
         "trace": trace,
-        "events": [*state.get("events", []), StreamEvent(type="final", content=answer_text, payload=answer.model_dump(mode="json"))],
+        "events": [*state.get("events", []), StreamEvent(type="final", content=answer_text, payload=final_payload)],
     }
+
+
+def _select_listed_tracks(results: list[dict[str, Any]], plan: AgentPlan) -> list[Any]:
+    """返回答案文本实际会列出的那批曲目（与 compose_answer 的截断逻辑严格一致）。
+
+    仅对会渲染确定性曲目清单的意图返回非空（recommend/search/playlist）；
+    chat/discuss/taste/journey 的文本不是一行行歌名，返回 [] 表示不接管卡片，
+    让前端保留流式预览卡片。
+    """
+    if plan.intent == "playlist":
+        pl = next((r["playlist"] for r in results if r.get("type") == "playlist"), None)
+        tracks = list(pl.tracks) if pl and pl.tracks else _collect_tracks(results)
+        return tracks[: plan.target_count or 30]
+    if plan.intent in {"recommend", "search"}:
+        tracks = _collect_tracks(results)
+        if plan.target_count:
+            tracks = tracks[: plan.target_count]
+        return tracks[: plan.target_count or 12]
+    return []
+
+
+def _aligned_cards(tracks: list[Any], events: list[StreamEvent]) -> list[dict[str, Any]]:
+    """为 listed 曲目生成卡片，按 (title, source, id) 复用流式预览阶段已发出的
+    卡片（保留 reason/score/components），找不到的再用 _song_card 兜底合成。"""
+    existing: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for ev in events:
+        if ev.type != "candidates":
+            continue
+        for card in (ev.payload or {}).get("cards", []):
+            key = (
+                str(card.get("title", "")).lower(),
+                str(card.get("source", "")),
+                str(card.get("source_id", "")),
+            )
+            existing.setdefault(key, card)
+
+    cards: list[dict[str, Any]] = []
+    for track in tracks:
+        title = getattr(track, "title", "")
+        source = getattr(track, "source", "local")
+        sid = getattr(track, "external_id", "") or getattr(track, "asset_id", "")
+        key = (str(title).lower(), str(source), str(sid))
+        cards.append(existing.get(key) or _song_card(track))
+    return cards
 
 
 def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
@@ -429,9 +498,10 @@ def compose_answer(
     agent: AudioVisualAgent | None = None,
     memory_query: str = "",
     history_text: str = "",
+    user_id: str = "",
 ) -> str:
     if plan.intent == "chat":
-        return _compose_chat_response(query, agent, history_text) or "你好，我在。有什么音乐上的事可以帮你?"
+        return _compose_chat_response(query, agent, history_text, user_id=user_id) or "你好，我在。有什么音乐上的事可以帮你?"
     if plan.intent == "discuss":
         tracks = _collect_tracks(results)
         return _compose_discussion(query, tracks, agent, history_text) or "抱歉，我暂时无法讨论这个话题。"
@@ -510,21 +580,32 @@ def _compose_intro(
     return text
 
 
-def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_text: str = "") -> str | None:
-    """让 LLM 自然回复寒暄/闲聊，而非返回硬编码模板。"""
+def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_text: str = "", user_id: str = "") -> str | None:
+    """让 LLM 自然回复寒暄/闲聊，注入用户画像作为事实锚。"""
     if agent is None or getattr(agent, "llm", None) is None:
         return None
     history_hint = ""
     if history_text:
         recent_lines = history_text.strip().split("\n")[-6:]
         history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
+    # 注入用户品味画像，让 chat 有事实基础（对齐 SoulTuner MUSIC_CHAT_RESPONSE_PROMPT 的 graphzep_facts 注入）
+    taste_hint = ""
+    if user_id and hasattr(agent, "summarize_taste"):
+        try:
+            taste = agent.summarize_taste(user_id)
+            if taste and len(taste) > 10:
+                taste_hint = f"用户音乐偏好：{taste[:150]}\n"
+        except Exception:
+            pass
     prompt = (
         f"{history_hint}"
+        f"{taste_hint}"
         f"用户说：{query}\n\n"
         "你是用户的私人音乐搭子，用中文自然、友好地回复。"
         "如果用户只是在打招呼，友好回应并提示你可以帮他做什么音乐相关的事。"
-        "如果用户提到了某个歌手/歌曲/风格，可以简短聊聊你的看法。"
-        "不要每次用同一句话，语气要自然口语化。50-100字。"
+        "如果用户提到了某个歌手/歌曲/风格，可以结合用户偏好简短聊聊你的看法。"
+        "不要每次用同一句话，语气要自然口语化。50-100字。\n"
+        "不要编造排名、发行时间、销量等你不确定的具体数据。"
     )
     try:
         text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
@@ -572,11 +653,12 @@ def _compose_discussion(
         "请用中文自然地回答，像一个懂音乐的朋友在聊天。\n"
         "严格规则：\n"
         "1. 只讨论上面列出的真实曲目和你能确认的事实\n"
-        "2. 不要编造专辑评价、歌曲细节、发行时间、排名等你不确定的信息\n"
+        "2. 不要编造专辑评价、歌曲细节、发行时间、排名、销量等你不确定的信息\n"
         "3. 不确定的就说\"我不太确定\"，不要猜测\n"
-        "4. 如果之前聊过相关话题，体现连贯性\n"
-        "5. 100字以内\n"
-        "6. 可以挑几首真实曲目推荐并说明理由"
+        "4. 不要推荐未在上面列出的歌曲——只讨论已验证的真实曲目\n"
+        "5. 如果之前聊过相关话题，体现连贯性\n"
+        "6. 100字以内\n"
+        "7. 可以挑几首真实曲目推荐并说明理由"
     )
     try:
         text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()

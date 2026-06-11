@@ -131,11 +131,19 @@ def song_card(
     components: dict | None = None,
 ) -> dict[str, Any]:
     """把一个 track 压成前端歌曲卡片所需的精简字段。"""
+    # 确保 playback_url 存在：优先用 track 自带，兜底按 source+id 构造
+    playback_url = getattr(track, "playback_url", None) or getattr(track, "source_url", None)
+    if not playback_url:
+        source = getattr(track, "source", "")
+        ext_id = getattr(track, "external_id", "") or getattr(track, "asset_id", "")
+        if source == "netease" and ext_id:
+            playback_url = f"https://music.163.com/song?id={ext_id}"
     return {
         "title": getattr(track, "title", ""),
         "artist": getattr(track, "artist", "") or "未知",
         "source": getattr(track, "source", "local"),
-        "playback_url": getattr(track, "playback_url", None) or getattr(track, "source_url", None),
+        "source_id": getattr(track, "external_id", "") or getattr(track, "asset_id", ""),
+        "playback_url": playback_url,
         "genre": getattr(track, "genre", []) or [],
         "mood": getattr(track, "mood", []) or [],
         "reason": reason,

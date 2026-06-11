@@ -1366,7 +1366,7 @@ class AudioVisualAgent:
         parts.append(f"显式表达过的偏好包括 {pref_text}。")
         return "".join(parts)
 
-    def recommend_for_query(self, user_id: str, goal: str, top_k: int = 5) -> DailyRecommendation:
+    def recommend_for_query(self, user_id: str, goal: str, top_k: int = 5, *, excluded_tracks: list[dict[str, str]] | None = None) -> DailyRecommendation:
         memory = self.memory.get_memory(user_id)
         memory_query = self.memory.weighted_query(memory)
         search_goal = _extract_search_query(goal)
@@ -1429,6 +1429,10 @@ class AudioVisualAgent:
             track for track in _dedupe_tracks(all_candidates)
             if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track)
         ]
+
+        # 过滤上一轮已展示的曲目（延续指令去重）
+        if excluded_tracks:
+            verified = _filter_excluded_tracks(verified, excluded_tracks)
 
         # 兜底：用 search_goal 再搜一次
         if len(verified) < top_k and search_goal:
@@ -2037,6 +2041,37 @@ def _dedupe_tracks(tracks: list[Asset | ExternalTrack]) -> list[Asset | External
         seen.add(key)
         unique.append(track)
     return unique
+
+
+def _filter_excluded_tracks(
+    tracks: list[Asset | ExternalTrack],
+    excluded: list[dict[str, str]],
+) -> list[Asset | ExternalTrack]:
+    """过滤掉上一轮已展示给用户的歌曲（延续指令去重）。
+
+    匹配策略：(title.lower, source_id) 组合键；source_id 为空时退化为 title。
+    """
+    if not excluded:
+        return tracks
+    seen_keys: set[tuple[str, str]] = set()
+    seen_titles: set[str] = set()
+    for ex in excluded:
+        title = ex.get("title", "").lower().strip()
+        sid = ex.get("source_id", "").strip()
+        if title:
+            seen_titles.add(title)
+            if sid:
+                seen_keys.add((title, sid))
+    filtered: list[Asset | ExternalTrack] = []
+    for t in tracks:
+        t_title = (getattr(t, "title", "") or "").lower().strip()
+        t_sid = getattr(t, "external_id", "") or getattr(t, "asset_id", "") or ""
+        if t_title and t_sid and (t_title, t_sid) in seen_keys:
+            continue
+        if t_title and t_title in seen_titles:
+            continue
+        filtered.append(t)
+    return filtered
 
 
 def _fill_tracks(

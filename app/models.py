@@ -209,6 +209,10 @@ class DialogueState(BaseModel):
     mood_tags: list[str] = Field(default_factory=list)
     scenario_tags: list[str] = Field(default_factory=list)
     turn_count: int = 0
+    shown_tracks: list[dict[str, str]] = Field(default_factory=list)
+    """每轮已展示给用户的歌曲摘要 [{"title":..., "artist":..., "source":..., "source_id":...}]。
+    延续指令（多来几首/换一批）时用于去重，避免重复推荐同一首歌。
+    """
     updated_at: str = Field(default_factory=utc_now_iso)
 
 

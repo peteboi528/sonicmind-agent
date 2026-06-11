@@ -118,6 +118,10 @@ def _apply_dialogue_continuation(
         "online_required": use_web,
         "retrieval_plan": merged,
     })
+    # 把上一轮已展示的曲目挂到 new_plan 上，供 _run_tool 传给 recommend/search 层去重
+    prev_shown = dialogue_state.get("shown_tracks") or []
+    if prev_shown:
+        new_plan._excluded_tracks = prev_shown  # type: ignore[attr-defined]
     return new_plan, "、".join(prev_entities) or prev_intent
 
 
@@ -192,6 +196,36 @@ def _query_with_entities(query: str, plan: AgentPlan) -> str:
     return " ".join([query, *extra]).strip()
 
 
+def _filter_excluded(tracks: list[Any], excluded: list[dict[str, str]]) -> list[Any]:
+    """过滤掉上一轮已展示给用户的歌曲，避免延续指令时推荐重复曲目。
+
+    匹配策略：(title, source_id) 组合键，source_id 为空时退化为 title 匹配。
+    """
+    if not excluded:
+        return tracks
+    seen_keys: set[tuple[str, str]] = set()
+    seen_titles: set[str] = set()
+    for ex in excluded:
+        title = ex.get("title", "").lower().strip()
+        sid = ex.get("source_id", "").strip()
+        if title:
+            seen_titles.add(title)
+            if sid:
+                seen_keys.add((title, sid))
+    filtered = []
+    for t in tracks:
+        t_title = (getattr(t, "title", "") or "").lower().strip()
+        t_sid = getattr(t, "external_id", "") or getattr(t, "asset_id", "") or ""
+        # source_id 精确匹配
+        if t_title and t_sid and (t_title, t_sid) in seen_keys:
+            continue
+        # title 退化匹配
+        if t_title and t_title in seen_titles:
+            continue
+        filtered.append(t)
+    return filtered
+
+
 def _run_tool(
     agent: AudioVisualAgent,
     tool: str,
@@ -208,10 +242,15 @@ def _run_tool(
     # 不做这步的话 "帮我生成一些drake的歌" 直接发到网易云 API，搜不到结果。
     from app.agent import _extract_search_query as _extract_core
     search_core = _extract_core(query) or query
+    # 延续指令时从 plan 中提取上一轮已展示的曲目（用于去重）
+    excluded_tracks = getattr(plan, "_excluded_tracks", None) or []
     if tool == "web_music_search":
         # 搜索用核心词 + plan 实体（LLM 抽取的歌手/歌名），相关性过滤只用核心词
         search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
         tracks = agent.search_web_music(search_q, top_k=max(plan.target_count or top_k, top_k), relevance_query=search_core)
+        # 去除上一轮已展示的歌曲
+        if excluded_tracks:
+            tracks = _filter_excluded(tracks, excluded_tracks)
         for track in tracks:
             if hasattr(agent, "library"):
                 agent.library.upsert_external(track)
@@ -223,7 +262,7 @@ def _run_tool(
     elif tool == "recommend":
         # 延续指令（"多来几首"）本身不含实体，但 plan 从上一轮继承了实体；
         # 拼进 query 让 recommend_for_query 走精确搜索而非情绪/场景路由（否则搜空）。
-        rec = agent.recommend_for_query(user_id, _query_with_entities(query, plan), top_k=top_k)
+        rec = agent.recommend_for_query(user_id, _query_with_entities(query, plan), top_k=top_k, excluded_tracks=excluded_tracks)
         results.append({"type": "daily_recommend", "recommendation": rec})
         trace.append(f"[recommend] 生成 {len(rec.tracks)} 首推荐。")
         cards = [_song_card(item.asset, reason=item.reason, score=item.score, components=item.components) for item in rec.tracks]
@@ -231,12 +270,18 @@ def _run_tool(
     elif tool == "playlist":
         seed_tracks = _collect_tracks(results)
         playlist = agent.generate_playlist(user_id, _query_with_entities(query, plan), seed_tracks=seed_tracks, target_count=plan.target_count)
+        # 延续指令去重：过滤掉上一轮已展示的曲目
+        if excluded_tracks and playlist.tracks:
+            playlist.tracks = _filter_excluded(playlist.tracks, excluded_tracks)
         results.append({"type": "playlist", "playlist": playlist})
         trace.append(f"[playlist] 生成 {len(playlist.tracks)} 首歌单。")
         cards = [_song_card(t) for t in playlist.tracks]
         events.append(StreamEvent(type="candidates", content=f"歌单 {len(cards)} 首", payload={"count": len(cards), "cards": cards}))
     elif tool == "search":
         search = agent.search(user_id, _query_with_entities(query, plan), include_external=True, top_k=max(top_k, 12))
+        # 延续指令去重：过滤掉上一轮已展示的曲目
+        if excluded_tracks:
+            search.external = _filter_excluded(search.external, excluded_tracks)
         results.append({"type": "search", "response": search})
         trace.append(f"[search] 本地 {len(search.local)} 首，外部 {len(search.external)} 首。")
     elif tool == "taste":
@@ -359,6 +404,7 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
 
     chat 意图视为话题中断，清空旧状态（下一轮"再来几首"无可继承对象时
     不会错误复用过期实体）。其余意图覆盖保存最新一轮上下文。
+    同时记录本轮展示给用户的曲目（shown_tracks），供下一轮去重。
     """
     plan = state["plan"]
     user_id = state["user_id"]
@@ -366,6 +412,17 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         agent.memory.clear_dialogue_state(user_id)
         return
     rp = plan.retrieval_plan
+    # 收集本轮最终展示的曲目摘要，用于下一轮去重
+    listed = _select_listed_tracks(state.get("results", []), plan)
+    shown = [
+        {
+            "title": getattr(t, "title", ""),
+            "artist": getattr(t, "artist", "") or "",
+            "source": getattr(t, "source", "local"),
+            "source_id": getattr(t, "external_id", "") or getattr(t, "asset_id", ""),
+        }
+        for t in listed
+    ]
     agent.memory.save_dialogue_state(
         user_id,
         intent=plan.intent,
@@ -374,6 +431,7 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         genre_tags=rp.genre_filter,
         mood_tags=rp.mood_filter,
         scenario_tags=rp.scenario_filter,
+        shown_tracks=shown,
     )
 
 

@@ -1,4 +1,4 @@
-# 智能影音推荐 Agent（MusicAgent）
+# 智能影音推荐 Agent（MusicAgent / SonicMind）
 
 一个**可解释、记忆驱动、反幻觉**的音乐推荐 Agent。核心不是单次 LLM 对话，而是一个围绕用户品味持续工作、决策全程可追溯的智能体。
 
@@ -14,8 +14,31 @@
 |---|---|
 | 🛡️ **反幻觉** | Answer Guard 在出答案前移除未核实歌名；候选不足时**诚实说明**而非编造。所有推荐可追溯到真实平台来源。 |
 | 🔌 **零依赖可跑** | 无 `LLM_API_KEY` 时用 `MockLLM`，无 langgraph 时图编排自动降级到等价同步执行，无 sentence-transformers 时语义检索回退 TF cosine。开箱即跑的稳定 demo。 |
-| 🎵 **网易云生态** | 真实歌单导入、音频直链、MV 播放，对接网易云 / B 站 / YouTube 真实候选。 |
+| 🎵 **多源搜索生态** | 网易云歌曲搜索 + B站/YouTube MV/现场视频 + Tavily 联网百科。不同场景自动路由最优数据源。 |
 | 📈 **BaRT 行为奖励 + 在线学习** | 听完/秒跳/评分/负反馈实时喂给 Thompson Sampling，探索冷门同时在线学习用户口味。 |
+
+## 对话场景
+
+Agent 自动识别意图，路由到最合适的工具链：
+
+| 意图 | 触发示例 | 行为 |
+|------|---------|------|
+| 🎧 **recommend** | 「推荐几首歌」「来点chill的」「适合跑步的歌」 | 网易云 + LLM候选 + Last.fm 多路搜索 → 三锚精排 + MMR 重排 |
+| 🔍 **search** | 「找一首歌」「帮我搜Drake」 | 网易云歌曲搜索为主，本地库补充 |
+| 🎬 **video** | 「找The Weeknd的MV」「Adele现场演唱会」 | **直搜 B站 + YouTube**，不走网易云。B站优先（华语命中率高），YouTube 补位 |
+| 📖 **artist_info** | 「介绍NewJeans」「Drake是谁」「Coldplay出道经历」 | **Tavily 搜索引擎查百科**，LLM 基于真实搜索结果组织 200-400 字介绍 + 来源链接 |
+| 💬 **discuss** | 「The Weeknd怎么样」「Drake和Kendrick谁更牛」 | 搜真实曲目作为论据，LLM 基于事实讨论（反幻觉：不确定的说不知道） |
+| 📋 **playlist** | 「做20首chill歌单」 | 联网扩展 + LLM 精选，保留歌单名和描述 |
+| 📥 **import** | 「导入网易云歌单」 | 网易云「我的歌单」一键导入 |
+| 🎯 **taste** | 「分析我的品味」 | 只读记忆/行为画像，无需联网 |
+| 🏔️ **journey** | 「做个从热身到冲刺的音乐旅程」 | 多阶段情绪曲线编排 |
+| 💭 **chat** | 「你好」「谢谢」 | 自然寒暄 |
+
+### 多轮对话
+
+- **延续指令**：「多来几首」「换一批」「还有吗」→ 继承上一轮实体和意图，自动去重已展示歌曲
+- **话题切换**：「找他的MV」「介绍这个歌手」→ 自动检测新意图信号，不再延续
+- **指代消解**：「他的歌」「只要他的」→ 短句指代自动继承上一轮实体
 
 ## 架构概览
 
@@ -29,8 +52,10 @@ load_context → plan_intent → execute_tools ─┬─（候选充足）→ ev
 ```
 
 - **意图识别分工**：LLM 只判意图 + 抽实体名，`genre/mood/scenario` 标签交给**确定性规则**（`app/graph/tag_rules.py`），降幻觉降成本。
-- **条件路由**：本地/检索候选不足时自动触发 `web_fallback` 联网补搜（langgraph 用 `add_conditional_edges`，无依赖时同步等价复刻）。
+- **意图 Registry**（`app/intents.py`）：所有意图元数据集中声明——工具链、策略、关键词、优先级。新增意图只改一处。
+- **条件路由**：本地/检索候选不足时自动触发 `web_fallback` 联网补搜。
 - **降级链**：LangGraph → 同步等价执行 → ReAct 循环兜底。
+- **安全网**：LLM 误判意图时（如把「介绍」判成 discuss），按关键词信号自动升级到正确意图。
 
 ### 三锚归一化精排（`app/recommend/rerank.py`）
 
@@ -70,12 +95,18 @@ python3 -m pytest                 # 全量测试（零依赖即可跑）
 python3 -m pip install -e ".[embeddings]"   # 语义检索（sentence-transformers）
 # langgraph 已在主依赖，缺失时自动降级
 
+# 环境变量（可选，增强联网能力）
+# LLM_API_KEY=...           # LLM 服务密钥
+# TAVILY_API_KEY=...         # Tavily 搜索引擎（歌手百科查询，无 key 时 DuckDuckGo 兜底）
+# LASTFM_API_KEY=...         # Last.fm 音乐发现
+
 uvicorn app.api.main:app --reload --port 8000
 streamlit run app/ui/streamlit_app.py --server.port 8501
 ```
 
 - API 文档：`http://127.0.0.1:8000/docs`
-- UI：`http://127.0.0.1:8501`
+- Vue 3 前端：`app/web/dist/index.html`
+- Streamlit UI：`http://127.0.0.1:8501`
 
 ## 主要 API
 
@@ -96,6 +127,9 @@ streamlit run app/ui/streamlit_app.py --server.port 8501
 3. 推荐 / 生成歌单，展开**透明度面板**看三锚打分和决策过程。
 4. 对推荐点 👎，观察 Thompson 探索分下降、后续不再选中。
 5. 问一个虚构查询，验证反幻觉守卫诚实拒答。
+6. 试 `介绍NewJeans`，看 Tavily 搜索引擎实时查百科。
+7. 试 `帮我找The Weeknd的MV`，看 B站/YouTube 视频搜索。
+8. 说 `多来几首`，验证跨轮去重（不再重复推荐）。
 
 ## 测试与评估
 
@@ -107,5 +141,6 @@ streamlit run app/ui/streamlit_app.py --server.port 8501
 - **所有增强依赖可选**：langgraph / sentence-transformers 缺失都有等价降级路径，零依赖 demo 能力贯穿始终。
 - **不做异步 LLM 压缩**：同步架构下会阻塞主流程，GSSC 用确定性截断兜底。
 - **标签走规则不走 LLM**：降低幻觉和成本，LLM 只做它擅长的意图判断。
+- **关键词 fallback + LLM 双保险**：LLM 不可用时关键词信号兜底；LLM 误判时安全网自动纠正。
 
 更多面试向架构讲解见 [docs/EXPLAINER.md](docs/EXPLAINER.md)。

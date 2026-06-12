@@ -59,7 +59,7 @@ def infer_count(text: str) -> int | None:
 
 
 def dedupe_tracks(tracks: list[Any]) -> list[Any]:
-    """按 source|title|artist 去重，丢弃空标题。title/artist 大小写不敏感。"""
+    """按 title|artist 跨源去重，丢弃空标题。title/artist 大小写不敏感。"""
     seen: set[str] = set()
     unique: list[Any] = []
     for track in tracks:
@@ -67,8 +67,7 @@ def dedupe_tracks(tracks: list[Any]) -> list[Any]:
         if not title:
             continue
         artist = getattr(track, "artist", "") or ""
-        source = getattr(track, "source", "local")
-        key = f"{source}|{title.lower()}|{artist.lower()}"
+        key = f"{title.lower()}|{artist.lower()}"
         if key in seen:
             continue
         seen.add(key)

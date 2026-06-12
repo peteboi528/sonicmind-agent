@@ -12,6 +12,7 @@ const importing = ref(false);
 const prefEvent = ref("");
 const learning = ref(false);
 const msg = ref("");
+const emit = defineEmits(["close"]);
 
 // 我的歌单
 const myPlaylists = ref([]);
@@ -100,7 +101,14 @@ onMounted(refreshAccount);
 
 <template>
   <aside class="sidebar">
-    <div class="brand">SONICMIND<span class="dot">·</span><small>为你而听</small></div>
+    <button class="drawer-close" @click="$emit('close')">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+    </button>
+    <div class="brand">
+      <span class="brand-mark">S</span>
+      <span class="brand-text">SONICMIND</span>
+      <span class="brand-tag">为你而听</span>
+    </div>
 
     <!-- 用户 -->
     <div class="block">
@@ -168,7 +176,9 @@ onMounted(refreshAccount);
       </button>
     </div>
 
-    <div v-if="msg" class="msg">{{ msg }}</div>
+    <Transition name="msg-slide">
+      <div v-if="msg" class="msg">{{ msg }}</div>
+    </Transition>
 
     <NeteaseLogin v-if="showLogin" @close="showLogin = false" @bound="onBound" />
   </aside>
@@ -176,34 +186,107 @@ onMounted(refreshAccount);
 
 <style scoped>
 .sidebar {
-  width: var(--sidebar-w); flex-shrink: 0; background: #000;
-  border-right: 1px solid var(--border); padding: 20px 16px;
-  overflow-y: auto; display: flex; flex-direction: column; gap: 22px;
+  width: 100%; min-height: 100%;
+  background: #040406;
+  padding: 24px 18px;
+  overflow-y: auto; display: flex; flex-direction: column; gap: 24px;
+  position: relative;
 }
-.brand { font-weight: 800; font-size: 1.15rem; }
-.brand .dot { color: var(--accent); margin: 0 4px; }
-.brand small { color: var(--text-sub); font-weight: 400; font-size: 0.7rem; }
-.block-title { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
-.input.sm { padding: 8px 11px; font-size: 0.85rem; margin-bottom: 6px; }
+
+/* ── Drawer Close ── */
+.drawer-close {
+  position: absolute; top: 16px; right: 16px;
+  width: 32px; height: 32px; border-radius: 50%;
+  color: var(--text-muted);
+  display: flex; align-items: center; justify-content: center;
+  transition: all var(--transition);
+}
+.drawer-close:hover { background: var(--bg-hover); color: var(--text); }
+
+/* ── Brand ── */
+.brand {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.brand-mark {
+  width: 32px; height: 32px; border-radius: 8px;
+  background: var(--accent-grad);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-display);
+  font-weight: 800; font-size: 1.1rem; color: #000;
+  flex-shrink: 0;
+}
+.brand-text {
+  font-family: var(--font-display);
+  font-weight: 800; font-size: 1rem;
+  letter-spacing: 0.04em;
+}
+.brand-tag {
+  color: var(--text-muted); font-size: 0.65rem;
+  margin-left: auto;
+}
+
+.block-title {
+  font-family: var(--font-display);
+  font-size: 0.7rem; color: var(--text-muted);
+  text-transform: uppercase; letter-spacing: 0.8px;
+  margin-bottom: 10px; font-weight: 600;
+}
+
+.input.sm { padding: 9px 12px; font-size: 0.84rem; margin-bottom: 6px; }
 .input.num { width: 80px; }
 .user-row { display: flex; gap: 6px; }
-.btn-ghost.sm, .btn.full { padding: 7px 14px; font-size: 0.82rem; }
-.btn-ghost.xs { padding: 4px 10px; font-size: 0.75rem; }
+.btn-ghost.sm, .btn.full { padding: 8px 14px; font-size: 0.82rem; }
+.btn-ghost.xs { padding: 5px 10px; font-size: 0.74rem; }
 .full { width: 100%; }
 .import-row { display: flex; gap: 6px; align-items: center; }
-.netease-on { display: flex; align-items: center; gap: 10px; }
-.avatar { width: 36px; height: 36px; border-radius: 50%; }
-.ne-info { flex: 1; min-width: 0; }
-.ne-name { font-size: 0.85rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ne-vip { font-size: 0.72rem; color: var(--accent); }
-.msg { font-size: 0.8rem; color: var(--accent); background: var(--accent-dim); padding: 8px 10px; border-radius: var(--radius-sm); }
 .select-pl { width: 100%; margin-bottom: 6px; appearance: auto; }
-.divider-or { font-size: 0.72rem; color: var(--text-muted); text-align: center; margin: 8px 0 6px; position: relative; }
-.divider-or::before, .divider-or::after { content: ""; position: absolute; top: 50%; width: 38%; height: 1px; background: var(--border); }
+
+/* ── Netease Bound ── */
+.netease-on {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px; border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
+.avatar {
+  width: 38px; height: 38px; border-radius: 50%;
+  border: 2px solid var(--accent-dim);
+}
+.ne-info { flex: 1; min-width: 0; }
+.ne-name {
+  font-family: var(--font-display);
+  font-size: 0.84rem; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ne-vip { font-size: 0.7rem; color: var(--accent); font-weight: 600; }
+
+.divider-or {
+  font-size: 0.7rem; color: var(--text-muted); text-align: center;
+  margin: 10px 0 8px; position: relative;
+}
+.divider-or::before, .divider-or::after {
+  content: ""; position: absolute; top: 50%; width: 36%; height: 1px;
+  background: var(--border);
+}
 .divider-or::before { left: 0; }
 .divider-or::after { right: 0; }
+
+.msg {
+  font-size: 0.78rem; color: var(--accent);
+  background: var(--accent-dim); padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(29,185,84,0.12);
+}
+
+.msg-slide-enter-active { animation: fadeInUp 0.25s var(--ease-out); }
+.msg-slide-leave-active { transition: all 0.15s ease; }
+.msg-slide-leave-to { opacity: 0; transform: translateY(-6px); }
+
 @media (max-width: 768px) {
-  .sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; gap: 12px; }
+  .sidebar { width: 100%; flex-direction: row; flex-wrap: wrap; gap: 12px; padding: 16px; }
   .block { flex: 1; min-width: 140px; }
+  .brand { display: none; }
 }
 </style>

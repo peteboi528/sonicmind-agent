@@ -14,7 +14,6 @@ async function load() {
   try {
     const data = await api.listAssets();
     assets.value = data.assets || [];
-    // 从后端加载已保存的评分，合并到 asset._rated 让星星点亮
     try {
       const ratingsData = await api.getRatings(store.userId);
       const ratingMap = {};
@@ -76,15 +75,18 @@ onMounted(load);
       </button>
     </div>
 
-    <div v-if="msg" class="toast">{{ msg }}</div>
+    <Transition name="toast-slide">
+      <div v-if="msg" class="toast">{{ msg }}</div>
+    </Transition>
     <div v-if="loading" class="loading-hint">加载中…</div>
 
     <div v-if="!loading && !assets.length" class="empty-hint">库还是空的，先添加点音乐吧。</div>
 
-    <div v-for="a in assets" :key="a.asset_id" class="lib-row">
+    <div v-for="(a, idx) in assets" :key="a.asset_id" class="lib-row stagger-item" :style="{ animationDelay: `${idx * 40}ms` }">
       <div class="info">
         <div class="title">{{ a.title || "未命名" }}</div>
-        <div class="artist">{{ a.artist || "未知" }}
+        <div class="artist">
+          {{ a.artist || "未知" }}
           <span v-for="g in (a.genre || []).slice(0,2)" :key="g" class="tag">{{ g }}</span>
         </div>
       </div>
@@ -92,23 +94,67 @@ onMounted(load);
         <button v-for="s in [2,4,6,8,10]" :key="s"
           class="star" :class="{ on: a._rated >= s }" @click="rate(a, s)">★</button>
       </div>
-      <button class="del" @click="remove(a)">🗑</button>
+      <button class="del" @click="remove(a)">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+      </button>
     </div>
   </div>
 </template>
 
 <style scoped>
-.ingest-row { display: flex; gap: 10px; margin-bottom: 18px; max-width: 640px; }
-.toast { background: var(--accent-dim); color: var(--accent); padding: 10px 14px; border-radius: var(--radius-sm); margin-bottom: 14px; }
-.lib-row { display: flex; align-items: center; gap: 14px; background: var(--bg-card); padding: 12px 16px; border-radius: var(--radius); margin-bottom: 8px; }
+.ingest-row { display: flex; gap: 10px; margin-bottom: 20px; max-width: 640px; }
+.toast {
+  background: var(--accent-dim); color: var(--accent); padding: 10px 14px;
+  border-radius: var(--radius-sm); margin-bottom: 16px;
+  border: 1px solid rgba(29,185,84,0.12);
+}
+.toast-slide-enter-active { animation: fadeInUp 0.25s var(--ease-out); }
+.toast-slide-leave-active { transition: all 0.15s ease; }
+.toast-slide-leave-to { opacity: 0; transform: translateY(-6px); }
+
+.lib-row {
+  display: flex; align-items: center; gap: 14px;
+  background: var(--bg-card); padding: 14px 18px;
+  border-radius: var(--radius); margin-bottom: 8px;
+  border: 1px solid var(--border);
+  transition: all var(--dur-norm) var(--ease-out);
+}
+.lib-row:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-light);
+  transform: translateY(-1px);
+}
 .info { flex: 1; min-width: 0; }
-.title { font-weight: 600; }
-.artist { color: var(--text-sub); font-size: 0.85rem; margin-top: 2px; }
-.tag { display: inline-block; margin-left: 6px; padding: 1px 7px; background: var(--bg-elevated); border-radius: var(--radius-pill); font-size: 0.7rem; color: var(--text-muted); }
+.title {
+  font-family: var(--font-display);
+  font-weight: 600; font-size: 0.93rem;
+}
+.artist { color: var(--text-sub); font-size: 0.82rem; margin-top: 3px; }
+.tag {
+  display: inline-block; margin-left: 6px; padding: 2px 8px;
+  background: var(--bg-elevated); border-radius: var(--radius-pill);
+  font-size: 0.68rem; color: var(--text-muted);
+  font-family: var(--font-display); font-weight: 600;
+}
+
 .rate { display: flex; gap: 2px; }
-.star { font-size: 1.1rem; color: var(--text-muted); transition: var(--transition); }
-.star.on { color: var(--accent); }
-.star:hover { color: var(--accent-hover); }
-.del { width: 36px; height: 36px; border-radius: 50%; color: var(--text-sub); }
-.del:hover { background: var(--bg-hover); color: var(--danger); }
+.star {
+  font-size: 1.15rem; color: var(--text-muted);
+  transition: all 0.2s var(--ease-spring);
+}
+.star.on {
+  color: var(--accent);
+  text-shadow: 0 0 8px var(--accent-glow);
+}
+.star:hover {
+  color: var(--accent-hover);
+  transform: scale(1.25);
+}
+
+.del {
+  width: 34px; height: 34px; border-radius: 50%;
+  color: var(--text-muted); display: flex; align-items: center; justify-content: center;
+  transition: all var(--transition);
+}
+.del:hover { background: rgba(231,76,60,0.1); color: var(--danger); }
 </style>

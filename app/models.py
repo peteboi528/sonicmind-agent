@@ -462,6 +462,38 @@ class EnrichResponse(BaseModel):
     note: str = ""
 
 
+# ── Discover / Browse ──
+
+class BrowseRequest(BaseModel):
+    user_id: str = "demo-user"
+    category: str  # "genre" | "mood" | "scene"
+    value: str     # "摇滚" | "放松" | "深夜"
+    limit: int = Field(default=12, ge=1, le=30)
+
+
+class TrendingRequest(BaseModel):
+    user_id: str = "demo-user"
+    limit: int = Field(default=12, ge=1, le=30)
+
+
+class ArtistInfoRequest(BaseModel):
+    artist: str
+
+
+class ArtistAlbum(BaseModel):
+    name: str
+    image: str = ""
+
+
+class ArtistInfoResponse(BaseModel):
+    name: str
+    image: str = ""
+    bio: str = ""
+    tags: list[str] = Field(default_factory=list)
+    top_albums: list[ArtistAlbum] = Field(default_factory=list)
+    top_tracks: list[ExternalTrack] = Field(default_factory=list)
+
+
 def format_time(seconds: int) -> str:
     minutes, sec = divmod(max(0, seconds), 60)
     hours, minutes = divmod(minutes, 60)

@@ -8,6 +8,13 @@ const taste = ref(null);
 const newRule = ref("");
 const msg = ref("");
 const loading = ref(false);
+let toastTimer = null;
+
+function setToast(text) {
+  clearTimeout(toastTimer);
+  msg.value = text;
+  toastTimer = setTimeout(() => { msg.value = ""; }, 2600);
+}
 
 async function load() {
   loading.value = true;
@@ -18,7 +25,7 @@ async function load() {
     ]);
     rules.value = exclData.rules || [];
     taste.value = tasteData;
-  } catch { msg.value = "加载失败"; }
+  } catch { setToast("加载失败"); }
   finally { loading.value = false; }
 }
 
@@ -29,16 +36,16 @@ async function addRule() {
     const data = await api.addExclusion(store.userId, r);
     rules.value = data.rules || [];
     newRule.value = "";
-    msg.value = `已添加排除规则：${r}`;
-  } catch { msg.value = "添加失败"; }
+    setToast(`已添加排除规则：${r}`);
+  } catch { setToast("添加失败"); }
 }
 
 async function removeRule(rule) {
   try {
     const data = await api.removeExclusion(store.userId, rule);
     rules.value = data.rules || [];
-    msg.value = `已移除：${rule}`;
-  } catch { msg.value = "移除失败"; }
+    setToast(`已移除：${rule}`);
+  } catch { setToast("移除失败"); }
 }
 
 onMounted(load);
@@ -75,17 +82,21 @@ onMounted(load);
         <button class="btn" :disabled="!newRule.trim()" @click="addRule">添加</button>
       </div>
 
-      <div v-if="rules.length" class="chip-row">
-        <span v-for="rule in rules" :key="rule" class="chip">
-          {{ rule }}
-          <button class="chip-x" @click="removeRule(rule)">×</button>
-        </span>
-      </div>
-      <div v-else class="empty-hint">暂无排除规则。</div>
+      <TransitionGroup name="chip-list">
+        <div v-if="rules.length" class="chip-row" :key="'row'">
+          <span v-for="rule in rules" :key="rule" class="chip">
+            {{ rule }}
+            <button class="chip-x" @click="removeRule(rule)">×</button>
+          </span>
+        </div>
+      </TransitionGroup>
+      <div v-if="!rules.length" class="empty-hint">暂无排除规则。</div>
     </div>
 
     <div v-if="loading" class="loading-hint">加载中…</div>
-    <div v-if="msg" class="toast-msg">{{ msg }}</div>
+    <Transition name="toast-slide">
+      <div v-if="msg" class="toast-msg">{{ msg }}</div>
+    </Transition>
   </div>
 </template>
 
@@ -93,86 +104,66 @@ onMounted(load);
 .card {
   background: var(--bg-card);
   border-radius: var(--radius);
-  padding: 20px;
+  padding: 22px;
   margin-bottom: 18px;
+  border: 1px solid var(--border);
 }
 .card-title {
-  font-weight: 700;
-  font-size: 1.05rem;
-  margin-bottom: 12px;
+  font-family: var(--font-display);
+  font-weight: 700; font-size: 1.05rem;
+  margin-bottom: 14px;
 }
 .tag-group {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 8px;
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: 6px; margin-bottom: 10px;
 }
-.tag-label {
-  color: var(--text-sub);
-  font-size: 0.85rem;
-  margin-right: 4px;
-}
+.tag-label { color: var(--text-sub); font-size: 0.85rem; margin-right: 4px; }
 .tag {
-  display: inline-block;
-  padding: 3px 10px;
-  background: var(--accent-dim);
-  color: var(--accent);
+  display: inline-block; padding: 4px 12px;
+  background: var(--accent-dim); color: var(--accent);
   border-radius: var(--radius-pill);
-  font-size: 0.8rem;
+  font-size: 0.78rem; font-family: var(--font-display);
+  font-weight: 600;
 }
-.input-row {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 16px;
-  max-width: 480px;
-}
-.chip-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
+.input-row { display: flex; gap: 10px; margin-bottom: 18px; max-width: 480px; }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 14px;
   background: var(--bg-elevated);
+  border: 1px solid var(--border);
   border-radius: var(--radius-pill);
-  font-size: 0.85rem;
-  color: var(--text);
+  font-size: 0.84rem; color: var(--text);
+  transition: all var(--transition);
 }
+.chip:hover { border-color: var(--border-light); }
 .chip-x {
-  background: none;
-  border: none;
-  color: var(--text-muted);
-  font-size: 1rem;
-  cursor: pointer;
-  padding: 0;
-  line-height: 1;
-  transition: var(--transition);
+  background: none; border: none;
+  color: var(--text-muted); font-size: 1.05rem;
+  cursor: pointer; padding: 0; line-height: 1;
+  transition: all var(--transition);
 }
-.chip-x:hover {
-  color: var(--danger);
-}
+.chip-x:hover { color: var(--danger); transform: scale(1.2); }
+
+/* ── Chip Transition ── */
+.chip-list-enter-active { animation: fadeInUp 0.3s var(--ease-out); }
+.chip-list-leave-active { transition: all 0.2s ease; }
+.chip-list-leave-to { opacity: 0; transform: scale(0.9); }
+
+/* ── Toast ── */
 .toast-msg {
   position: fixed;
-  bottom: calc(var(--player-h) + 16px);
-  left: 50%;
-  transform: translateX(-50%);
-  background: var(--bg-elevated);
-  color: var(--text);
-  padding: 10px 20px;
+  bottom: calc(var(--player-h) + 20px);
+  left: 50%; transform: translateX(-50%);
+  background: var(--bg-glass);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  color: var(--text); padding: 10px 22px;
   border-radius: var(--radius-pill);
-  font-size: 0.85rem;
-  box-shadow: var(--shadow);
-  z-index: 100;
-  animation: fadeInOut 2.5s ease forwards;
+  font-size: 0.84rem; border: 1px solid var(--border);
+  box-shadow: var(--shadow); z-index: 100;
 }
-@keyframes fadeInOut {
-  0% { opacity: 0; transform: translateX(-50%) translateY(10px); }
-  15% { opacity: 1; transform: translateX(-50%) translateY(0); }
-  80% { opacity: 1; }
-  100% { opacity: 0; }
-}
+.toast-slide-enter-active { animation: fadeInUp 0.3s var(--ease-out); }
+.toast-slide-leave-active { transition: all 0.2s ease; }
+.toast-slide-leave-to { opacity: 0; transform: translateX(-50%) translateY(10px); }
 </style>

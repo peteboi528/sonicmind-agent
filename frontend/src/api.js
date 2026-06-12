@@ -2,9 +2,10 @@
 // SSE 解析逻辑移植自原 Vanilla app.js（fetch + ReadableStream，EventSource 不支持 POST）。
 
 async function jsonFetch(url, options = {}) {
+  const { headers: extraHeaders, ...rest } = options;
   const resp = await fetch(url, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
+    ...rest,
+    headers: { "Content-Type": "application/json", ...extraHeaders },
   });
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
@@ -12,11 +13,12 @@ async function jsonFetch(url, options = {}) {
 
 export const api = {
   // ---- 对话 ----
-  async streamChat({ userId, message, history }, handlers) {
+  async streamChat({ userId, message, history }, handlers, signal) {
     const resp = await fetch("/agent/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ user_id: userId, message, history: (history || []).slice(-10) }),
+      signal,
     });
     if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
 
@@ -36,6 +38,15 @@ export const api = {
           try { event = JSON.parse(line.slice(6)); } catch { continue; }
           handlers.onEvent?.(event);
         }
+      }
+    }
+    // 处理尾部未以 \n\n 结尾的事件
+    if (buffer.trim()) {
+      for (const line of buffer.split("\n")) {
+        if (!line.startsWith("data: ")) continue;
+        let event;
+        try { event = JSON.parse(line.slice(6)); } catch { continue; }
+        handlers.onEvent?.(event);
       }
     }
   },
@@ -90,6 +101,14 @@ export const api = {
     jsonFetch("/api/playback/audio", { method: "POST", body: JSON.stringify({ track, user_id: userId }) }),
   playbackMv: (userId, track) =>
     jsonFetch("/api/playback/mv", { method: "POST", body: JSON.stringify({ track, user_id: userId }) }),
+
+  // ---- 发现 / 歌手 ----
+  discoverBrowse: (userId, category, value, limit = 12) =>
+    jsonFetch("/discover/browse", { method: "POST", body: JSON.stringify({ user_id: userId, category, value, limit }) }),
+  discoverTrending: (userId, limit = 12) =>
+    jsonFetch("/discover/trending", { method: "POST", body: JSON.stringify({ user_id: userId, limit }) }),
+  artistInfo: (artist) =>
+    jsonFetch("/artist/info", { method: "POST", body: JSON.stringify({ artist }) }),
 
   // ---- 网易云认证 ----
   neteaseQrKey: () => jsonFetch("/auth/netease/qr/key"),

@@ -77,38 +77,93 @@ onMounted(load);
 
     <div v-if="!loading && !playlists.length" class="empty-hint">还没有歌单，生成一个试试。</div>
 
-    <div v-for="pl in playlists" :key="pl.playlist_id" class="pl-card">
+    <div v-for="(pl, idx) in playlists" :key="pl.playlist_id" class="pl-card stagger-item" :style="{ animationDelay: `${idx * 60}ms` }">
       <div class="pl-head" @click="expanded = expanded === pl.playlist_id ? null : pl.playlist_id">
-        <div>
+        <div class="pl-info">
           <div class="pl-name">{{ pl.name }}</div>
           <div class="pl-desc">{{ pl.description || (pl.tracks?.length + " 首") }}</div>
         </div>
         <div class="pl-actions">
           <span class="count">{{ pl.tracks?.length || 0 }} 首</span>
-          <button class="del" @click.stop="remove(pl)">🗑</button>
-          <span class="chev">{{ expanded === pl.playlist_id ? "▲" : "▼" }}</span>
+          <button class="del" @click.stop="remove(pl)">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+          </button>
+          <span class="chev" :class="{ open: expanded === pl.playlist_id }">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/></svg>
+          </span>
         </div>
       </div>
-      <div v-if="expanded === pl.playlist_id" class="pl-tracks">
-        <SongCard v-for="(t, i) in pl.tracks" :key="i" :card="toCard(t)" :show-reason="false" @toast="(m) => msg = m" />
-      </div>
+      <Transition name="expand">
+        <div v-if="expanded === pl.playlist_id" class="pl-tracks">
+          <button v-if="pl.tracks?.length > 1" class="play-all-btn" @click="store.playAll(pl.tracks.map(toCard))">
+            ▶ 全部播放（{{ pl.tracks.length }}首）
+          </button>
+          <SongCard v-for="(t, i) in pl.tracks" :key="i" :card="toCard(t)" :show-reason="false" @toast="(m) => msg = m" />
+        </div>
+      </Transition>
     </div>
   </div>
 </template>
 
 <style scoped>
-.gen-row { display: flex; gap: 10px; margin-bottom: 18px; flex-wrap: wrap; }
+.gen-row { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
 .gen-row .input { flex: 1; min-width: 240px; }
-.toast { background: var(--accent-dim); color: var(--accent); padding: 10px 14px; border-radius: var(--radius-sm); margin-bottom: 14px; }
-.pl-card { background: var(--bg-card); border-radius: var(--radius); margin-bottom: 10px; overflow: hidden; }
-.pl-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; cursor: pointer; }
+.toast {
+  background: var(--accent-dim); color: var(--accent); padding: 10px 14px;
+  border-radius: var(--radius-sm); margin-bottom: 16px;
+  border: 1px solid rgba(29,185,84,0.12);
+}
+
+.pl-card {
+  background: var(--bg-card); border-radius: var(--radius);
+  margin-bottom: 10px; overflow: hidden;
+  border: 1px solid var(--border);
+  transition: all var(--dur-norm) var(--ease-out);
+}
+.pl-card:hover { border-color: var(--border-light); }
+
+.pl-head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 18px; cursor: pointer;
+  transition: background var(--transition);
+}
 .pl-head:hover { background: var(--bg-hover); }
-.pl-name { font-weight: 700; }
-.pl-desc { color: var(--text-sub); font-size: 0.83rem; margin-top: 2px; }
+
+.pl-info { min-width: 0; flex: 1; }
+.pl-name {
+  font-family: var(--font-display);
+  font-weight: 700; font-size: 0.95rem;
+}
+.pl-desc { color: var(--text-sub); font-size: 0.82rem; margin-top: 3px; }
 .pl-actions { display: flex; align-items: center; gap: 12px; }
-.count { color: var(--text-muted); font-size: 0.8rem; }
-.del { color: var(--text-sub); }
-.del:hover { color: var(--danger); }
-.chev { color: var(--text-muted); font-size: 0.7rem; }
-.pl-tracks { padding: 4px 12px 12px; }
+.count {
+  color: var(--text-muted); font-size: 0.78rem;
+  font-family: var(--font-display); font-weight: 600;
+}
+.del {
+  color: var(--text-muted); padding: 4px;
+  border-radius: 50%; transition: all var(--transition);
+}
+.del:hover { color: var(--danger); background: rgba(231,76,60,0.1); }
+
+.chev {
+  color: var(--text-muted);
+  transition: transform var(--dur-norm) var(--ease-out);
+  display: flex;
+}
+.chev.open { transform: rotate(180deg); }
+
+.pl-tracks { padding: 4px 14px 14px; }
+
+/* ── Expand Animation ── */
+.expand-enter-active {
+  animation: expand-in 0.35s var(--ease-out);
+}
+.expand-leave-active {
+  animation: expand-in 0.25s var(--ease-out) reverse;
+}
+@keyframes expand-in {
+  from { opacity: 0; max-height: 0; padding-top: 0; padding-bottom: 0; }
+  to   { opacity: 1; max-height: 2000px; }
+}
 </style>

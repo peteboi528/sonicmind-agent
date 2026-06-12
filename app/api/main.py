@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -11,6 +12,9 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 from app.agent import AudioVisualAgent
 from app.config import settings
 from app.models import (
+    ArtistInfoRequest,
+    ArtistInfoResponse,
+    BrowseRequest,
     ChatRequest,
     DailyRequest,
     DislikeRequest,
@@ -23,6 +27,7 @@ from app.models import (
     PlaylistRequest,
     RatingRequest,
     SearchRequest,
+    TrendingRequest,
 )
 
 
@@ -210,15 +215,195 @@ def agent_run(request: ChatRequest):
     return agent.chat(request.user_id, request.message, history=history or None)
 
 
+_SENTINEL = object()
+
+
+def _safe_next(gen):
+    """Wrap next() so StopIteration doesn't leak into run_in_executor."""
+    try:
+        return next(gen)
+    except StopIteration:
+        return _SENTINEL
+
+
 @app.post("/agent/stream")
-def agent_stream(request: ChatRequest):
+async def agent_stream(request: ChatRequest):
     history = [{"role": m.role, "content": m.content} for m in request.history]
 
-    def events():
-        for event in agent.stream_chat(request.user_id, request.message, history=history or None):
+    async def events():
+        loop = asyncio.get_event_loop()
+        gen = agent.stream_chat(request.user_id, request.message, history=history or None)
+        while True:
+            event = await loop.run_in_executor(None, _safe_next, gen)
+            if event is _SENTINEL:
+                break
             yield f"data: {json.dumps(event.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+            yield ": heartbeat\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
+
+
+# ── Discover / Browse ──
+
+@app.post("/discover/browse")
+def discover_browse(request: BrowseRequest):
+    """按曲风/心情/场景浏览歌曲。轻量双路搜索（网易云歌单 + Last.fm 标签），不走 LLM，秒级返回。"""
+    from app.search.netease_playlist import search_and_extract
+    from app.sources.lastfm_client import LastfmClient
+
+    tracks: list[dict] = []
+    seen: set[str] = set()
+
+    def _dedup_add(title: str, artist: str, extra: dict) -> bool:
+        key = f"{title.strip().lower()}|{artist.strip().lower()}"
+        if key in seen or not title.strip():
+            return False
+        seen.add(key)
+        tracks.append({"title": title.strip(), "artist": artist.strip(), **extra})
+        return True
+
+    # 1) 网易云歌单搜索（用 "{value}音乐"/"{value}歌曲" 做关键词）
+    try:
+        for kw in [f"{request.value}音乐", f"{request.value}歌曲"]:
+            extracted = search_and_extract(kw, max_playlists=2, tracks_per_playlist=request.limit)
+            for t in extracted:
+                _dedup_add(t.title, t.artist, {
+                    "source": t.source or "netease",
+                    "source_id": t.external_id or "",
+                    "cover_url": t.cover_url,
+                    "playback_url": t.playback_url,
+                })
+                if len(tracks) >= request.limit:
+                    break
+            if len(tracks) >= request.limit:
+                break
+    except Exception:
+        logger.debug("Browse netease search failed for %s", request.value, exc_info=True)
+
+    # 2) Last.fm 标签搜索（genre 用英文 tag，mood/scene 用网易云结果即可）
+    if len(tracks) < request.limit and settings.lastfm_api_key:
+        try:
+            lfm = LastfmClient(settings.lastfm_api_key)
+            _GENRE_EN = {
+                "流行": "pop", "摇滚": "rock", "电子": "electronic", "说唱": "hip-hop",
+                "R&B": "r&b", "爵士": "jazz", "民谣": "folk", "古典": "classical",
+                "国风": "chinese", "金属": "metal",
+            }
+            _MOOD_EN = {
+                "放松": "chill", "治愈": "healing", "运动": "workout", "专注": "focus",
+                "浪漫": "romantic", "伤感": "sad", "深夜": "night", "清晨": "morning",
+                "通勤": "commute", "派对": "party",
+            }
+            tag = (_GENRE_EN if request.category == "genre" else _MOOD_EN).get(request.value, "")
+            if tag:
+                for t in lfm.get_tag_top_tracks(tag, limit=request.limit):
+                    _dedup_add(t["title"], t.get("artist", ""), {
+                        "source": "lastfm", "cover_url": None,
+                    })
+                    if len(tracks) >= request.limit:
+                        break
+        except Exception:
+            logger.debug("Browse Last.fm tag search failed for %s", request.value, exc_info=True)
+
+    return {"tracks": tracks[:request.limit], "summary": f"为你找到 {len(tracks[:request.limit])} 首{request.value}相关歌曲"}
+
+
+@app.post("/discover/trending")
+def discover_trending(request: TrendingRequest):
+    """热门趋势：官方榜单（网易云热歌榜/飙升榜/欧美榜 + Last.fm 全球榜）分组返回。"""
+    from app.search.netease_playlist import get_playlist_tracks
+    from app.sources.lastfm_client import LastfmClient
+
+    per_chart = min(request.limit, 8)
+
+    # 网易云官方榜单 ID
+    _NETEASE_CHARTS = [
+        {"name": "网易云热歌榜", "id": 3779629, "icon": "🔥"},
+        {"name": "网易云飙升榜", "id": 19723756, "icon": "📈"},
+        {"name": "美国 Billboard", "id": 11641012, "icon": "🇺🇸"},
+        {"name": "UK 排行榜", "id": 60198, "icon": "🇬🇧"},
+        {"name": "Beatport 电子榜", "id": 3812895, "icon": "🎛️"},
+    ]
+
+    charts: list[dict] = []
+
+    # 1) 网易云官方榜单
+    for chart_def in _NETEASE_CHARTS:
+        try:
+            raw = get_playlist_tracks(chart_def["id"], limit=per_chart)
+            if raw:
+                charts.append({
+                    "name": chart_def["name"],
+                    "icon": chart_def["icon"],
+                    "tracks": [{
+                        "title": t.title, "artist": t.artist,
+                        "source": t.source or "netease",
+                        "source_id": t.external_id or "",
+                        "cover_url": t.cover_url,
+                        "playback_url": t.playback_url,
+                    } for t in raw],
+                })
+        except Exception:
+            logger.debug("Trending chart %s failed", chart_def["name"], exc_info=True)
+
+    # 2) Last.fm 全球榜
+    if settings.lastfm_api_key:
+        try:
+            lfm = LastfmClient(settings.lastfm_api_key)
+            raw = lfm.get_chart_top_tracks(limit=per_chart)
+            if raw:
+                charts.append({
+                    "name": "Last.fm 全球榜",
+                    "icon": "🌐",
+                    "tracks": [{
+                        "title": t["title"], "artist": t.get("artist", ""),
+                        "source": "lastfm", "source_id": "",
+                        "cover_url": None, "playback_url": None,
+                    } for t in raw],
+                })
+        except Exception:
+            logger.debug("Trending Last.fm global chart failed", exc_info=True)
+
+    return {"charts": charts}
+
+
+@app.post("/artist/info")
+def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
+    """获取歌手资料：简介、代表专辑、热门歌曲。"""
+    info = {"name": request.artist, "image": "", "bio": "", "tags": [], "top_albums": [], "top_tracks": []}
+
+    # 1) Last.fm：歌手资料 + 代表专辑
+    if settings.lastfm_api_key:
+        try:
+            from app.sources.lastfm_client import LastfmClient
+            lfm = LastfmClient(settings.lastfm_api_key)
+            artist_data = lfm.get_artist_info(request.artist)
+            info["name"] = artist_data.get("name") or request.artist
+            info["image"] = artist_data.get("image", "")
+            info["bio"] = artist_data.get("bio", "")
+            info["tags"] = artist_data.get("tags", [])
+            albums = lfm.get_artist_top_albums(request.artist, limit=6)
+            info["top_albums"] = [{"name": a["name"], "image": a["image"]} for a in albums]
+        except Exception:
+            logger.debug("Last.fm artist info failed", exc_info=True)
+
+    # 2) 热门歌曲：网易云搜索补充
+    try:
+        from app.models import ExternalTrack
+        raw_tracks = agent.search_web_music(f"{request.artist} 热门歌曲", top_k=6)
+        ext: list[ExternalTrack] = []
+        for t in raw_tracks[:6]:
+            ext.append(ExternalTrack(
+                external_id=t.external_id or "",
+                title=t.title, artist=t.artist or request.artist,
+                cover_url=t.cover_url, source=t.source,
+                playback_url=t.playback_url, candidate_kind=t.candidate_kind,
+            ))
+        info["top_tracks"] = ext
+    except Exception:
+        logger.debug("Artist hot tracks search failed", exc_info=True)
+
+    return ArtistInfoResponse(**info)
 
 
 @app.get("/taste/{user_id}")

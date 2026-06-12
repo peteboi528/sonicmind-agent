@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { store } from "../store.js";
 import { api } from "../api.js";
 
@@ -10,6 +10,8 @@ const props = defineProps({
 const emit = defineEmits(["toast", "added"]);
 
 const adding = ref(false);
+const coverBroken = ref(false);
+watch(() => props.card.cover_url, () => { coverBroken.value = false; });
 
 async function play() {
   try {
@@ -60,8 +62,12 @@ async function addToLibrary() {
 
 <template>
   <div class="song-card">
-    <img v-if="card.cover_url" class="cover" :src="card.cover_url" alt="" loading="lazy" />
-    <div v-else class="cover-ph">🎵</div>
+    <div class="cover-wrap">
+      <img v-if="card.cover_url && !coverBroken" class="cover" :src="card.cover_url" alt="" loading="lazy" @error="coverBroken = true" />
+      <div v-else class="cover-ph">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" opacity="0.4"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55C7.79 13 6 14.79 6 17s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+      </div>
+    </div>
     <div class="info">
       <div class="title">{{ card.title || "未知曲目" }}</div>
       <div class="artist">
@@ -71,40 +77,88 @@ async function addToLibrary() {
       <div v-if="showReason && card.reason" class="reason">{{ card.reason }}</div>
     </div>
     <div class="actions">
-      <button class="icon-btn" title="听歌" @click="play">🎵</button>
-      <button class="icon-btn" title="MV" @click="playMv">📺</button>
-      <button v-if="card.source !== 'local'" class="icon-btn" title="加入我的库" :disabled="adding" @click="addToLibrary">{{ adding ? '⏳' : '📥' }}</button>
-      <button class="icon-btn" title="不喜欢" @click="dislike">👎</button>
+      <button class="icon-btn play-btn" title="听歌" @click="play">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+      <button class="icon-btn" title="MV" @click="playMv">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
+      </button>
+      <button v-if="card.source !== 'local'" class="icon-btn" title="加入我的库" :disabled="adding" @click="addToLibrary">
+        <svg v-if="!adding" width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+        <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="currentColor" class="spin"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
+      </button>
+      <button class="icon-btn" title="不喜欢" @click="dislike">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.47 2 2 6.47 2 12s4.47 10 10 10 10-4.47 10-10S17.53 2 12 2zm5 13.59L15.59 17 12 13.41 8.41 17 7 15.59 10.59 12 7 8.41 8.41 7 12 10.59 15.59 7 17 8.41 13.41 12 17 15.59z"/></svg>
+      </button>
     </div>
   </div>
 </template>
 
 <style scoped>
 .song-card {
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 14px;
   background: var(--bg-card); border-radius: var(--radius);
-  padding: 10px 14px; margin-bottom: 8px; transition: var(--transition);
+  padding: 12px 16px; margin-bottom: 8px;
+  border: 1px solid transparent;
+  transition: all var(--dur-norm) var(--ease-out);
 }
-.song-card:hover { background: var(--bg-hover); }
-.cover, .cover-ph {
-  width: 48px; height: 48px; border-radius: var(--radius-sm);
-  flex-shrink: 0; object-fit: cover;
+.song-card:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-light);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0,0,0,0.2);
 }
-.cover-ph { display: flex; align-items: center; justify-content: center; background: var(--bg-elevated); font-size: 1.3rem; }
+
+.cover-wrap {
+  width: 50px; height: 50px; border-radius: var(--radius-sm);
+  flex-shrink: 0; overflow: hidden; position: relative;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.cover {
+  width: 100%; height: 100%; object-fit: cover;
+  transition: transform 0.4s var(--ease-out);
+}
+.song-card:hover .cover { transform: scale(1.08); }
+.cover-ph {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgba(29,185,84,0.12), rgba(100,60,180,0.10));
+}
+
 .info { flex: 1; min-width: 0; }
-.title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.artist { color: var(--text-sub); font-size: 0.85rem; margin-top: 2px; }
+.title {
+  font-family: var(--font-display);
+  font-weight: 600; font-size: 0.93rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.artist { color: var(--text-sub); font-size: 0.82rem; margin-top: 3px; }
 .src-tag {
-  display: inline-block; margin-left: 6px; padding: 1px 7px;
+  display: inline-block; margin-left: 8px; padding: 2px 8px;
   background: var(--accent-dim); color: var(--accent);
-  border-radius: var(--radius-pill); font-size: 0.7rem;
+  border-radius: var(--radius-pill); font-size: 0.68rem;
+  font-weight: 600; letter-spacing: 0.02em;
 }
-.reason { color: var(--text-muted); font-size: 0.8rem; margin-top: 3px; }
-.actions { display: flex; gap: 4px; flex-shrink: 0; }
+.reason { color: var(--text-muted); font-size: 0.78rem; margin-top: 4px; line-height: 1.4; }
+
+.actions {
+  display: flex; gap: 2px; flex-shrink: 0;
+  opacity: 0.4;
+  transition: opacity var(--dur-norm) var(--ease-out);
+}
+.song-card:hover .actions { opacity: 1; }
+
 .icon-btn {
-  width: 36px; height: 36px; border-radius: 50%;
-  font-size: 1rem; transition: var(--transition);
+  width: 34px; height: 34px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-sub);
+  transition: all var(--transition);
 }
-.icon-btn:hover { background: var(--bg-elevated); }
-.icon-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.icon-btn:hover {
+  background: var(--bg-elevated); color: var(--text);
+  transform: scale(1.1);
+}
+.icon-btn.play-btn:hover { color: var(--accent); }
+.icon-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+.spin { animation: vinyl-spin 1s linear infinite; }
+@keyframes vinyl-spin { to { transform: rotate(360deg); } }
 </style>

@@ -110,13 +110,18 @@ async def playback_mv(request: Request):
 
 
 def _make_track_ns(data: dict) -> SimpleNamespace:
-    """从 dict 创建 SimpleNamespace，模拟 Asset/ExternalTrack 属性访问。"""
+    """从 dict 创建 SimpleNamespace，模拟 Asset/ExternalTrack 属性访问。
+
+    注意：前端 SongCard 用 playback_url 字段（如 https://music.163.com/song?id=xxx），
+    而后端 get_audio_url 读 source_url 做直接 ID 提取。这里把 playback_url 也映射进
+    source_url，让有 ID 的网易云歌曲走秒级直链，而不是每首都触发搜索（易限流）。
+    """
     return SimpleNamespace(
         title=data.get("title", ""),
         artist=data.get("artist", ""),
         source=data.get("source", "unknown"),
         external_id=data.get("source_id") or data.get("external_id", ""),
-        source_url=data.get("source_url", ""),
+        source_url=data.get("source_url", "") or data.get("playback_url", ""),
         cover_url=data.get("cover_url"),
     )
 

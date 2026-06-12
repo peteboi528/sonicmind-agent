@@ -69,6 +69,20 @@ class LastfmClient:
                 result.append({"title": name, "artist": artist_name})
         return result
 
+    def get_chart_top_tracks(self, limit: int = 20) -> list[dict[str, str]]:
+        """获取全球热门榜单。返回 [{"title": ..., "artist": ...}, ...]。"""
+        data = self._get("chart.getTopTracks", limit=limit)
+        tracks_raw = (data.get("tracks") or {}).get("track") or []
+        if isinstance(tracks_raw, dict):
+            tracks_raw = [tracks_raw]
+        result: list[dict[str, str]] = []
+        for t in tracks_raw:
+            name = t.get("name", "").strip()
+            artist_name = t.get("artist", {}).get("name", "").strip() if isinstance(t.get("artist"), dict) else ""
+            if name:
+                result.append({"title": name, "artist": artist_name})
+        return result
+
     def get_similar_tracks(self, artist: str, track: str, limit: int = 10) -> list[dict[str, str]]:
         """获取相似曲目。"""
         data = self._get("track.getSimilar", artist=artist, track=track, limit=limit, autocorrect=1)
@@ -81,4 +95,46 @@ class LastfmClient:
             artist_name = t.get("artist", {}).get("name", "").strip() if isinstance(t.get("artist"), dict) else ""
             if name:
                 result.append({"title": name, "artist": artist_name})
+        return result
+
+    def get_artist_info(self, artist: str) -> dict[str, Any]:
+        """获取歌手资料：头像、简介摘要、标签。返回 { name, image, bio, tags[] }。"""
+        data = self._get("artist.getInfo", artist=artist, autocorrect=1)
+        raw = data.get("artist") or {}
+        # 头像：取最大尺寸
+        images = raw.get("image") or []
+        image_url = ""
+        if isinstance(images, list) and images:
+            image_url = images[-1].get("#text", "") if images else ""
+        # 简介
+        bio = (raw.get("bio") or {}).get("summary", "") or ""
+        # 清理 Last.fm 里的 HTML 标签
+        import re
+        bio = re.sub(r"<[^>]+>", "", bio).strip()
+        # 标签
+        tags_raw = (raw.get("tags") or {}).get("tag") or []
+        if isinstance(tags_raw, dict):
+            tags_raw = [tags_raw]
+        tags = [t.get("name", "") for t in tags_raw if t.get("name")]
+        return {
+            "name": raw.get("name", artist),
+            "image": image_url,
+            "bio": bio,
+            "tags": tags,
+        }
+
+    def get_artist_top_albums(self, artist: str, limit: int = 6) -> list[dict[str, str]]:
+        """获取歌手代表专辑。返回 [{ name, image, playcount }, ...]。"""
+        data = self._get("artist.getTopAlbums", artist=artist, limit=limit, autocorrect=1)
+        albums_raw = (data.get("topalbums") or {}).get("album") or []
+        if isinstance(albums_raw, dict):
+            albums_raw = [albums_raw]
+        result: list[dict[str, str]] = []
+        for a in albums_raw:
+            name = a.get("name", "").strip()
+            if not name:
+                continue
+            images = a.get("image") or []
+            image_url = images[-1].get("#text", "") if isinstance(images, list) and images else ""
+            result.append({"name": name, "image": image_url})
         return result

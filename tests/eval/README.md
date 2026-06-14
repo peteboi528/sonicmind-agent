@@ -68,6 +68,40 @@ JUDGE_MODEL=gpt-4o python -m tests.eval.run
 - `must_not_mention` 违规 → overall 上限 1.5
 - `overall >= 3.0 && 无违规` 才算 passed
 
+## 回归护栏 regress（before/after diff）
+
+`python -m tests.eval.regress` 跑 golden case，计算指标，与 `baseline.json` 对比打印 diff 表。
+**无 LLM key 也能跑**（确定性子集）；有 key 时 relevance 升级为 judge 综合分。
+
+```bash
+python -m tests.eval.regress                    # 对比 baseline，打印 ±diff
+python -m tests.eval.regress --update-baseline  # 当前结果快照为新 baseline
+```
+
+四个指标：
+- `intent_hit` — 预期意图是否命中 agent_trace（确定性，case 的 `expected_intent`）
+- `anti_halluc_pass` — `must_not_mention` 禁词零泄漏（反幻觉硬约束，确定性）
+- `must_mention_hit` — 必现关键词命中率（确定性）
+- `relevance` — LLM judge 综合分（无 key 时为 `—`）
+
+改完 prompt / 模型 / ranking 后，跑 `regress` 看 aggregate 的 ± 变化；正向改动了再
+`--update-baseline` 固化。**这是后续 P1-E/F/G 所有改动的回归安全网。**
+
+## A/B 三锚精排对比
+
+`python -m tests.eval.ab_rerank` 在固定候选集上对比四种权重 profile 的排序与多样性：
+
+```bash
+python -m tests.eval.ab_rerank
+```
+
+profile：`three_anchor`（默认 0.45/0.30/0.25）/ `pure_semantic` / `pure_personal` / `pure_behavior`。
+隔离 MMR（`apply_mmr=False`），纯看三锚权重差异——ranking 策略 A/B 的正确方法论。
+输出每个 profile 的 top-5 与列内多样性（`intra_list_diversity`，0=同质 / 1=多样）。
+
+> diversity 在 A/B 层度量，因为 `AgentAnswer` 当前不暴露推荐曲目列表；后续给它加
+> `recommended_tracks` 字段即可补齐端到端多样性。
+
 ## 添加新 case
 
 编辑 `tests/eval/cases.py`，追加 `EvalCase(...)`。建议：

@@ -1,0 +1,99 @@
+{
+  "recommend_basic": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 1.0,
+    "answer_len": 91,
+    "trace_steps": 10,
+    "fallback": false,
+    "relevance": null
+  },
+  "recommend_with_taste": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 1.0,
+    "answer_len": 29,
+    "trace_steps": 10,
+    "fallback": false,
+    "relevance": null
+  },
+  "playlist_specific": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 1.0,
+    "answer_len": 401,
+    "trace_steps": 10,
+    "fallback": false,
+    "relevance": null
+  },
+  "multi_turn_context": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 1.0,
+    "answer_len": 86,
+    "trace_steps": 10,
+    "fallback": false,
+    "relevance": null
+  },
+  "search_specific": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 1.0,
+    "answer_len": 148,
+    "trace_steps": 10,
+    "fallback": false,
+    "relevance": null
+  },
+  "taste_query": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 1.0,
+    "answer_len": 63,
+    "trace_steps": 9,
+    "fallback": false,
+    "relevance": null
+  },
+  "anti_hallucination": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 1.0,
+    "answer_len": 29,
+    "trace_steps": 10,
+    "fallback": false,
+    "relevance": null
+  },
+  "scenario_diversity": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 1.0,
+    "answer_len": 29,
+    "trace_steps": 10,
+    "fallback": false,
+    "relevance": null
+  },
+  "journey_multi_phase": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 0.0,
+    "answer_len": 71,
+    "trace_steps": 9,
+    "fallback": false,
+    "relevance": null
+  },
+  "multi_intent_goal": {
+    "intent_hit": true,
+    "anti_halluc_pass": true,
+    "must_mention_hit": 1.0,
+    "answer_len": 29,
+    "trace_steps": 9,
+    "fallback": false,
+    "relevance": null
+  },
+  "__aggregate__": {
+    "intent_hit_rate": 1.0,
+    "anti_halluc_rate": 1.0,
+    "avg_must_mention_hit": 0.9,
+    "avg_relevance": null,
+    "n_cases": 10
+  }
+}

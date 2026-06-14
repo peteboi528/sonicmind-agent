@@ -25,6 +25,8 @@ class EvalCase:
     must_mention: list[str] = field(default_factory=list)
     # 不应该出现的（幻觉/兜底回答检测）
     must_not_mention: list[str] = field(default_factory=list)
+    # 预期路由意图（intent_hit 回归指标用，确定性，不依赖 LLM judge）。None = 不检查。
+    expected_intent: str | None = None
 
 
 EVAL_CASES: list[EvalCase] = [
@@ -153,3 +155,21 @@ EVAL_CASES: list[EvalCase] = [
         ],
     ),
 ]
+
+
+# 给每个 case 标注预期路由意图（intent_hit 回归指标，确定性，不依赖 LLM judge）。
+# 命中判据：expected_intent 作为子串出现在 agent_trace 里。
+_CASE_EXPECTED_INTENT = {
+    "recommend_basic": "recommend",
+    "recommend_with_taste": "recommend",
+    "playlist_specific": "playlist",
+    "multi_turn_context": "recommend",
+    "search_specific": "search",
+    "taste_query": "taste",
+    "anti_hallucination": "recommend",
+    "scenario_diversity": "recommend",
+    "journey_multi_phase": "journey",
+    "multi_intent_goal": "import",
+}
+for _c in EVAL_CASES:
+    _c.expected_intent = _CASE_EXPECTED_INTENT.get(_c.case_id)

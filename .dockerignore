@@ -1,0 +1,14 @@
+# 构建上下文瘦身：这些目录不进镜像、不参与层缓存失效判断
+.git
+.github
+data
+artifacts
+frontend
+docs
+**/__pycache__
+**/*.egg-info
+**/.pytest_cache
+**/.ruff_cache
+.env
+.venv
+venv

@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from app.models import Modality, RagEvidence, Segment
 from app.retrieval import embeddings
 
-
 TOKEN_RE = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
 
 

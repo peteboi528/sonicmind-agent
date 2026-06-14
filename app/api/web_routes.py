@@ -5,10 +5,9 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 
 from app.api.main import agent
 

@@ -5,14 +5,22 @@ from typing import TYPE_CHECKING, Any
 
 from app.answer import (
     collect_known_titles,
-    collect_tracks as _collect_tracks,
-    goal_progress as _goal_progress,
     guard_answer,
+)
+from app.answer import (
+    collect_tracks as _collect_tracks,
+)
+from app.answer import (
+    goal_progress as _goal_progress,
+)
+from app.answer import (
     infer_count as _infer_count,
+)
+from app.answer import (
     song_card as _song_card,
 )
-from app.context import ContextBudgetManager, ContextSource
 from app.config import settings
+from app.context import ContextBudgetManager, ContextSource
 from app.graph.tag_rules import extract_tags
 from app.intents import get_intent, is_continuation, is_valid_intent, match_intent_by_keywords
 from app.llm.structured import extract_json_dict
@@ -20,7 +28,7 @@ from app.models import AgentAnswer, AgentPlan, RetrievalPlan, StreamEvent
 from app.prompts import QUERY_PLAN_SYSTEM
 
 if TYPE_CHECKING:
-    from app.agent import AudioVisualAgent, _extract_search_query
+    from app.agent import AudioVisualAgent
     from app.graph.state import AgentState
 
 
@@ -837,7 +845,6 @@ def _compose_artist_info_answer(
     for i, item in enumerate(search_results[:5], 1):
         title = item.get("title", "")
         content = item.get("content", "")
-        url = item.get("url", "")
         if content:
             context_parts.append(f"[{i}] {title}\n{content}")
     search_context = "\n\n".join(context_parts)

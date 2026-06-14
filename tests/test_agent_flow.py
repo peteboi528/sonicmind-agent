@@ -18,8 +18,10 @@ def test_full_flow(tmp_path):
     assert segments[0].timestamp == "00:00-00:30"
     assert asset.genre
     assert asset.mood
-    assert asset.tempo_bpm is not None
-    assert asset.energy_level is not None
+    # 诚实契约：DemoAnalyzer 不做真实音频分析，tempo/energy 在未知时保持 None
+    # （下游 score_track 用 or 默认值兜底）。过去这里被随机伪造填充，已移除。
+    assert asset.tempo_bpm is None
+    assert asset.energy_level is None
 
     evidences = agent.retrieve_evidence(asset.asset_id, "cinematic trailer climax", top_k=3)
     assert evidences

@@ -6,10 +6,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 from app.models import ExternalTrack
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # verifier.py
@@ -460,7 +457,7 @@ class TestRecommendForQueryRoutes:
     def test_entity_query_uses_exact_route(self):
         """包含实体的查询走 exact 路由（search_web_music），不走 LLM/歌单。"""
         from app.agent import AudioVisualAgent
-        from app.memory import UserMemory, TasteProfile
+        from app.memory import TasteProfile, UserMemory
         from app.models import DailyRecommendation
 
         mock_memory = MagicMock()
@@ -491,8 +488,8 @@ class TestRecommendForQueryRoutes:
     ):
         """纯情绪查询走 LLM 候选 + 歌单搜索，不走 exact。"""
         from app.agent import AudioVisualAgent
-        from app.memory import UserMemory, TasteProfile
-        from app.models import ExternalTrack, DailyRecommendation
+        from app.memory import TasteProfile, UserMemory
+        from app.models import DailyRecommendation, ExternalTrack
 
         mock_memory = MagicMock()
         mock_mem = UserMemory(user_id="test", taste_profile=TasteProfile(top_genres=[("R&B", 0.8)], top_moods=[("放松", 0.6)]))

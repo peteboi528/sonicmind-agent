@@ -12,7 +12,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import time
@@ -21,8 +20,7 @@ from typing import Any
 
 import httpx
 
-from app.adapters.base import answer_to_bot_response
-from app.adapters.protocol import BotAdapter, BotResponse, IncomingMessage, SongCard
+from app.adapters.protocol import BotResponse, IncomingMessage
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +74,6 @@ class WeChatAdapter:
             return None
 
         openid = msg.get("FromUserName", "")
-        to_user = msg.get("ToUserName", "")
         msg_id = msg.get("MsgId", "")
 
         return IncomingMessage(

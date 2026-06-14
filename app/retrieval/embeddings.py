@@ -68,7 +68,7 @@ def cosine_normalized(a: list[float], b: list[float]) -> float:
     """归一化向量的余弦相似度即点积。长度不一致时安全返回 0。"""
     if not a or not b or len(a) != len(b):
         return 0.0
-    return sum(x * y for x, y in zip(a, b))
+    return sum(x * y for x, y in zip(a, b, strict=False))
 
 
 def semantic_scores(query: str, candidate_texts: list[str]) -> list[float] | None:

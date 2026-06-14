@@ -7,8 +7,8 @@ from __future__ import annotations
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.api.main import app
 from app.api import auth_routes
+from app.api.main import app
 
 
 @pytest.fixture

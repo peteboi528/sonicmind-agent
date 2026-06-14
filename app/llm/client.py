@@ -130,11 +130,11 @@ class OpenAICompatibleLLM:
         )
         # 网络抖动/超时重试一次，避免偶发失败被当成"LLM 没响应"而降级到模板。
         last_exc: Exception | None = None
-        for attempt in range(2):
+        for _ in range(2):
             try:
                 with urllib.request.urlopen(request, timeout=settings.llm_timeout_seconds) as response:
                     return json.loads(response.read().decode("utf-8"))
-            except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+            except (urllib.error.URLError, TimeoutError) as exc:
                 last_exc = exc
                 continue
         raise last_exc if last_exc else RuntimeError("LLM request failed")

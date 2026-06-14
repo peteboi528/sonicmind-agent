@@ -51,6 +51,14 @@ class Settings:
         self.wechat_app_id: str = os.getenv("WECHAT_APP_ID", "")
         self.wechat_app_secret: str = os.getenv("WECHAT_APP_SECRET", "")
 
+        # ---- API 鉴权（多租户/部署用）----
+        # auth_enabled=false（默认）：本地 demo 不校验，前端/测试无需带 key。
+        # auth_enabled=true：除公开端点（/health /docs 等）外，所有请求需带 X-API-Key == api_key。
+        # 注意：共享密钥只挡「未授权访问」；要彻底防「已授权客户端伪造他人 user_id」，
+        # 需把 user_id 从 per-user key 派生（后续扩展）。
+        self.auth_enabled: bool = os.getenv("AUTH_ENABLED", "false").lower() == "true"
+        self.api_key: str = os.getenv("API_KEY", "")
+
     @property
     def mock_mode(self) -> bool:
         return not self.llm_api_key

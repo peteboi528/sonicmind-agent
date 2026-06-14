@@ -1,9 +1,8 @@
 """Phase 1/2 测试：行为分数回灌 + explore/exploit 配比 + 探索反馈闭环。"""
 
-from app.models import Asset, AssetStatus, ListeningEvent, TasteProfile
 from app.memory import compute_behavior_scores
+from app.models import Asset, AssetStatus, ListeningEvent, TasteProfile
 from app.recommend.engine import (
-    RecommendEngine,
     compute_taste_profile,
     score_track,
 )

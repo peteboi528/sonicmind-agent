@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -8,11 +8,11 @@ from pydantic import BaseModel, Field, field_validator
 
 
 def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def today_str() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 class AssetStatus(StrEnum):
@@ -117,7 +117,7 @@ class UserMemory(BaseModel):
     confirmed_segments: list[str] = Field(default_factory=list)
     project_notes: list[str] = Field(default_factory=list)
     listening_history: list[ListeningEvent] = Field(default_factory=list)
-    ratings: list["RatingEntry"] = Field(default_factory=list)
+    ratings: list[RatingEntry] = Field(default_factory=list)
     dislikes: list[str] = Field(default_factory=list)
     exclusion_rules: list[str] = Field(default_factory=list)  # 用户明确排除的风格/类型，如 ["抖音热歌", "中文孟菲斯说唱"]
     taste_profile: TasteProfile | None = None

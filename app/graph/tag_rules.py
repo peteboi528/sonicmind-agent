@@ -312,7 +312,7 @@ _ARTIST_GENRE_HINTS: dict[str, list[str]] = {
     "bruno mars": ["流行", "R&B"],
     "justin bieber": ["流行", "R&B"],
     "selena gomez": ["流行"],
-    "dua lipa": ["流行"],
+    # 注意："dua lipa" 在第 259 行已映射为 ["流行","R&B"]（信息更全），此处勿重复定义，否则后者静默覆盖。
     "lady gaga": ["流行", "电子"],
     "olivia rodrigo": ["流行", "摇滚"],
     "shawn mendes": ["流行"],
@@ -333,7 +333,6 @@ _ARTIST_GENRE_HINTS: dict[str, list[str]] = {
     "sufjan stevens": ["民谣"],
     "phoebe bridgers": ["民谣", "摇滚"],
     "mitski": ["独立", "摇滚"],
-    "mitski": ["摇滚"],
     "the national": ["摇滚"],
 }
 

@@ -8,6 +8,8 @@
    → 三锚精排 + MMR 多样性重排 → Thompson 探索/在线学习 → 透明度面板
 ```
 
+> 「分段分析」当前为**确定性占位**（demo/离线演示用，保证 RAG 链路可跑通）；真实 Whisper 转写 / CLIP 视觉标签是后续扩展点（见 [docs/EXPLAINER.md](docs/EXPLAINER.md) §7）。未识别出的 genre/mood 标「未分类」、tempo/energy 留空，**不随机伪造**——与本项目反幻觉原则一致。
+
 ## 四大特色
 
 | 特色 | 说明 |

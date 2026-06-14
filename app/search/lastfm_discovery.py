@@ -12,7 +12,6 @@ Last.fm 只负责发现歌名+歌手，网易云负责验证和播放链接。
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from app.models import ExternalTrack
 
@@ -42,9 +41,9 @@ def discover_from_lastfm(
 
     返回有真实播放链接的 ExternalTrack，找不到的丢弃。
     """
-    from app.sources.lastfm_client import LastfmClient
-    from app.search.verifier import batch_verify
     from app.config import settings
+    from app.search.verifier import batch_verify
+    from app.sources.lastfm_client import LastfmClient
 
     if not settings.lastfm_api_key:
         return []

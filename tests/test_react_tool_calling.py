@@ -2,7 +2,7 @@
 
 from app.agent import CineSonicAgent
 from app.llm.protocol import LLMResponse, ToolCall
-from app.llm.tools import AGENT_TOOLS, TOOL_PLAYLIST, TOOL_RECOMMEND, TOOL_SEARCH, TOOL_WEB_MUSIC_SEARCH
+from app.llm.tools import TOOL_PLAYLIST, TOOL_RECOMMEND, TOOL_WEB_MUSIC_SEARCH
 from app.models import ExternalTrack, Playlist
 from app.react_loop import ReActLoop
 from app.storage import JsonStore

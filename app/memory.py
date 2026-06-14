@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.models import (
@@ -14,13 +14,12 @@ from app.models import (
     MemoryUpdateRequest,
     RatingEntry,
     Segment,
-    TasteProfile,
+    TasteProfile,  # noqa: F401  —— 对外 re-export（测试/外部按 from app.memory import TasteProfile 使用）
     UserMemory,
     utc_now_iso,
 )
 from app.recommend.engine import compute_taste_profile
 from app.storage import JsonStore
-
 
 PREFERENCE_PATTERNS = [
     re.compile(r"(?:i\s+)?(?:like|love|prefer)\s+(.+)", re.IGNORECASE),
@@ -73,49 +72,51 @@ class MemoryManager:
         return memory
 
     def update_memory(self, request: MemoryUpdateRequest) -> tuple[UserMemory, bool]:
-        memory = self.get_memory(request.user_id)
-        changed = False
+        with self.store.lock("memory", request.user_id):
+            memory = self.get_memory(request.user_id)
+            changed = False
 
-        preference = extract_preference(request.event)
-        if preference:
-            if self._upsert_entry(memory, preference, "user_event"):
-                changed = True
-            if preference not in memory.preferences:
-                memory.preferences.append(preference)
+            preference = extract_preference(request.event)
+            if preference:
+                if self._upsert_entry(memory, preference, "user_event"):
+                    changed = True
+                if preference not in memory.preferences:
+                    memory.preferences.append(preference)
 
-        goal = extract_goal(request.event)
-        if goal and goal not in memory.common_goals:
-            memory.common_goals.append(goal)
-            changed = True
-
-        if request.segment_id and request.segment_id not in memory.confirmed_segments:
-            memory.confirmed_segments.append(request.segment_id)
-            changed = True
-
-        if request.asset_id:
-            note = f"{request.asset_id}: {request.event}"
-            if note not in memory.project_notes:
-                memory.project_notes.append(note)
+            goal = extract_goal(request.event)
+            if goal and goal not in memory.common_goals:
+                memory.common_goals.append(goal)
                 changed = True
 
-        if changed:
-            memory.updated_at = utc_now_iso()
-            self.store.write_model("memory", request.user_id, memory)
-        return memory, changed
+            if request.segment_id and request.segment_id not in memory.confirmed_segments:
+                memory.confirmed_segments.append(request.segment_id)
+                changed = True
+
+            if request.asset_id:
+                note = f"{request.asset_id}: {request.event}"
+                if note not in memory.project_notes:
+                    memory.project_notes.append(note)
+                    changed = True
+
+            if changed:
+                memory.updated_at = utc_now_iso()
+                self.store.write_model("memory", request.user_id, memory)
+            return memory, changed
 
     def record_feedback(self, user_id: str, segment: Segment, accepted: bool) -> UserMemory:
-        memory = self.get_memory(user_id)
-        tags = segment.audio_tags + segment.visual_tags
-        for entry in memory.structured_preferences:
-            if any(tag in entry.text.lower() for tag in tags):
-                if accepted:
-                    entry.frequency = min(entry.frequency + 1, 20)
-                else:
-                    entry.frequency = max(entry.frequency - 1, 1)
-                entry.last_used = utc_now_iso()
-        memory.updated_at = utc_now_iso()
-        self.store.write_model("memory", user_id, memory)
-        return memory
+        with self.store.lock("memory", user_id):
+            memory = self.get_memory(user_id)
+            tags = segment.audio_tags + segment.visual_tags
+            for entry in memory.structured_preferences:
+                if any(tag in entry.text.lower() for tag in tags):
+                    if accepted:
+                        entry.frequency = min(entry.frequency + 1, 20)
+                    else:
+                        entry.frequency = max(entry.frequency - 1, 1)
+                    entry.last_used = utc_now_iso()
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", user_id, memory)
+            return memory
 
     @staticmethod
     def _extract_negative_preference(query: str) -> str | None:
@@ -133,62 +134,66 @@ class MemoryManager:
         rule = rule.strip()
         if not rule:
             return False
-        memory = self.get_memory(user_id)
-        if rule in memory.exclusion_rules:
-            return False
-        memory.exclusion_rules.append(rule)
-        memory.updated_at = utc_now_iso()
-        self.store.write_model("memory", user_id, memory)
-        return True
+        with self.store.lock("memory", user_id):
+            memory = self.get_memory(user_id)
+            if rule in memory.exclusion_rules:
+                return False
+            memory.exclusion_rules.append(rule)
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", user_id, memory)
+            return True
 
     def remove_exclusion(self, user_id: str, rule: str) -> bool:
         """删除一条排除规则。不存在则返回 False。"""
-        memory = self.get_memory(user_id)
-        if rule not in memory.exclusion_rules:
-            return False
-        memory.exclusion_rules.remove(rule)
-        memory.updated_at = utc_now_iso()
-        self.store.write_model("memory", user_id, memory)
-        return True
+        with self.store.lock("memory", user_id):
+            memory = self.get_memory(user_id)
+            if rule not in memory.exclusion_rules:
+                return False
+            memory.exclusion_rules.remove(rule)
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", user_id, memory)
+            return True
 
     def list_exclusions(self, user_id: str) -> list[str]:
         """返回用户的排除规则列表。"""
         return list(self.get_memory(user_id).exclusion_rules)
 
     def record_listen(self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None) -> UserMemory:
-        memory = self.get_memory(user_id)
-        event = ListeningEvent(
-            asset_id=asset_id,
-            duration_listened=duration,
-            completed=completed,
-            context=context,
-        )
-        memory.listening_history.append(event)
-        if len(memory.listening_history) > 200:
-            memory.listening_history = memory.listening_history[-200:]
-        memory.updated_at = utc_now_iso()
-        self.store.write_model("memory", user_id, memory)
-        return memory
+        with self.store.lock("memory", user_id):
+            memory = self.get_memory(user_id)
+            event = ListeningEvent(
+                asset_id=asset_id,
+                duration_listened=duration,
+                completed=completed,
+                context=context,
+            )
+            memory.listening_history.append(event)
+            if len(memory.listening_history) > 200:
+                memory.listening_history = memory.listening_history[-200:]
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", user_id, memory)
+            return memory
 
     def record_rating(self, user_id: str, asset: Asset, score: float) -> UserMemory:
-        memory = self.get_memory(user_id)
-        # 更新或新增评分
-        existing = next((r for r in memory.ratings if r.asset_id == asset.asset_id), None)
-        if existing:
-            existing.score = score
-            existing.timestamp = utc_now_iso()
-        else:
-            memory.ratings.append(RatingEntry(
-                asset_id=asset.asset_id,
-                score=score,
-                title=asset.title,
-                artist=asset.artist or "",
-                genre=asset.genre,
-                mood=asset.mood,
-            ))
-        memory.updated_at = utc_now_iso()
-        self.store.write_model("memory", user_id, memory)
-        return memory
+        with self.store.lock("memory", user_id):
+            memory = self.get_memory(user_id)
+            # 更新或新增评分
+            existing = next((r for r in memory.ratings if r.asset_id == asset.asset_id), None)
+            if existing:
+                existing.score = score
+                existing.timestamp = utc_now_iso()
+            else:
+                memory.ratings.append(RatingEntry(
+                    asset_id=asset.asset_id,
+                    score=score,
+                    title=asset.title,
+                    artist=asset.artist or "",
+                    genre=asset.genre,
+                    mood=asset.mood,
+                ))
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", user_id, memory)
+            return memory
 
     def remove_asset_references(self, asset_id: str, user_id: str | None = None) -> dict[str, int]:
         user_ids = [user_id] if user_id else self.store.list_keys("memory")
@@ -196,38 +201,40 @@ class MemoryManager:
         note_prefix = f"{asset_id}:"
 
         for uid in user_ids:
-            memory = self.get_memory(uid)
-            before_ratings = len(memory.ratings)
-            before_history = len(memory.listening_history)
-            before_notes = len(memory.project_notes)
+            with self.store.lock("memory", uid):
+                memory = self.get_memory(uid)
+                before_ratings = len(memory.ratings)
+                before_history = len(memory.listening_history)
+                before_notes = len(memory.project_notes)
 
-            memory.ratings = [r for r in memory.ratings if r.asset_id != asset_id]
-            memory.listening_history = [ev for ev in memory.listening_history if ev.asset_id != asset_id]
-            memory.project_notes = [note for note in memory.project_notes if not note.startswith(note_prefix)]
+                memory.ratings = [r for r in memory.ratings if r.asset_id != asset_id]
+                memory.listening_history = [ev for ev in memory.listening_history if ev.asset_id != asset_id]
+                memory.project_notes = [note for note in memory.project_notes if not note.startswith(note_prefix)]
 
-            delta_ratings = before_ratings - len(memory.ratings)
-            delta_history = before_history - len(memory.listening_history)
-            delta_notes = before_notes - len(memory.project_notes)
-            if delta_ratings or delta_history or delta_notes:
-                memory.updated_at = utc_now_iso()
-                self.store.write_model("memory", uid, memory)
-                removed["ratings"] += delta_ratings
-                removed["listening_history"] += delta_history
-                removed["project_notes"] += delta_notes
-                removed["users"] += 1
+                delta_ratings = before_ratings - len(memory.ratings)
+                delta_history = before_history - len(memory.listening_history)
+                delta_notes = before_notes - len(memory.project_notes)
+                if delta_ratings or delta_history or delta_notes:
+                    memory.updated_at = utc_now_iso()
+                    self.store.write_model("memory", uid, memory)
+                    removed["ratings"] += delta_ratings
+                    removed["listening_history"] += delta_history
+                    removed["project_notes"] += delta_notes
+                    removed["users"] += 1
 
         return removed
 
     def refresh_taste_profile(self, user_id: str, library: list[Asset]) -> UserMemory:
-        memory = self.get_memory(user_id)
-        listened_ids = {ev.asset_id for ev in memory.listening_history}
-        listened_assets = [a for a in library if a.asset_id in listened_ids]
-        if not listened_assets:
-            listened_assets = library
-        memory.taste_profile = compute_taste_profile(listened_assets, memory.listening_history, memory.ratings)
-        memory.updated_at = utc_now_iso()
-        self.store.write_model("memory", user_id, memory)
-        return memory
+        with self.store.lock("memory", user_id):
+            memory = self.get_memory(user_id)
+            listened_ids = {ev.asset_id for ev in memory.listening_history}
+            listened_assets = [a for a in library if a.asset_id in listened_ids]
+            if not listened_assets:
+                listened_assets = library
+            memory.taste_profile = compute_taste_profile(listened_assets, memory.listening_history, memory.ratings)
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", user_id, memory)
+            return memory
 
     def weighted_query(self, memory: UserMemory) -> str:
         scored = score_entries(memory.structured_preferences)
@@ -252,38 +259,39 @@ class MemoryManager:
 
     def auto_learn_from_turn(self, user_id: str, query: str, results: list[dict[str, Any]]) -> bool:
         """Conservatively learn from an agent turn without requiring an explicit memory tool call."""
-        memory = self.get_memory(user_id)
-        changed = False
+        with self.store.lock("memory", user_id):
+            memory = self.get_memory(user_id)
+            changed = False
 
-        explicit = extract_preference(query)
-        if explicit:
-            if self._upsert_entry(memory, explicit, "auto_explicit"):
-                changed = True
-            if explicit not in memory.preferences:
-                memory.preferences.append(explicit)
-                changed = True
+            explicit = extract_preference(query)
+            if explicit:
+                if self._upsert_entry(memory, explicit, "auto_explicit"):
+                    changed = True
+                if explicit not in memory.preferences:
+                    memory.preferences.append(explicit)
+                    changed = True
 
-        # 从检索结果中提取歌手/歌名作为兴趣信号（即使没有明确说"喜欢"）
-        entities_from_results = _extract_entities_from_results(results)
-        for entity in entities_from_results:
-            if self._upsert_entry(memory, entity, "from_search_result"):
-                changed = True
+            # 从检索结果中提取歌手/歌名作为兴趣信号（即使没有明确说"喜欢"）
+            entities_from_results = _extract_entities_from_results(results)
+            for entity in entities_from_results:
+                if self._upsert_entry(memory, entity, "from_search_result"):
+                    changed = True
 
-        # 负面偏好提取：用户说"不要抖音热歌""别推孟菲斯说唱"等
-        negative = self._extract_negative_preference(query)
-        if negative and negative not in memory.exclusion_rules:
-            memory.exclusion_rules.append(negative)
-            changed = True
-
-        inferred = infer_preferences_from_results(query, results)
-        for item in inferred:
-            if self._upsert_entry(memory, item, "inferred_from_result"):
+            # 负面偏好提取：用户说"不要抖音热歌""别推孟菲斯说唱"等
+            negative = self._extract_negative_preference(query)
+            if negative and negative not in memory.exclusion_rules:
+                memory.exclusion_rules.append(negative)
                 changed = True
 
-        if changed:
-            memory.updated_at = utc_now_iso()
-            self.store.write_model("memory", user_id, memory)
-        return changed
+            inferred = infer_preferences_from_results(query, results)
+            for item in inferred:
+                if self._upsert_entry(memory, item, "inferred_from_result"):
+                    changed = True
+
+            if changed:
+                memory.updated_at = utc_now_iso()
+                self.store.write_model("memory", user_id, memory)
+            return changed
 
     def get_active_goal(self, user_id: str) -> AgentGoal | None:
         goal = self.store.read_model("goals", user_id, AgentGoal)
@@ -385,7 +393,7 @@ class MemoryManager:
 
 
 def score_entries(entries: list[MemoryEntry]) -> list[tuple[MemoryEntry, float]]:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     scored: list[tuple[MemoryEntry, float]] = []
     for entry in entries:
         try:
@@ -473,7 +481,7 @@ def compute_behavior_scores(
     近期行为权重更高。返回 {asset_id: score}，分数未归一化。
     """
     asset_durations = asset_durations or {}
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     scores: dict[str, float] = {}
     for event in listening_history:
         if not event.asset_id:

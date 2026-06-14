@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+
 import pytest
 
-from app.adapters.protocol import BotResponse, IncomingMessage, SongCard
 from app.adapters.base import answer_to_bot_response, stream_events_to_bot_response
 from app.adapters.feishu_adapter import FeishuAdapter
+from app.adapters.protocol import BotResponse, IncomingMessage, SongCard
 from app.adapters.wechat_adapter import WeChatAdapter
 from app.models import AgentAnswer, Segment, StreamEvent
-
 
 # ---- Protocol 数据类 ----
 
@@ -228,10 +228,11 @@ class TestFeishuVerification:
 
     def test_encrypted_body_decrypt_roundtrip(self):
         """加密 body 能被 _decode_body 解密还原成事件 dict。"""
-        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        from cryptography.hazmat.primitives import padding as sym_padding
         import base64 as _b64
         import os as _os
+
+        from cryptography.hazmat.primitives import padding as sym_padding
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
         encrypt_key = "my_encrypt_key"
         adapter = FeishuAdapter(

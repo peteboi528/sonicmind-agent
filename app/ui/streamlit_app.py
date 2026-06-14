@@ -5,7 +5,6 @@ import streamlit as st
 from app.agent import AudioVisualAgent
 from app.models import MemoryUpdateRequest
 
-
 st.set_page_config(page_title="SONICMIND", page_icon="♬", layout="wide")
 
 st.markdown("""
@@ -910,8 +909,10 @@ with st.sidebar:
     st.divider()
     st.markdown("**网易云账号**")
     import io
+
     import qrcode as _qr
-    from app.netease_auth import get_qr_key, check_qr_status, save_cookie, load_cookie, clear_cookie
+
+    from app.netease_auth import check_qr_status, clear_cookie, get_qr_key, load_cookie, save_cookie
 
     _saved = load_cookie(user_id)
     if _saved and _saved.get("cookie"):
@@ -982,7 +983,7 @@ with st.sidebar:
                                 # 803 but no cookie — show debug info
                                 raw = result.get("raw", {})
                                 cookies = raw.get("_cookies", {})
-                                st.warning(f"登录成功但未获取到 MUSIC_U cookie")
+                                st.warning("登录成功但未获取到 MUSIC_U cookie")
                                 with st.expander("调试信息"):
                                     st.json({k: v for k, v in raw.items() if k != "_cookies"})
                                     st.caption(f"Set-Cookie: {cookies}")

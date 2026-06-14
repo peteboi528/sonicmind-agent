@@ -69,7 +69,7 @@ def test_weighted_query_includes_taste_profile(tmp_path):
     历史 bug：weighted_query 只读 structured_preferences，无视 taste_profile，
     导致用户上传一堆摇滚后，在线推荐查询完全不含'摇滚'，只能返回泛化垃圾。
     """
-    from app.models import Asset, TasteProfile, UserMemory
+    from app.models import TasteProfile, UserMemory
 
     agent = CineSonicAgent(JsonStore(tmp_path / "store"))
     memory = UserMemory(

@@ -8,7 +8,6 @@ import urllib.request
 from html import unescape
 from typing import Any
 
-
 logger = logging.getLogger(__name__)
 
 _SEARCH_HEADERS = {

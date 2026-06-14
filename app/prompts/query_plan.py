@@ -16,10 +16,10 @@ from app.intents import intent_prompt_block
 
 QUERY_PLAN_VERSION = "v3-2026-06-11"
 
-QUERY_PLAN_SYSTEM = """\
+QUERY_PLAN_SYSTEM = f"""\
 你是音乐推荐 Agent 的意图规划器。阅读用户输入（含可选的对话历史），输出一个 JSON 规划对象。
 
-{intent_block}
+{intent_prompt_block()}
 
 ## 检索策略开关
 - use_local：是否检索本地库/候选资源库
@@ -109,4 +109,4 @@ QUERY_PLAN_SYSTEM = """\
 {{"intent":"video","entities":["Adele"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"现场视频，搜B站/YouTube"}}
 
 只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, target_count, reasoning。
-""".format(intent_block=intent_prompt_block())
+"""

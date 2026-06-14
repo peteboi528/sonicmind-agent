@@ -18,7 +18,7 @@ from typing import Any
 
 import httpx
 
-from app.adapters.protocol import BotAdapter, BotResponse, IncomingMessage, SongCard
+from app.adapters.protocol import BotResponse, IncomingMessage, SongCard
 
 logger = logging.getLogger(__name__)
 
@@ -309,8 +309,8 @@ class FeishuAdapter:
         失败返回空字符串（调用方据此降级）。
         """
         try:
-            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
             from cryptography.hazmat.primitives import padding as sym_padding
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
             key = hashlib.sha256(self.encrypt_key.encode()).digest()
             raw = base64.b64decode(encrypted)

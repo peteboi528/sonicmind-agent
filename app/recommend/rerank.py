@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
-from app.models import Asset, ExternalTrack, RankingBreakdown, TasteProfile
+from app.models import Asset, RankingBreakdown, TasteProfile
 
 # 4 维个性化 Jaccard 权重（对齐 SoulTuner Graph Affinity 四维）。
 DIM_WEIGHTS = {"genre": 0.30, "mood": 0.30, "scenario": 0.25, "theme": 0.15}
@@ -39,7 +39,7 @@ class PreferenceProfile:
         taste: TasteProfile | None,
         scenarios: set[str] | None = None,
         themes: set[str] | None = None,
-    ) -> "PreferenceProfile":
+    ) -> PreferenceProfile:
         genres = {g for g, _ in taste.top_genres} if taste else set()
         moods = {m for m, _ in taste.top_moods} if taste else set()
         return cls(
@@ -55,7 +55,7 @@ def _tokens(text: str) -> set[str]:
     text = text.lower()
     en = set(re.findall(r"[a-z0-9]+", text))
     zh_chars = re.findall(r"[一-鿿]", text)
-    bigrams = {"".join(pair) for pair in zip(zh_chars, zh_chars[1:])}
+    bigrams = {"".join(pair) for pair in zip(zh_chars, zh_chars[1:], strict=False)}
     return en | set(zh_chars) | bigrams
 
 

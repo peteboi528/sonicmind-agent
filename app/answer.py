@@ -13,7 +13,6 @@ from typing import Any
 
 from app.models import AgentGoal
 
-
 # ── 回复模板（集中管理，Graph 与 ReAct fallback 共用） ──────────────────
 RESPONSE_TEMPLATES = {
     "no_candidates": "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。",

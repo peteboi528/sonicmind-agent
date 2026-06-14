@@ -5,12 +5,9 @@ import logging
 import re
 from pathlib import Path
 
-from app.media.analyzer import DemoAnalyzer, MediaAnalyzer, GENRE_POOL, MOOD_POOL
+from app.media.analyzer import DemoAnalyzer, MediaAnalyzer
 from app.models import Asset, AssetStatus, Segment, utc_now_iso
 from app.storage import JsonStore
-
-import random
-
 
 logger = logging.getLogger(__name__)
 
@@ -66,16 +63,14 @@ class MediaPipeline:
             all_tags.update(seg.visual_tags)
         asset.tags_fingerprint = sorted(all_tags)
 
-        # 只在 LLM 没有预先识别出属性时才用随机值兜底
-        rng = random.Random(int(hashlib.sha1(asset_id.encode()).hexdigest()[:8], 16))
+        # 诚实化（反幻觉）：DemoAnalyzer 不做真实音频/视觉分析，未识别出的属性保持诚实——
+        # genre/mood 标「未分类」（与项目「失败标未分类不猜」惯例一致），tempo/energy 保持 None
+        # （下游 score_track 用 or 默认值兜底，不会算术崩溃）。
+        # 过去这里用 rng.sample(GENRE_POOL) 随机伪造具体曲风，会污染 taste_profile，已移除。
         if not asset.genre:
-            asset.genre = rng.sample(GENRE_POOL, k=min(2, len(GENRE_POOL)))
+            asset.genre = ["未分类"]
         if not asset.mood:
-            asset.mood = rng.sample(MOOD_POOL, k=min(2, len(MOOD_POOL)))
-        if not asset.tempo_bpm:
-            asset.tempo_bpm = rng.randint(70, 160)
-        if not asset.energy_level:
-            asset.energy_level = round(rng.uniform(0.2, 0.95), 2)
+            asset.mood = ["未分类"]
 
         asset.status = AssetStatus.ANALYZED
         asset.updated_at = utc_now_iso()

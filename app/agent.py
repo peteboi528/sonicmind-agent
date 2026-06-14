@@ -2,24 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import random
 import re
 from datetime import datetime
 from typing import Any
 
 from app.config import settings
+from app.library import ResourceLibrary
 from app.llm.client import build_llm
 from app.llm.protocol import LLMError, LLMProvider
 from app.llm.structured import extract_json_dict, extract_json_list
-from app.library import ResourceLibrary
 from app.media.pipeline import MediaPipeline, netease_song_id
 from app.memory import MemoryManager
-from app.prompts import (
-    AUTO_PLAYLIST_TEMPLATE,
-    GENERATE_PLAYLIST_TEMPLATE,
-    IDENTIFY_FROM_URL_TEMPLATE,
-    LLM_SEARCH_TEMPLATE,
-)
 from app.models import (
     AgentAnswer,
     Asset,
@@ -33,28 +26,33 @@ from app.models import (
     Playlist,
     RagEvidence,
     RecommendedTrack,
-    Segment,
     SearchResponse,
+    Segment,
     SimilarAssetResult,
     SimilarSegmentResult,
     TasteProfile,
     UserMemory,
     utc_now_iso,
 )
+from app.prompts import (
+    AUTO_PLAYLIST_TEMPLATE,
+    GENERATE_PLAYLIST_TEMPLATE,
+    IDENTIFY_FROM_URL_TEMPLATE,
+    LLM_SEARCH_TEMPLATE,
+)
 from app.react_loop import ReActLoop
 from app.recommend.daily import DailyRecommender
 from app.recommend.engine import RecommendEngine
 from app.retrieval.vector_store import HybridRetriever
 from app.similarity import AssetSimilarity
-from app.sources.mock_source import MockSource
-from app.sources.netease_source import NeteaseSource
 from app.sources import bilibili as bilibili_source
 from app.sources import netease as netease_source
 from app.sources import web_search as web_search_source
 from app.sources import youtube as youtube_source
+from app.sources.mock_source import MockSource
+from app.sources.netease_source import NeteaseSource
 from app.sources.protocol import ExternalSource
 from app.storage import JsonStore
-
 
 logger = logging.getLogger(__name__)
 
@@ -318,7 +316,7 @@ class AudioVisualAgent:
         if missing:
             retry_pairs = [pairs[i] for i in missing]
             retried = self._classify_once(retry_pairs)
-            for slot, r in zip(missing, retried):
+            for slot, r in zip(missing, retried, strict=False):
                 if r.get("genre"):
                     out[slot] = r
         return out
@@ -464,12 +462,9 @@ class AudioVisualAgent:
             )
             asset.genre = genre
             asset.mood = mood
-            # energy/tempo 用确定性兜底（与 analyzer 一致的做法），保证有值
-            rng = random.Random(int(hashlib.sha1(asset.asset_id.encode()).hexdigest()[:8], 16))
-            if not asset.tempo_bpm:
-                asset.tempo_bpm = rng.randint(70, 160)
-            if asset.energy_level is None:
-                asset.energy_level = round(rng.uniform(0.2, 0.95), 2)
+            # 诚实化：tempo/energy 无真实测量时保持 None（下游 score_track 用默认值兜底），
+            # 不再用 rng 随机伪造具体数值（与 pipeline.analyze_media 一致）。
+            # genre/mood 已由上方 _ensure_track_tags 基于真实曲名/歌手推断，这里不重复伪造。
             # 关键：标记为已分析，否则推荐/歌单/品味会过滤掉这些歌
             asset.status = AssetStatus.ANALYZED
             asset.updated_at = utc_now_iso()
@@ -997,7 +992,6 @@ class AudioVisualAgent:
     # --- 播放 ---
 
     def get_playback_url(self, track: Asset | ExternalTrack, netease_cookie: str = "") -> str | None:
-        import urllib.parse
         if isinstance(track, Asset) and track.source_url:
             video_id = self._extract_youtube_id(track.source_url)
             if video_id:
@@ -1588,8 +1582,7 @@ class AudioVisualAgent:
             "独立", "后摇", "新浪潮", "实验", "氛围", "新金属",
             # 功能/描述
             "混搭", "推荐", "适合", "流行", "好听", "经典", "热门", "小众", "风格",
-            "陪伴", "陪你", "氛围", "感觉", "能量", "曲风", "节奏", "律动",
-            "全部", "一些", "几首", "都有", "全都有",
+            "陪伴", "陪你", "感觉", "能量", "曲风", "节奏", "全部", "一些", "几首", "都有", "全都有",
             "唱歌", "跳舞", "听歌", "背景",
             # 常见功能词
             "从", "到", "帮", "让", "给", "想", "要", "能", "来", "去",
@@ -1991,13 +1984,13 @@ _QUERY_NOISE = {"的", "了", "在", "是", "我", "你", "他", "她", "它", "
                 "几首", "一些", "几个", "来几", "来首", "我想", "帮我", "给我", "来点",
                 "好听", "推一", "推几", "推些", "介绍", "分享", "列举", "一下",
                 # 常见功能词/动词（之前缺失导致变成相关性过滤 token 杀死搜索结果）
-                "生成", "只要", "其他", "不要", "别的", "其他", "还有", "有没有",
+                "生成", "只要", "其他", "不要", "别的", "还有", "有没有",
                 "可以", "能", "会", "让", "从", "到", "去", "来", "上", "这", "那",
                 "什么", "怎么", "哪些", "如何", "为什么", "多少", "很多", "比较",
                 "帮我搜索", "帮我找", "给我推荐", "帮我推荐", "来几首", "弄几首",
                 "做", "弄", "搞", "弄个", "做个", "生成个",
                 "songs", "song", "music", "me", "some", "please",
-                "a", "an", "the", "of", "in", "on", "is", "to", "for", "me", "my", "and",
+                "a", "an", "the", "of", "in", "on", "is", "to", "for", "my", "and",
                 "or", "it", "s", "t", "m"}
 
 
@@ -2014,7 +2007,6 @@ def _query_matches_track(query: str, track: ExternalTrack) -> bool:
        相关性交给下游三锚精排处理。
     3. 如果 0 个 entity 命中 → 保持严格：所有 token 必须命中（防止 API 垃圾）。
     """
-    import unicodedata
 
     def _split_tokens(text: str) -> list[str]:
         # 先按空格/标点拆，再对每段按 ASCII/CJK 边界二次拆分

@@ -15,7 +15,7 @@ _strategy_for / _default_summary / _VALID_INTENTS）、prompts/query_plan.py
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass(frozen=True)

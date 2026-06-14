@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel
-
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -16,6 +19,46 @@ class JsonStore:
     def __init__(self, root: Path | str = "data/store") -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        # 进程内 per-key 锁：FastAPI 同步端点跑在线程池里，多线程并发 RMW 会丢更新。
+        self._thread_locks: dict[str, threading.Lock] = {}
+        self._thread_locks_guard = threading.Lock()
+
+    def _thread_lock_for(self, lock_key: str) -> threading.Lock:
+        with self._thread_locks_guard:
+            lock = self._thread_locks.get(lock_key)
+            if lock is None:
+                lock = threading.Lock()
+                self._thread_locks[lock_key] = lock
+            return lock
+
+    @contextmanager
+    def lock(self, collection: str, key: str) -> Iterator[None]:
+        """包住读-改-写临界区的 per-(collection,key) 锁，防并发丢更新。
+
+        双重锁：进程内 threading.Lock（FastAPI 线程池并发）+ 跨进程 fcntl.flock
+        （多 uvicorn worker）。非 POSIX / fcntl 不可用时退化为仅进程内线程锁。
+        单次 write_model 仍由 os.replace 保证原子，本锁只防 read-modify-write 竞态。
+
+        用法：with store.lock("memory", user_id): memory=read; modify; write
+        """
+        tlock = self._thread_lock_for(f"{collection}/{key}")
+        tlock.acquire()
+        lock_path = self._path(collection, key).with_suffix(".lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(lock_path, "a+")
+        try:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            except (OSError, AttributeError):
+                pass  # 非 POSIX 或不支持，退化为进程内线程锁
+            yield
+        finally:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except (OSError, AttributeError):
+                pass
+            fh.close()
+            tlock.release()
 
     def read_model(self, collection: str, key: str, model: type[T]) -> T | None:
         path = self._path(collection, key)

@@ -25,6 +25,8 @@ embeddings = [
 ]
 dev = [
   "pytest>=8.0.0",
+  "pytest-cov>=4.1.0",
+  "ruff>=0.6.0",
 ]
 
 [tool.pytest.ini_options]
@@ -33,3 +35,21 @@ pythonpath = ["."]
 
 [tool.setuptools.packages.find]
 include = ["app*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["egg-info", "data", "artifacts", "frontend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B"]
+ignore = [
+  "E501",   # line too long —— 由格式化器管，不阻塞
+  "E741",   # 模糊变量名（存量代码可能用 l/i 等单字母）
+  "B008",   # 默认参数里调用函数（FastAPI Depends 惯用法）
+  "B904",   # raise ... from —— 存量代码大量裸 raise，逐步改
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402"]  # 测试里 import 常在 sys.path 调整之后
+"app/api/main.py" = ["E402"]  # router 必须在 app/agent 实例化之后导入（规避循环 import）

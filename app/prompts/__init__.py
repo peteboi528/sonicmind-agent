@@ -5,7 +5,14 @@
 """
 
 from app.prompts.agent_system import AGENT_SYSTEM_PROMPT, AGENT_SYSTEM_VERSION
+from app.prompts.identify import IDENTIFY_FROM_URL_TEMPLATE, IDENTIFY_VERSION
 from app.prompts.intent import INTENT_CLASSIFIER_SYSTEM, INTENT_CLASSIFIER_VERSION
+from app.prompts.playlist import (
+    AUTO_PLAYLIST_TEMPLATE,
+    GENERATE_PLAYLIST_TEMPLATE,
+    PLAYLIST_VERSION,
+)
+from app.prompts.query_plan import QUERY_PLAN_SYSTEM, QUERY_PLAN_VERSION
 from app.prompts.recommend import (
     DAILY_RECOMMEND_USER_TEMPLATE,
     DAILY_RECOMMEND_VERSION,
@@ -13,13 +20,6 @@ from app.prompts.recommend import (
 )
 from app.prompts.reflect import REFLECTION_SYSTEM, REFLECTION_VERSION
 from app.prompts.search import LLM_SEARCH_TEMPLATE, LLM_SEARCH_VERSION
-from app.prompts.playlist import (
-    AUTO_PLAYLIST_TEMPLATE,
-    GENERATE_PLAYLIST_TEMPLATE,
-    PLAYLIST_VERSION,
-)
-from app.prompts.identify import IDENTIFY_FROM_URL_TEMPLATE, IDENTIFY_VERSION
-from app.prompts.query_plan import QUERY_PLAN_SYSTEM, QUERY_PLAN_VERSION
 
 __all__ = [
     "AGENT_SYSTEM_PROMPT",

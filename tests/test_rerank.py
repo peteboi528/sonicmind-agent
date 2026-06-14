@@ -11,7 +11,6 @@ import pytest
 from app.library import ResourceLibrary
 from app.models import ExternalTrack, TasteProfile
 from app.recommend.rerank import (
-    DIM_WEIGHTS,
     PreferenceProfile,
     _normalized_weights,
     mmr_rerank,

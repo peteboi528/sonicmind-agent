@@ -7,9 +7,9 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from app.recommend.rerank import (
+    _language_multiplier,
     detect_language,
     language_distribution,
-    _language_multiplier,
 )
 
 

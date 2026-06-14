@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from app.agent import AudioVisualAgent
 from app.config import settings
@@ -30,7 +30,6 @@ from app.models import (
     TrendingRequest,
 )
 
-
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
@@ -44,10 +43,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _enforce_api_key(request, call_next):
+    """共享密钥鉴权门禁（AUTH_ENABLED=true 时生效）。
+
+    默认关闭以保持本地 demo / 前端 / 测试零改动；部署多租户时开启。
+    公开端点（/ /health /docs /openapi.json /redoc）始终放行，其余需带 X-API-Key。
+    注意：共享密钥只挡「未授权访问」；彻底防「伪造他人 user_id」需 per-user key→user_id 绑定（后续扩展）。
+    """
+    if settings.auth_enabled:
+        path = request.url.path.rstrip("/")
+        if path not in {"", "/health", "/docs", "/openapi.json", "/redoc"}:
+            if request.headers.get("X-API-Key") != settings.api_key:
+                return JSONResponse(status_code=401, content={"detail": "invalid or missing X-API-Key"})
+    return await call_next(request)
+
+
 agent = AudioVisualAgent()
 
 # ---- 挂载 Web 前端 & Bot 路由 ----
 from app.api.web_routes import router as _web_router
+
 app.include_router(_web_router)
 
 try:
@@ -155,7 +173,6 @@ def clear_cache(preserve_memory: bool = Query(default=True)):
 def rate_asset(request: RatingRequest):
     try:
         memory = agent.rate_asset(request.user_id, request.asset_id, request.score)
-        rated = next((r for r in memory.ratings if r.asset_id == request.asset_id), None)
         return {
             "rated": True,
             "asset_id": request.asset_id,

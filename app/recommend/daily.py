@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 from pydantic import BaseModel
 
@@ -21,7 +20,6 @@ from app.models import (
 from app.prompts import DAILY_RECOMMEND_USER_TEMPLATE, DAILY_SUMMARY_TEMPLATE
 from app.recommend.engine import RecommendEngine
 from app.sources.protocol import ExternalSource
-
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +43,7 @@ TIME_MOODS: dict[str, list[str]] = {
 
 def get_time_bucket(hour: int | None = None) -> str:
     if hour is None:
-        hour = datetime.now(timezone.utc).hour + 8
+        hour = datetime.now(UTC).hour + 8
         hour = hour % 24
     if 6 <= hour < 10:
         return "morning"

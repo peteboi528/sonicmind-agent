@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from app.graph.nodes import plan_with_llm, compose_answer
+from app.graph.nodes import compose_answer, plan_with_llm
 from app.models import AgentPlan, ExternalTrack
 
 

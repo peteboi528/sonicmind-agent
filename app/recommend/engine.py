@@ -35,7 +35,6 @@ def score_track(
     track_id = track.asset_id if isinstance(track, Asset) else track.external_id
 
     taste_genres = {g for g, _ in taste.top_genres}
-    taste_moods = {m for m, _ in taste.top_moods}
 
     genre_match = len(set(genre) & taste_genres) / max(len(taste_genres), 1)
     mood_match = len(set(mood) & set(time_moods)) / max(len(time_moods), 1)

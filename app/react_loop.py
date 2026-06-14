@@ -20,13 +20,19 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from app.answer import (
-    dedupe_tracks as _dedupe_candidates,
     goal_progress as _goal_progress,
+)
+from app.answer import (
     grounded_music_answer as _grounded_music_answer_impl,
+)
+from app.answer import (
     grounded_track_list as _grounded_track_list_impl,
+)
+from app.answer import (
     guard_answer,
+)
+from app.answer import (
     infer_count as _infer_requested_count,
-    source_label as _source_label,
 )
 from app.llm.protocol import LLMResponse, ToolCall
 from app.llm.structured import extract_json_dict

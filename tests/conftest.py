@@ -4,7 +4,6 @@ import os
 
 import pytest
 
-
 # Tests must be deterministic even when production behavior is online-first and
 # a developer has a real LLM key in .env. Runtime behavior is unchanged outside
 # pytest.

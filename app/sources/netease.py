@@ -10,7 +10,6 @@ from typing import Any
 
 from app.netease_auth import _cookie_header
 
-
 logger = logging.getLogger(__name__)
 
 _HEADERS = {

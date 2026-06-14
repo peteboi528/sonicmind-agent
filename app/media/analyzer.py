@@ -1,19 +1,32 @@
+"""音视频分段分析（demo / 离线演示）。
+
+诚实说明：当前默认实现 ``DemoAnalyzer`` 是**确定性的占位分析器**——按 asset_id 哈希成种，
+从固定的视觉/音频/转写/摘要池采样，生成 6 个结构正确的占位 Segment，目的是让
+「入库 → 证据库 → 检索」整条 RAG 链路在没有真实 ASR/CV 时也能跑通、稳定演示
+（见 docs/EXPLAINER.md §6 离线优先）。它**不**做真实语音转写或视觉理解。
+
+真实分析（Whisper 转写 / CLIP 视觉标签 / ffmpeg BPM 抽取）是后续扩展点：实现一个新的
+``MediaAnalyzer``（遵循下方 Protocol）并在 app/media/pipeline.py 替换即可，Segment 数据结构
+与下游检索无需改动。asset.genre/mood/tempo/energy 的真实来源是 tag_rules 规则映射与各数据源
+元数据（enrich）；未识别时 pipeline 标「未分类」、tempo/energy 保持 None，绝不随机伪造。
+"""
 from __future__ import annotations
 
 import hashlib
 import random
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Protocol
 
 from app.models import Asset, Segment
 
 
 class MediaAnalyzer(Protocol):
+    """分段分析协议：把 Asset 切成带模态证据（transcript/视觉/音频/摘要）的 Segment 列表。
+
+    真实实现应基于 media_path 做音视频处理；当前默认注册的是下方确定性占位实现 DemoAnalyzer。
+    """
+
     def analyze(self, asset: Asset, media_path: Path | None) -> list[Segment]: ...
-
-
-GENRE_POOL = ["流行", "摇滚", "电子", "古典", "R&B", "说唱", "爵士", "民谣", "后摇", "独立"]
-MOOD_POOL = ["欢快", "伤感", "放松", "激昂", "浪漫", "忧郁", "治愈", "热血", "宁静", "梦幻"]
 
 
 VISUAL_TAG_POOL = [
@@ -70,6 +83,12 @@ SUMMARY_POOL = [
 
 
 class DemoAnalyzer:
+    """确定性占位分析器（demo / 离线演示用）。
+
+    输出由 asset_id 哈希决定（同一素材每次结果一致），便于测试与稳定演示；
+    但内容来自固定池，**不代表真实音视频内容**。替换为真实 MediaAnalyzer 即可接入真实分析。
+    """
+
     def analyze(self, asset: Asset, media_path: Path | None) -> list[Segment]:
         seed = int(hashlib.sha1(asset.asset_id.encode()).hexdigest()[:8], 16)
         rng = random.Random(seed)

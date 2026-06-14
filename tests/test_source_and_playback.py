@@ -7,7 +7,6 @@
 """
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 
 from app.agent import _build_source

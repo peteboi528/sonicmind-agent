@@ -6,6 +6,7 @@ import re
 from datetime import datetime
 from typing import Any
 
+from app.compound import is_compound_task
 from app.config import settings
 from app.library import ResourceLibrary
 from app.llm.client import build_llm
@@ -882,6 +883,10 @@ class AudioVisualAgent:
 
     def chat(self, user_id: str, message: str, history: list[dict[str, Any]] | None = None) -> AgentAnswer:
         asset_id = self._resolve_asset_context(user_id, message)
+        # Deep/Agentic 模式：复合多步任务走真迭代 ReAct（一级分支，非降级兜底）。
+        # 仅真实 LLM 下生效——mock 模式仍走图，保持测试/demo 稳定。
+        if settings.enable_deep_mode and not settings.mock_mode and is_compound_task(message):
+            return self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
         if self.graph is not None:
             try:
                 return self.graph.invoke(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
@@ -891,6 +896,12 @@ class AudioVisualAgent:
 
     def stream_chat(self, user_id: str, message: str, history: list[dict[str, Any]] | None = None):
         asset_id = self._resolve_asset_context(user_id, message)
+        # 复合任务走 Deep 模式（ReAct 整合后一次性发 final）；单意图走图（SSE 流式）。
+        if settings.enable_deep_mode and not settings.mock_mode and is_compound_task(message):
+            answer = self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
+            from app.models import StreamEvent
+            yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))
+            return
         if self.graph is not None:
             yield from self.graph.stream(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
             return

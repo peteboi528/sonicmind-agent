@@ -41,6 +41,9 @@ class Settings:
         # Thompson Sampling 探索：尾部候选中用于探索的比例。
         self.exploration_ratio: float = float(os.getenv("EXPLORATION_RATIO", "0.2"))
         self.enable_rerank: bool = os.getenv("ENABLE_RERANK", "true").lower() == "true"
+        # Deep/Agentic 模式：复合多步任务走真迭代 ReAct（一级分支，非降级兜底）。
+        # 仅真实 LLM（非 mock）下生效；mock 模式仍走图，保持测试/demo 稳定。
+        self.enable_deep_mode: bool = os.getenv("ENABLE_DEEP_MODE", "true").lower() == "true"
 
         # ---- Bot 适配器配置（留空禁用） ----
         self.feishu_app_id: str = os.getenv("FEISHU_APP_ID", "")

@@ -707,14 +707,15 @@ class AudioVisualAgent:
         """搜索 MV/现场/演唱会视频，B站优先、YouTube 补位。不走网易云。
 
         用于 video 意图：用户明确要 MV/现场/Live 视频时调用。
+        P2-H：B站/YouTube 是独立 IO，用 run_parallel 并发发起再按固定顺序合并，
+        降低串行等待延迟；任一源超时/失败安静降级，输出顺序确定（B站在前）。
         """
-        tracks: list[ExternalTrack] = []
+        from app.concurrency import run_parallel
 
-        # B站优先：华语 MV/现场命中率高，嵌入稳定
-        try:
-            bili_results = bilibili_source.search_bilibili_many(query, limit=min(top_k, 5))
-            for item in bili_results:
-                tracks.append(ExternalTrack(
+        def _fetch_bili() -> list[ExternalTrack]:
+            out: list[ExternalTrack] = []
+            for item in bilibili_source.search_bilibili_many(query, limit=min(top_k, 5)):
+                out.append(ExternalTrack(
                     external_id=item["bvid"],
                     title=item["title"],
                     artist=item.get("author", ""),
@@ -722,29 +723,30 @@ class AudioVisualAgent:
                     candidate_kind=_classify_candidate_kind(item["title"], "bilibili"),
                     playback_url=f"https://player.bilibili.com/player.html?bvid={item['bvid']}&autoplay=0&high_quality=1&danmaku=0",
                 ))
-        except Exception:
-            logger.debug("Bilibili video search failed for query=%s", query, exc_info=True)
+            return out
 
-        # YouTube 补位：国际音乐覆盖
-        remaining = max(top_k - len(tracks), 0)
-        if remaining > 0:
-            try:
-                yt_results = youtube_source.search_youtube_many(query, limit=min(remaining, 3))
-                for item in yt_results:
-                    vid = item["video_id"]
-                    title = item.get("title") or youtube_source.fetch_youtube_title(
-                        f"https://www.youtube.com/watch?v={vid}"
-                    ) or ""
-                    tracks.append(ExternalTrack(
-                        external_id=vid,
-                        title=title,
-                        artist="",
-                        source="youtube",
-                        candidate_kind=_classify_candidate_kind(title, "youtube"),
-                        playback_url=f"https://www.youtube.com/embed/{vid}?autoplay=1&rel=0",
-                    ))
-            except Exception:
-                logger.debug("YouTube video search failed for query=%s", query, exc_info=True)
+        def _fetch_youtube() -> list[ExternalTrack]:
+            out: list[ExternalTrack] = []
+            for item in youtube_source.search_youtube_many(query, limit=min(top_k, 3)):
+                vid = item["video_id"]
+                title = item.get("title") or youtube_source.fetch_youtube_title(
+                    f"https://www.youtube.com/watch?v={vid}"
+                ) or ""
+                out.append(ExternalTrack(
+                    external_id=vid,
+                    title=title,
+                    artist="",
+                    source="youtube",
+                    candidate_kind=_classify_candidate_kind(title, "youtube"),
+                    playback_url=f"https://www.youtube.com/embed/{vid}?autoplay=1&rel=0",
+                ))
+            return out
+
+        # 并发发起两源，结果按固定顺序合并（B站在前、YouTube 补位），保证确定性。
+        bili_tracks, yt_tracks = run_parallel(
+            [("bilibili", _fetch_bili), ("youtube", _fetch_youtube)], default=[]
+        )
+        tracks: list[ExternalTrack] = [*(bili_tracks or []), *(yt_tracks or [])]
 
         # 去重
         seen: set[tuple[str, str]] = set()
@@ -1636,11 +1638,45 @@ class AudioVisualAgent:
         lang_pref = language_distribution(self.list_assets())
         # 排除规则：用户明确表示不要的风格/类型
         exclusion_rules = memory.exclusion_rules or None
+        # P2-H：协同过滤第四锚——跨用户共现。冷启动（无共现/无近期收听）自动关闭，
+        # 由 rerank 权重重分配让回三锚。
+        cf_scores, cf_ok = self._collaborative_scores(user_id, tracks, memory)
         return rerank_candidates(
             query, tracks, taste,
             behavior_scores=behavior, scenarios=scenarios, top_k=top_k,
             lang_pref=lang_pref, exclusion_rules=exclusion_rules,
+            collaborative_scores=cf_scores, collaborative_ok=cf_ok,
         )
+
+    def _collaborative_scores(self, user_id: str, tracks: list[Any], memory: Any) -> tuple[list[float] | None, bool]:
+        """为候选计算 CF 共现分（归一 [0,1]）。仅在 w_collaborative>0 且有数据时启用。"""
+        if settings.tri_anchor_w_collaborative <= 0 or not tracks:
+            return None, False
+        try:
+            from app.recommend.collaborative import (
+                build_cooccurrence,
+                collaborative_scores,
+                recent_listened_ids,
+            )
+            from app.recommend.rerank import _track_id
+
+            recent = recent_listened_ids(memory.listening_history)
+            if not recent:
+                return None, False
+            histories: list[list[str]] = []
+            for uid in self.store.list_keys("memory"):
+                um = self.memory.get_memory(uid)
+                ids = [getattr(ev, "asset_id", "") for ev in um.listening_history]
+                if ids:
+                    histories.append(ids)
+            cooccurrence = build_cooccurrence(histories)
+            scores, ok = collaborative_scores(
+                [_track_id(t) for t in tracks], recent, cooccurrence
+            )
+            return (scores, ok) if ok else (None, False)
+        except Exception:
+            logger.debug("CF 协同锚计算失败，降级三锚", exc_info=True)
+            return None, False
 
     @staticmethod
     def _enrich_candidate_tags(tracks: list[Any]) -> None:

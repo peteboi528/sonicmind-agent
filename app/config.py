@@ -36,6 +36,9 @@ class Settings:
         self.tri_anchor_w_semantic: float = float(os.getenv("TRI_ANCHOR_W_SEMANTIC", "0.45"))
         self.tri_anchor_w_personal: float = float(os.getenv("TRI_ANCHOR_W_PERSONAL", "0.30"))
         self.tri_anchor_w_behavior: float = float(os.getenv("TRI_ANCHOR_W_BEHAVIOR", "0.25"))
+        # P2-H：可选第四锚——协同过滤（item-item 共现）。默认 0：无 CF 数据/不启用时
+        # 权重重分配让回三锚，行为与三锚时代一致。设 >0 才把跨用户信号纳入精排。
+        self.tri_anchor_w_collaborative: float = float(os.getenv("TRI_ANCHOR_W_COLLABORATIVE", "0.20"))
         # MMR 多样性重排：λ 越大越偏相关性，越小越偏多样性。
         self.mmr_lambda: float = float(os.getenv("MMR_LAMBDA", "0.7"))
         # Thompson Sampling 探索：尾部候选中用于探索的比例。

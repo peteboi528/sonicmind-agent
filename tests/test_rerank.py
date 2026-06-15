@@ -26,18 +26,28 @@ def _track(title, genre, mood, source="netease", ext_id=None):
     )
 
 
-# ---- 三锚归一化 ----
+# ---- 四锚归一化（默认 CF 不可用，退回三锚） ----
 
 def test_tri_anchor_weights_sum_to_one():
-    w_sem, w_per, w_beh = _normalized_weights(semantic_ok=True, behavior_ok=True)
-    assert abs(w_sem + w_per + w_beh - 1.0) < 1e-9
+    w_sem, w_per, w_beh, w_col = _normalized_weights(semantic_ok=True, behavior_ok=True)
+    assert abs(w_sem + w_per + w_beh + w_col - 1.0) < 1e-9
+    assert w_col == 0.0  # 默认 collaborative_ok=False，CF 权重不分配
 
 
 def test_missing_anchors_reweighted():
-    # 无语义模型 + 无行为数据 → 全部权重落到个性化锚
-    w_sem, w_per, w_beh = _normalized_weights(semantic_ok=False, behavior_ok=False)
-    assert w_sem == 0.0 and w_beh == 0.0
+    # 无语义模型 + 无行为数据 + 无 CF → 全部权重落到个性化锚
+    w_sem, w_per, w_beh, w_col = _normalized_weights(semantic_ok=False, behavior_ok=False)
+    assert w_sem == 0.0 and w_beh == 0.0 and w_col == 0.0
     assert abs(w_per - 1.0) < 1e-9
+
+
+def test_collaborative_anchor_takes_share_when_enabled():
+    # 四锚全可用时，CF 锚分到非零权重，四者归一化和为 1
+    w_sem, w_per, w_beh, w_col = _normalized_weights(
+        semantic_ok=True, behavior_ok=True, collaborative_ok=True
+    )
+    assert w_col > 0.0
+    assert abs(w_sem + w_per + w_beh + w_col - 1.0) < 1e-9
 
 
 def test_personalize_anchor_prefers_matching_tags():

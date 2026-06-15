@@ -231,15 +231,21 @@ def _behavior_anchor(tracks: list[Any], behavior_scores: dict[str, float] | None
     return out, any_hit
 
 
-def _normalized_weights(semantic_ok: bool, behavior_ok: bool) -> tuple[float, float, float]:
-    """三锚权重归一化 + 缺项重分配（对齐 SoulTuner 缺声学锚时的降级）。"""
+def _normalized_weights(semantic_ok: bool, behavior_ok: bool, collaborative_ok: bool = False) -> tuple[float, float, float, float]:
+    """四锚权重归一化 + 缺项重分配（对齐 SoulTuner 缺声学锚时的降级）。
+
+    返回 (w_semantic, w_personalize, w_behavior, w_collaborative)。
+    某锚不可用（无语义模型/无行为数据/无 CF 共现）时其权重置 0，
+    其余锚归一化吸收——缺 CF 时退回三锚行为完全一致。
+    """
     w_sem = settings.tri_anchor_w_semantic if semantic_ok else 0.0
     w_beh = settings.tri_anchor_w_behavior if behavior_ok else 0.0
+    w_col = settings.tri_anchor_w_collaborative if collaborative_ok else 0.0
     w_per = settings.tri_anchor_w_personal
-    total = w_sem + w_beh + w_per
+    total = w_sem + w_beh + w_col + w_per
     if total <= 0:
-        return 0.0, 1.0, 0.0  # 全缺时只靠个性化
-    return w_sem / total, w_per / total, w_beh / total
+        return 0.0, 1.0, 0.0, 0.0  # 全缺时只靠个性化
+    return w_sem / total, w_per / total, w_beh / total, w_col / total
 
 
 def _language_multiplier(track: Any, lang_pref: dict[str, float] | None) -> float:
@@ -261,56 +267,70 @@ def tri_anchor_rerank(
     profile: PreferenceProfile,
     behavior_scores: dict[str, float] | None = None,
     lang_pref: dict[str, float] | None = None,
+    collaborative_scores: list[float] | None = None,
+    collaborative_ok: bool = False,
 ) -> list[tuple[Any, RankingBreakdown]]:
-    """三锚归一化精排。返回按 final_score 降序的 (track, breakdown) 列表。
+    """四锚归一化精排（语义/个性化/行为 + 可选协同）。返回按 final_score 降序的 (track, breakdown)。
 
     lang_pref：曲库语言分布 {'zh':x,'en':y}。给定时按分布对候选做温和的语言加权
     （英文歌多则多推英文，但中文仍保留），实现用户"按曲库语言偏好推荐"的需求。
+    collaborative_scores：可选 CF 第四锚（已归一到 [0,1]，与 tracks 等长）。
+    collaborative_ok=False 时该锚权重重分配给其余锚，行为与三锚一致。
     """
     if not tracks:
         return []
     semantic, semantic_ok = _semantic_anchor(query, tracks)
     personalize = _personalize_anchor(tracks, profile)
     behavior, behavior_ok = _behavior_anchor(tracks, behavior_scores)
-    w_sem, w_per, w_beh = _normalized_weights(semantic_ok, behavior_ok)
+    collab = collaborative_scores if (collaborative_ok and collaborative_scores and len(collaborative_scores) == len(tracks)) else None
+    collab_ok = collab is not None
+    w_sem, w_per, w_beh, w_col = _normalized_weights(semantic_ok, behavior_ok, collab_ok)
 
     scored: list[tuple[Any, RankingBreakdown]] = []
     for i, track in enumerate(tracks):
-        base = w_sem * semantic[i] + w_per * personalize[i] + w_beh * behavior[i]
+        cf_i = collab[i] if collab is not None else 0.0
+        base = w_sem * semantic[i] + w_per * personalize[i] + w_beh * behavior[i] + w_col * cf_i
         lang_mult = _language_multiplier(track, lang_pref)
         # 乘性加权在 base>0 时倾斜同语言候选；额外加一个很小的加性语言先验，
         # 让 base≈0（冷启动/泛查询无任何锚信号）时语言偏好仍能打破平局，
         # 但量级（≤0.05）远小于真实相关性差异，不会盖过口味/语义。
         lang_prior = 0.05 * lang_pref.get(detect_language(track), 0.5) if lang_pref else 0.0
         final = base * lang_mult + lang_prior
+        components = {
+            "semantic": round(semantic[i], 4),
+            "personalize": round(personalize[i], 4),
+            "behavior": round(behavior[i], 4),
+            "w_semantic": round(w_sem, 3),
+            "w_personalize": round(w_per, 3),
+            "w_behavior": round(w_beh, 3),
+            "lang_mult": round(lang_mult, 3),
+        }
+        if collab_ok:
+            components["collaborative"] = round(cf_i, 4)
+            components["w_collaborative"] = round(w_col, 3)
         breakdown = RankingBreakdown(
             title=getattr(track, "title", ""),
             source=getattr(track, "source", "local"),
             score=round(final, 4),
-            reason=_reason(semantic[i], personalize[i], behavior[i], w_sem, w_per, w_beh),
-            components={
-                "semantic": round(semantic[i], 4),
-                "personalize": round(personalize[i], 4),
-                "behavior": round(behavior[i], 4),
-                "w_semantic": round(w_sem, 3),
-                "w_personalize": round(w_per, 3),
-                "w_behavior": round(w_beh, 3),
-                "lang_mult": round(lang_mult, 3),
-            },
+            reason=_reason(semantic[i], personalize[i], behavior[i], w_sem, w_per, w_beh, cf_i, w_col),
+            components=components,
         )
         scored.append((track, breakdown))
     scored.sort(key=lambda x: x[1].score, reverse=True)
     return scored
 
 
-def _reason(sem: float, per: float, beh: float, w_sem: float, w_per: float, w_beh: float) -> str:
+def _reason(sem: float, per: float, beh: float, w_sem: float, w_per: float, w_beh: float, cf: float = 0.0, w_col: float = 0.0) -> str:
     contributions = {
         "语义匹配": w_sem * sem,
         "口味契合": w_per * per,
         "收听行为": w_beh * beh,
     }
+    if w_col > 0:
+        contributions["协同推荐"] = w_col * cf
     top = max(contributions, key=contributions.get)
-    return f"{top}主导（语义{sem:.2f}/口味{per:.2f}/行为{beh:.2f}）"
+    tail = f"/协同{cf:.2f}" if w_col > 0 else ""
+    return f"{top}主导（语义{sem:.2f}/口味{per:.2f}/行为{beh:.2f}{tail}）"
 
 
 def mmr_rerank(
@@ -359,18 +379,28 @@ def rerank_candidates(
     apply_mmr: bool = True,
     lang_pref: dict[str, float] | None = None,
     exclusion_rules: list[str] | None = None,
+    collaborative_scores: list[float] | None = None,
+    collaborative_ok: bool = False,
 ) -> list[tuple[Any, RankingBreakdown]]:
-    """精排管线入口：排除过滤 → 三锚精排 → MMR 多样性重排 → 取 top_k。
+    """精排管线入口：排除过滤 → 四锚精排 → MMR 多样性重排 → 取 top_k。
 
     exclusion_rules：用户排除规则（如"抖音热歌"），候选匹配则丢弃。
     lang_pref：曲库语言分布，传入时按分布对候选做温和语言加权。
+    collaborative_scores/collaborative_ok：可选 CF 第四锚（须与过滤后 tracks 对齐）。
     """
     # 排除过滤：先于精排，命中排除规则的候选直接丢弃
     if exclusion_rules:
+        before = tracks
         tracks = _apply_exclusion_filter(tracks, exclusion_rules)
+        # 排除改变了候选集合，CF 分数会错位——失配时安全关闭 CF 锚。
+        if collaborative_scores is not None and len(tracks) != len(before):
+            collaborative_scores, collaborative_ok = None, False
 
     profile = PreferenceProfile.from_taste(taste, scenarios=scenarios)
-    scored = tri_anchor_rerank(query, tracks, profile, behavior_scores, lang_pref=lang_pref)
+    scored = tri_anchor_rerank(
+        query, tracks, profile, behavior_scores, lang_pref=lang_pref,
+        collaborative_scores=collaborative_scores, collaborative_ok=collaborative_ok,
+    )
     if apply_mmr:
         return mmr_rerank(scored, top_k=top_k)
     return scored[:top_k]

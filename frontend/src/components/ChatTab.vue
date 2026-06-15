@@ -1,5 +1,5 @@
 <script setup>
-import { ref, nextTick, watch, onMounted } from "vue";
+import { ref, reactive, nextTick, watch, onMounted } from "vue";
 import { store } from "../store.js";
 import { api } from "../api.js";
 import SongCard from "./SongCard.vue";
@@ -91,7 +91,10 @@ async function send(text) {
   thinking.value = "思考中...";
   scrollDown();
 
-  const botMsg = { id: ++msgId, role: "bot", text: "", cards: [] };
+  // 必须用 reactive：后续 candidates/song_card/final 事件会持续 push/splice botMsg.cards，
+  // 若是普通对象，这些改动绕过响应式代理、Vue 检测不到，导致流式阶段只显示第一个
+  // candidates 批次（约 5 张），final 的完整列表不刷新——只能靠刷新页面从 storage 重建。
+  const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [] });
   let finalText = "";
   abortController = new AbortController();
 

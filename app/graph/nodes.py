@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +27,9 @@ from app.intents import get_intent, is_continuation, is_valid_intent, match_inte
 from app.llm.structured import extract_json_dict
 from app.models import AgentAnswer, AgentPlan, RetrievalPlan, StreamEvent
 from app.prompts import QUERY_PLAN_SYSTEM
+from app.prompts.reflect import CANDIDATE_REFLECTION_SYSTEM, CANDIDATE_REFLECTION_USER
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.agent import AudioVisualAgent
@@ -363,6 +367,116 @@ def evaluate(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         "trace": [*state.get("trace", []), f"[eval] {message}"],
         "events": [*state.get("events", []), StreamEvent(type="eval", content=message)],
     }
+
+
+def reflect(agent: AudioVisualAgent, state: AgentState) -> AgentState:
+    """P1-F：finalize 前的自省节点——LLM 语义核对候选是否违反用户约束，剔除违规者。
+
+    把质量控制从「事后清理」（guard_answer 删幻觉歌名）升级到「交付前自查」。
+    - 仅对会列曲目的意图（recommend/search/playlist/video）生效。
+    - mock 模式（无真实 LLM）跳过：确定性 _filter_excluded 已在 execute_tools 跑过子串过滤。
+    - LLM 调用失败/无违反时不改动 results（安全降级，不阻塞主流程）。
+    """
+    plan = state["plan"]
+    if plan.intent not in {"recommend", "search", "playlist", "video"}:
+        return state
+    if settings.mock_mode:
+        return state
+    results = state.get("results", [])
+    tracks = _collect_tracks(results)
+    if not tracks:
+        return state
+    constraints = _gather_constraints(agent, state)
+    if not constraints:
+        return state
+    drop_indices = _llm_reflect_tracks(agent, tracks, constraints)
+    trace = list(state.get("trace", []))
+    events = list(state.get("events", []))
+    if drop_indices:
+        drop_keys = {_track_key(tracks[i]) for i in drop_indices if i < len(tracks)}
+        results = _drop_tracks_from_results(results, drop_keys)
+        labels = "、".join(_track_label(tracks[i]) for i in drop_indices if i < len(tracks))[:120]
+        note = f"[reflect] LLM 核对剔除 {len(drop_indices)} 首违反约束候选：{labels}"
+    else:
+        note = "[reflect] LLM 核对通过，无候选违反用户约束。"
+    trace.append(note)
+    events.append(StreamEvent(type="eval", content=note))
+    return {**state, "results": results, "trace": trace, "events": events}
+
+
+def _gather_constraints(agent: AudioVisualAgent, state: AgentState) -> list[str]:
+    """收集用户约束：排除规则 + query 里的负面偏好 + plan 的正面偏好。"""
+    constraints: list[str] = []
+    user_id = state["user_id"]
+    try:
+        constraints.extend(agent.memory.list_exclusions(user_id))
+    except Exception:
+        logger.debug("reflect: 读取排除规则失败", exc_info=True)
+    try:
+        neg = agent.memory._extract_negative_preference(state["query"])
+        if neg:
+            constraints.append(neg)
+    except Exception:
+        pass
+    plan = state["plan"]
+    if getattr(plan, "genre_filter", None):
+        constraints.append(f"曲风偏好：{'/'.join(plan.genre_filter)}")
+    if getattr(plan, "mood_filter", None):
+        constraints.append(f"情绪偏好：{'/'.join(plan.mood_filter)}")
+    return [c for c in constraints if c]
+
+
+def _track_key(track: Any) -> str:
+    title = (getattr(track, "title", "") or "").strip().lower()
+    src = (getattr(track, "source", "") or "")
+    sid = (getattr(track, "external_id", "") or getattr(track, "asset_id", "") or "")
+    return f"{title}|{src}|{sid}".lower()
+
+
+def _track_label(track: Any) -> str:
+    title = getattr(track, "title", "") or "?"
+    artist = getattr(track, "artist", "") or ""
+    return f"{title}" + (f"-{artist}" if artist else "")
+
+
+def _llm_reflect_tracks(agent: AudioVisualAgent, tracks: list[Any], constraints: list[str]) -> list[int]:
+    """让 LLM 核对候选 vs 约束，返回该剔除的下标。失败/无违反返回 []。"""
+    catalog = "\n".join(
+        f"[{i}] {_track_label(t)} | 曲风:{'/'.join(getattr(t, 'genre', []) or [])} "
+        f"情绪:{'/'.join(getattr(t, 'mood', []) or [])}"
+        for i, t in enumerate(tracks[:15])
+    )
+    cons = "；".join(f"({i + 1}) {c}" for i, c in enumerate(constraints[:8]))
+    prompt = CANDIDATE_REFLECTION_USER.format(catalog=catalog, constraints=cons)
+    try:
+        raw = agent.llm.generate(prompt, system=CANDIDATE_REFLECTION_SYSTEM, temperature=0.0)
+        data = extract_json_dict(raw)
+        drop = data.get("drop") if isinstance(data, dict) else None
+        if isinstance(drop, list):
+            return [int(x) for x in drop if isinstance(x, (int, float)) and 0 <= int(x) < len(tracks)]
+    except Exception:
+        logger.debug("reflect LLM 核对失败，跳过", exc_info=True)
+    return []
+
+
+def _drop_tracks_from_results(results: list[dict[str, Any]], drop_keys: set[str]) -> list[dict[str, Any]]:
+    """从 results 的各类型结果里移除命中 drop_keys 的曲目（reflect 拒绝的）。
+
+    覆盖主要结果类型；未知类型不处理（graceful，finalize 仍能正常工作）。
+    """
+    for r in results:
+        t = r.get("type")
+        if t in {"recommend", "recommend_music", "daily_recommend"}:
+            rec = r.get("recommendation")
+            if rec is not None and hasattr(rec, "tracks"):
+                rec.tracks = [tr for tr in rec.tracks if _track_key(tr) not in drop_keys]
+        elif t == "playlist":
+            pl = r.get("playlist")
+            if pl is not None and hasattr(pl, "tracks"):
+                pl.tracks = [tr for tr in pl.tracks if _track_key(tr) not in drop_keys]
+        elif t in {"web_music_search", "search"}:
+            r["tracks"] = [tr for tr in r.get("tracks", []) if _track_key(tr) not in drop_keys]
+    return results
 
 
 def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:

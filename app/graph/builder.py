@@ -9,6 +9,7 @@ from app.graph.nodes import (
     finalize,
     load_context,
     plan_intent,
+    reflect,
     route_after_execute,
     web_fallback,
 )
@@ -85,7 +86,7 @@ class AgentGraphRunner:
                 state = web_fallback(agent, state)
             return state
 
-        return [load_context, plan_intent, execute_then_maybe_fallback, evaluate, finalize]
+        return [load_context, plan_intent, execute_then_maybe_fallback, evaluate, reflect, finalize]
 
 
 def build_agent_graph(agent: AudioVisualAgent) -> AgentGraphRunner:
@@ -100,6 +101,7 @@ def _fallback_invoke(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     if route_after_execute(state) == "web_fallback":
         state = web_fallback(agent, state)
     state = evaluate(agent, state)
+    state = reflect(agent, state)
     state = finalize(agent, state)
     return state
 
@@ -116,6 +118,7 @@ def _try_build_langgraph(agent: AudioVisualAgent):
     graph.add_node("execute_tools", lambda state: execute_tools(agent, state))
     graph.add_node("web_fallback", lambda state: web_fallback(agent, state))
     graph.add_node("evaluate", lambda state: evaluate(agent, state))
+    graph.add_node("reflect", lambda state: reflect(agent, state))
     graph.add_node("finalize", lambda state: finalize(agent, state))
     graph.set_entry_point("load_context")
     graph.add_edge("load_context", "plan_intent")
@@ -127,6 +130,7 @@ def _try_build_langgraph(agent: AudioVisualAgent):
         {"web_fallback": "web_fallback", "evaluate": "evaluate"},
     )
     graph.add_edge("web_fallback", "evaluate")
-    graph.add_edge("evaluate", "finalize")
+    graph.add_edge("evaluate", "reflect")
+    graph.add_edge("reflect", "finalize")
     graph.add_edge("finalize", END)
     return graph.compile()

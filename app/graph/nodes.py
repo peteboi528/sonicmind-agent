@@ -367,7 +367,13 @@ def _run_tool(
     if handler == "web_music_search":
         # 搜索用核心词 + plan 实体（LLM 抽取的歌手/歌名），相关性过滤只用核心词
         search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
-        tracks = agent.search_web_music(search_q, top_k=max(plan.target_count or top_k, top_k), relevance_query=search_core)
+        # 延续去重时翻页：offset=已展示数，跳过那批最热结果，取更深位次新歌。
+        # 不翻页的话同一查询永远返回 top-N，排除已展示后很快就无新歌可给。
+        rec_offset = len(excluded_tracks) if excluded_tracks else 0
+        tracks = agent.search_web_music(
+            search_q, top_k=max(plan.target_count or top_k, top_k),
+            relevance_query=search_core, offset=rec_offset,
+        )
         # 去除上一轮已展示的歌曲
         if excluded_tracks:
             tracks = _filter_excluded(tracks, excluded_tracks)
@@ -399,7 +405,11 @@ def _run_tool(
         cards = [_song_card(t) for t in playlist.tracks]
         events.append(StreamEvent(type="candidates", content=f"歌单 {len(cards)} 首", payload={"count": len(cards), "cards": cards}))
     elif handler == "search":
-        search = agent.search(user_id, _query_with_entities(query, plan), include_external=True, top_k=max(top_k, 12))
+        rec_offset = len(excluded_tracks) if excluded_tracks else 0
+        search = agent.search(
+            user_id, _query_with_entities(query, plan),
+            include_external=True, top_k=max(top_k, 12), offset=rec_offset,
+        )
         # 延续指令去重：过滤掉上一轮已展示的曲目
         if excluded_tracks:
             search.external = _filter_excluded(search.external, excluded_tracks)
@@ -714,6 +724,11 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
     chat 意图视为话题中断，清空旧状态（下一轮"再来几首"无可继承对象时
     不会错误复用过期实体）。其余意图覆盖保存最新一轮上下文。
     同时记录本轮展示给用户的曲目（shown_tracks），供下一轮去重。
+
+    shown_tracks 的累积规则：本轮是"延续同一话题"（is_continuation 且本轮没抽到
+    新实体）时，把本轮 shown 追加到前轮累积记录上，去重后封顶保存——这样第 N 轮
+    "不要重复"能排除整个会话里已展示过的曲目，而不只是上一轮的。话题切换（新实体/
+    非延续）则重置为本轮 shown，避免跨话题把无关旧歌长期挂在排除集里。
     """
     plan = state["plan"]
     user_id = state["user_id"]
@@ -732,6 +747,14 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         }
         for t in listed
     ]
+    # 跨轮累积：延续同一话题时把前轮记录并入，否则视为新话题重置。
+    context = state.get("context") or {}
+    prev_shown = (context.get("dialogue_state") or {}).get("shown_tracks") or []
+    if is_continuation(state["query"]) and not rp.entities:
+        merged_shown = _merge_excluded_tracks(prev_shown, shown)
+    else:
+        merged_shown = shown
+    merged_shown = merged_shown[:80]  # 封顶，避免长期会话排除集无限增长
     agent.memory.save_dialogue_state(
         user_id,
         intent=plan.intent,
@@ -740,7 +763,7 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         genre_tags=rp.genre_filter,
         mood_tags=rp.mood_filter,
         scenario_tags=rp.scenario_filter,
-        shown_tracks=shown,
+        shown_tracks=merged_shown,
     )
 
 

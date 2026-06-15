@@ -30,18 +30,23 @@ _SEARCH_RETRIES = 2
 _SEARCH_BACKOFF = 0.5
 
 
-def _fetch_netease_songs(query: str, limit: int) -> list[dict[str, Any]]:
+def _fetch_netease_songs(query: str, limit: int, offset: int = 0) -> list[dict[str, Any]]:
     """请求网易云搜索接口，返回原始 songs 列表。多端点轮询 + 重试以抵抗间歇性限流。
 
     依次尝试多个搜索端点；每个端点请求成功且非空即返回。全部端点本轮都空/失败时
     退避后重试，重试次数用尽仍空才返回 []。
+
+    offset 支持翻页：延续指令"不要重复/再来几首"时，调用层传 offset=已展示数，
+    跳过已经给用户看过的那批最热结果，拿更深位次的新歌——否则同一查询永远返回
+    同一批 top-N，去重后很快就无新歌可给。
     """
     headers = dict(_HEADERS)
     encoded = urllib.parse.quote(query)
+    offset = max(0, int(offset or 0))
 
     for attempt in range(_SEARCH_RETRIES):
         for base in _SEARCH_ENDPOINTS:
-            search_url = f"{base}?s={encoded}&type=1&limit={limit}&offset=0"
+            search_url = f"{base}?s={encoded}&type=1&limit={limit}&offset={offset}"
             try:
                 req = urllib.request.Request(search_url, headers=headers)
                 with urllib.request.urlopen(req, timeout=8) as response:
@@ -64,12 +69,13 @@ def search_netease(query: str) -> str | None:
     return None
 
 
-def search_netease_many(query: str, limit: int = 20) -> list[dict[str, Any]]:
+def search_netease_many(query: str, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
     """搜索网易云，返回多条真实曲目元数据（用于推荐/歌单候选）。
 
     每项 {"song_id","title","artist","album","cover"}。失败返回空列表。
+    offset 用于延续指令翻页取新歌（见 _fetch_netease_songs）。
     """
-    songs = _fetch_netease_songs(query, limit=limit)
+    songs = _fetch_netease_songs(query, limit=limit, offset=offset)
 
     results: list[dict[str, Any]] = []
     for song in songs:

@@ -16,7 +16,11 @@ def memory(tmp_path):
 
 
 class TestContinuationDetection:
-    @pytest.mark.parametrize("query", ["再来几首", "换一批", "类似这个", "还要", "more please"])
+    @pytest.mark.parametrize("query", [
+        "再来几首", "换一批", "类似这个", "还要", "more please",
+        # Bug1① 回归：反重复信号 + 纯数量请求必须判为延续，否则跨轮去重永不触发。
+        "不要重复", "别重复", "换新的", "我需要12首", "12首", "再多几首",
+    ])
     def test_continuation_signals(self, query):
         assert is_continuation(query)
 
@@ -24,9 +28,63 @@ class TestContinuationDetection:
         "推荐周杰伦的歌",
         "我想听一些适合下雨天在家放松的纯音乐钢琴曲",  # 长查询自带语境，不算延续
         "你好",
+        # Bug1① 回归：自带新实体的数量请求不算延续（话题切换）。
+        "周杰伦12首",
+        "推荐12首歌",
     ])
     def test_non_continuation(self, query):
         assert not is_continuation(query)
+
+
+class TestShownTracksAccumulation:
+    """Bug1② 回归：shown_tracks 必须跨轮累积（而非每轮覆盖），否则第三轮"不要重复"
+    的排除集只有第二轮那几首，第一轮展示过的又会漏回来。"""
+
+    def test_accumulate_on_continuation(self, tmp_path):
+        from app.graph.nodes import _persist_dialogue_state
+        from app.models import RetrievalPlan
+        from app.agent import AudioVisualAgent
+        from app.storage import JsonStore
+
+        agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+        prev_shown = [
+            {"title": "Old A", "source_id": "1"},
+            {"title": "Old B", "source_id": "2"},
+        ]
+        plan = AgentPlan(
+            intent="recommend", online_required=True,
+            retrieval_plan=RetrievalPlan(entities=[], use_web=True),
+        )
+        state = {
+            "user_id": "u", "query": "不要重复", "plan": plan, "results": [], "trace": [],
+            "events": [], "context": {"dialogue_state": {"shown_tracks": prev_shown, "entities": []}},
+        }
+        _persist_dialogue_state(agent, state)
+        saved = agent.memory.get_dialogue_state("u").shown_tracks
+        # 本轮无新增曲目时，累积记录应保留前轮的 2 首（不会被空本轮覆盖）
+        assert any(s.get("title") == "Old A" for s in saved)
+        assert any(s.get("title") == "Old B" for s in saved)
+
+    def test_reset_on_topic_switch(self, tmp_path):
+        from app.graph.nodes import _persist_dialogue_state
+        from app.models import RetrievalPlan
+        from app.agent import AudioVisualAgent
+        from app.storage import JsonStore
+
+        agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+        prev_shown = [{"title": "Old A", "source_id": "1"}]
+        plan = AgentPlan(
+            intent="search", online_required=True,
+            retrieval_plan=RetrievalPlan(entities=["林俊杰"], use_web=True),
+        )
+        # 非延续（全新搜索）→ 即使 context 里有旧 shown，也必须重置（不算进新话题）
+        state = {
+            "user_id": "u", "query": "搜林俊杰的歌", "plan": plan, "results": [], "trace": [],
+            "events": [], "context": {"dialogue_state": {"shown_tracks": prev_shown, "entities": []}},
+        }
+        _persist_dialogue_state(agent, state)
+        saved = agent.memory.get_dialogue_state("u").shown_tracks
+        assert all(s.get("title") != "Old A" for s in saved)
 
 
 class TestPersistence:

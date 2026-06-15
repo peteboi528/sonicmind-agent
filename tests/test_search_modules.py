@@ -481,6 +481,43 @@ class TestRecommendForQueryRoutes:
         # exact route 不会走 discover_from_llm 或 search_and_extract
         # 因为 "Drake" 被检测为实体 → has_entity=True → 只走 search_web_music
 
+    def test_excluded_tracks_forwarded_as_offset(self):
+        """Bug1③ 回归：excluded_tracks 非空时，exact 路由的 search_web_music
+        必须收到 offset=len(excluded)，去翻页取新歌，否则同一查询永远返回 top-N。"""
+        from app.agent import AudioVisualAgent
+        from app.memory import TasteProfile, UserMemory
+
+        mock_memory = MagicMock()
+        mock_memory.get_memory.return_value = UserMemory(
+            user_id="test", taste_profile=TasteProfile(top_genres=[("R&B", 0.8)])
+        )
+        mock_memory.weighted_query.return_value = "R&B"
+
+        mock_library = MagicMock()
+        mock_library.is_disliked.return_value = False
+
+        agent = AudioVisualAgent.__new__(AudioVisualAgent)
+        agent.memory = mock_memory
+        agent.library = mock_library
+        agent.llm = MagicMock()
+        agent.list_assets = MagicMock(return_value=[])
+
+        seen_offsets: list[int] = []
+
+        def spy(query, top_k=5, relevance_query="", offset=0, **_):
+            seen_offsets.append(offset)
+            return [ExternalTrack(external_id=f"x-{offset}-{i}", title=f"T{i}", artist="A", source="netease")
+                    for i in range(top_k)]
+
+        agent.search_web_music = spy  # 实例级覆盖，盖住 conftest 的类级 mock
+
+        excluded = [{"title": f"Shown {i}", "source_id": str(i)} for i in range(5)]
+        agent.recommend_for_query("user1", "Drake 的歌", top_k=5, excluded_tracks=excluded)
+
+        # 首次 exact 路由调用必须带 offset=5（已展示数）
+        assert seen_offsets, "search_web_music 未被调用"
+        assert seen_offsets[0] == 5
+
     @patch("app.search.web_music_discovery.discover_from_llm")
     @patch("app.search.netease_playlist.search_and_extract")
     def test_mood_query_uses_llm_and_playlist_routes(

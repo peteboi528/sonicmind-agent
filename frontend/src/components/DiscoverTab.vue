@@ -44,6 +44,7 @@ const trending = ref([]);    // [{ name, icon, tracks: [...] }]
 const trendingLoading = ref(false);
 
 const browseCategory = ref(null); // { type: "genre"|"mood", value: "摇滚", tracks: [], loading: false }
+const browseSeed = ref(0);        // 换一批：递增 seed 让后端轮换关键词/歌单，取不同曲目
 const artistInfo = ref(null);     // { name, image, bio, tags, top_albums, top_tracks }
 const artistLoading = ref(false);
 
@@ -138,23 +139,37 @@ async function search() {
 }
 
 // ── Browse genre / mood ──
-async function browse(type, value) {
-  browseCategory.value = { type, value, tracks: [], loading: true };
+async function runBrowse(type, value, seed) {
+  browseCategory.value = { type, value, tracks: [], loading: true, summary: "" };
   try {
-    const data = await api.discoverBrowse(store.userId, type, value, 12);
+    const data = await api.discoverBrowse(store.userId, type, value, 12, seed);
     browseCategory.value.tracks = (data.tracks || []).map(t => ({
       ...toCard(t),
       reason: t.reason || "",
     }));
+    browseCategory.value.summary = data.summary || "";
   } catch {
     browseCategory.value.tracks = [];
+    browseCategory.value.summary = "加载失败，点「换一批」重试。";
   } finally {
     browseCategory.value.loading = false;
   }
 }
 
+function browse(type, value) {
+  browseSeed.value = 0;
+  return runBrowse(type, value, 0);
+}
+
+function refreshBrowse() {
+  if (!browseCategory.value) return;
+  browseSeed.value += 1;
+  return runBrowse(browseCategory.value.type, browseCategory.value.value, browseSeed.value);
+}
+
 function closeBrowse() {
   browseCategory.value = null;
+  browseSeed.value = 0;
 }
 
 // ── Init ──
@@ -278,6 +293,9 @@ onMounted(() => {
         <div class="browse-title">
           {{ browseCategory.type === 'genre' ? '🎸' : '💭' }} {{ browseCategory.value }}
         </div>
+        <button class="btn-refresh" :disabled="browseCategory.loading" @click="refreshBrowse" title="换一批不同的">
+          🔄 换一批
+        </button>
       </div>
 
       <div v-if="browseCategory.loading" class="loading-hint">
@@ -297,7 +315,7 @@ onMounted(() => {
           <SongCard :card="t" @toast="(m) => showToast(m)" />
         </div>
         <div v-if="!browseCategory.tracks.length" class="empty-hint">
-          暂无该分类的歌曲，换个分类试试。
+          {{ browseCategory.summary || '暂无该分类的歌曲，点「换一批」再试试。' }}
         </div>
       </template>
     </template>
@@ -659,6 +677,19 @@ onMounted(() => {
   border-color: var(--accent); color: var(--accent);
   background: var(--accent-dim);
 }
+.btn-refresh {
+  margin-left: auto;
+  padding: 8px 16px; border-radius: var(--radius-pill);
+  background: var(--accent-dim); border: 1px solid var(--border-light);
+  color: var(--accent); font-size: 0.84rem;
+  font-weight: 600; transition: all var(--transition);
+  cursor: pointer;
+}
+.btn-refresh:hover:not(:disabled) {
+  background: var(--accent); color: #fff;
+  border-color: var(--accent);
+}
+.btn-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
 .browse-title {
   font-family: var(--font-display);
   font-size: 1.3rem; font-weight: 800;

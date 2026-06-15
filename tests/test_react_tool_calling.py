@@ -206,7 +206,7 @@ def test_playlist_shortfall_is_disclosed(tmp_path, monkeypatch):
         ExternalTrack(external_id="real-1", title="Real One", artist="A", source="netease"),
         ExternalTrack(external_id="real-2", title="Real Two", artist="B", source="bilibili"),
     ]
-    monkeypatch.setattr(agent, "search_web_music", lambda query, top_k=5, relevance_query="": tracks)
+    monkeypatch.setattr(agent, "search_web_music", lambda query, top_k=5, relevance_query="", offset=0, **_: tracks)
     monkeypatch.setattr(
         agent,
         "generate_playlist",

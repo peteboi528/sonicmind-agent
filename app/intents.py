@@ -175,10 +175,14 @@ def match_intent_by_keywords(query: str) -> str | None:
 
 
 # 延续指令信号：本轮省略实体、依赖上一轮上下文的"接着上文"类输入。
+# 注意：跨轮去重的排除集只在 is_continuation 为真时挂载（_apply_dialogue_continuation），
+# 所以"不要重复/换新的"这类反重复信号必须在这里出现，否则去重永不触发。
 _CONTINUATION_SIGNALS = (
     "再来", "再推", "再给", "换一批", "换一首", "换几首", "还要", "还想", "还有",
     "多来", "多给", "类似", "差不多", "类似这个", "像这样", "像这个", "继续",
     "更多", "再来点", "再来些",
+    # 反重复信号：用户明确表示上一轮给重了，要换没看过的。
+    "不要重复", "别重复", "不重复", "重复了", "又重复", "换新的", "来点新的", "来些新的",
     "more", "another", "similar", "same vibe", "keep going",
 )
 
@@ -193,7 +197,26 @@ _COREFERENCE_PATTERNS = [
     re.compile(r"(只要|仅|就)要(他|她|这个|那个)"),
     re.compile(r"排除(其他|别的|别的歌)"),
     re.compile(r"只要$"),
+    # 反重复的否定表达（"不要重复/别一样/不要相同"），substring 信号兜不全时这层兜底。
+    re.compile(r"(不|别)(?:要|用|会)?(?:重复|重样|一样|相同)"),
 ]
+
+# 纯数量延续："我需要12首""再来几首""要多首"——只给数字+量词、省略实体，
+# 依赖上一轮的歌手/歌单上下文。必须确认去掉语气/动词/数字量词后基本无实体残留，
+# 否则会把"周杰伦12首"（自带新实体）误判成延续。
+_COUNT_QUANTIFIER = re.compile(r"\d+\s*首|[几两]\s*首|十\s*[几]?\s*首|多\s*首")
+_PURE_COUNT_STRIP = re.compile(
+    r"[\s我你他她它要给来多再需想希望看听听下点号、，。!！?？首\d几两十百歌曲个吧的了]"
+)
+
+
+def _is_count_continuation(query: str) -> bool:
+    """纯数量请求是否算延续（"我需要12首"）。无实体残留才成立。"""
+    q = query.strip()
+    if len(q) > 12 or not _COUNT_QUANTIFIER.search(q):
+        return False
+    residual = _PURE_COUNT_STRIP.sub("", q)
+    return len(residual) <= 1
 
 
 def is_continuation(query: str) -> bool:
@@ -234,6 +257,9 @@ def is_continuation(query: str) -> bool:
         return True
     # 指代消解信号
     if any(pat.search(query) for pat in _COREFERENCE_PATTERNS):
+        return True
+    # 纯数量延续信号（"我需要12首""再多几首"）
+    if _is_count_continuation(query):
         return True
     return False
 

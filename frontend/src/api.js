@@ -103,8 +103,8 @@ export const api = {
     jsonFetch("/api/playback/mv", { method: "POST", body: JSON.stringify({ track, user_id: userId }) }),
 
   // ---- 发现 / 歌手 ----
-  discoverBrowse: (userId, category, value, limit = 12) =>
-    jsonFetch("/discover/browse", { method: "POST", body: JSON.stringify({ user_id: userId, category, value, limit }) }),
+  discoverBrowse: (userId, category, value, limit = 12, seed = 0) =>
+    jsonFetch("/discover/browse", { method: "POST", body: JSON.stringify({ user_id: userId, category, value, limit, seed }) }),
   discoverTrending: (userId, limit = 12) =>
     jsonFetch("/discover/trending", { method: "POST", body: JSON.stringify({ user_id: userId, limit }) }),
   artistInfo: (artist) =>

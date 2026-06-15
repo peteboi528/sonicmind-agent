@@ -558,6 +558,7 @@ class BrowseRequest(BaseModel):
     category: str  # "genre" | "mood" | "scene"
     value: str     # "摇滚" | "放松" | "深夜"
     limit: int = Field(default=12, ge=1, le=30)
+    seed: int = Field(default=0, ge=0, le=50)  # 换一批：按 seed 轮换关键词/歌单数，让同一分类能取到不同曲目
 
 
 class TrendingRequest(BaseModel):

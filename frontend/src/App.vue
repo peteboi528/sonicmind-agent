@@ -62,8 +62,11 @@ const isChat = computed(() => active.value === "chat");
       </header>
 
       <div class="tab-content" :class="{ 'chat-mode': isChat }">
-        <KeepAlive :max="4">
-          <component :is="activeTab" :key="active" />
+        <!-- 缓存全部 tab：去掉 :key（与 :is 冗余且会干扰缓存键），:max 覆盖 6 个
+             tab 避免 LRU 淘汰导致切回发现页时 DiscoverTab 重新挂载、onMounted 重跑
+             loadForYou/loadTrending（"重复加载"的根因）。-->
+        <KeepAlive :max="6">
+          <component :is="activeTab" />
         </KeepAlive>
       </div>
 

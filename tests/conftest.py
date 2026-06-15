@@ -19,7 +19,22 @@ def fake_online_music_search(monkeypatch):
     from app.agent import AudioVisualAgent
     from app.models import ExternalTrack
 
-    def _fake_search_web_music(self, query: str, top_k: int = 5, relevance_query: str = ""):
+    def _fake_search_web_music(self, query: str, top_k: int = 5, relevance_query: str = "", offset: int = 0, **_):
+        # offset>0 模拟翻页：返回一批"更深位次"的不同曲目，让延续指令去重测试
+        # 能真正拿到新歌（offset=0 仍是原来那批最热曲目，兼容既有用例）。
+        if offset:
+            return [
+                ExternalTrack(
+                    external_id=f"netease-paged-{offset}-{idx}",
+                    title=f"Paged Track {offset}-{idx}",
+                    artist="Demo Artist",
+                    genre=["R&B"],
+                    mood=["放松"],
+                    source="netease",
+                    playback_url=f"https://music.163.com/song?id={offset}0{idx}",
+                )
+                for idx in range(1, top_k + 1)
+            ]
         seeds = [
             ExternalTrack(
                 external_id="netease-real-1",

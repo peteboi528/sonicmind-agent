@@ -563,7 +563,7 @@ class AudioVisualAgent:
 
     # --- 搜索 ---
 
-    def search(self, user_id: str, query: str, include_external: bool = True, top_k: int = 20) -> SearchResponse:
+    def search(self, user_id: str, query: str, include_external: bool = True, top_k: int = 20, offset: int = 0) -> SearchResponse:
         memory = self.memory.get_memory(user_id)
         memory_query = self.memory.weighted_query(memory)
         expanded_query = f"{query} {memory_query}".strip()
@@ -588,9 +588,10 @@ class AudioVisualAgent:
 
         external_results: list[ExternalTrack] = []
         if include_external:
-            # 用 expanded_query 搜索拿更广结果，但相关性过滤用核心词 search_goal
+            # 用 expanded_query 搜索拿更广结果，但相关性过滤用核心词 search_goal。
+            # offset 用于延续指令翻页取新歌（去重时由调用层传入已展示数）。
             external_results = self.search_web_music(
-                expanded_query, top_k=top_k, relevance_query=search_goal,
+                expanded_query, top_k=top_k, relevance_query=search_goal, offset=offset,
             )
 
         summary = _format_search_summary(
@@ -614,7 +615,7 @@ class AudioVisualAgent:
             ],
         )
 
-    def search_web_music(self, query: str, top_k: int = 5, relevance_query: str = "", include_video_sources: bool = False) -> list[ExternalTrack]:
+    def search_web_music(self, query: str, top_k: int = 5, relevance_query: str = "", include_video_sources: bool = False, offset: int = 0) -> list[ExternalTrack]:
         """Agent tool wrapper for explicit online search.
 
         The default product flow remains offline-first. This method is only
@@ -628,6 +629,8 @@ class AudioVisualAgent:
             relevance_query: 相关性过滤用的核心查询词。为空时默认等于 query。
             include_video_sources: 是否包含 B站/YouTube 视频源。默认 False，
                 只返回网易云歌曲。用户明确要 MV/视频时才传 True。
+            offset: 网易云搜索翻页偏移。延续指令去重时传"已展示数"，
+                跳过已给用户看过的那批最热结果，取更深位次的新歌。
         """
         tracks: list[ExternalTrack] = []
 
@@ -635,7 +638,7 @@ class AudioVisualAgent:
         # 被 B站/YouTube 的合集视频/SEO 垃圾填补，搜索质量差）。
         try:
             from app.sources.netease import search_netease_many
-            for meta in search_netease_many(query, limit=top_k):
+            for meta in search_netease_many(query, limit=top_k, offset=offset):
                 if not meta.get("title"):
                     continue
                 tracks.append(ExternalTrack(
@@ -1476,7 +1479,13 @@ class AudioVisualAgent:
         if has_entity:
             # 路由C：精确搜索（网易云歌曲搜索，这个是OK的）
             trace_lines.append(f"route=exact, search_goal={search_goal}")
-            batch = self.search_web_music(search_goal, top_k=max(top_k * 2, top_k), relevance_query=search_goal)
+            # 延续去重时翻页：跳过已展示的那批最热结果，取更深位次新歌，
+            # 否则同一查询永远返回 top-N，去重后很快就无新歌可推。
+            rec_offset = len(excluded_tracks) if excluded_tracks else 0
+            batch = self.search_web_music(
+                search_goal, top_k=max(top_k * 2, top_k),
+                relevance_query=search_goal, offset=rec_offset,
+            )
             all_candidates.extend(batch)
         else:
             # 路由B（优先）：网易云歌单搜索——真人策划歌单，质量最高
@@ -1526,9 +1535,13 @@ class AudioVisualAgent:
         if excluded_tracks:
             verified = _filter_excluded_tracks(verified, excluded_tracks)
 
-        # 兜底：用 search_goal 再搜一次
+        # 兜底：用 search_goal 再搜一次。带 offset 翻页（已排除 + 已收集数），
+        # 否则同查询永远返回 top-N，与首轮 batch 重复，dedup 全跳过、补不了量。
         if len(verified) < top_k and search_goal:
-            fallback_batch = self.search_web_music(search_goal, top_k=max(top_k * 2, top_k))
+            fb_offset = len(excluded_tracks or []) + len(verified)
+            fallback_batch = self.search_web_music(
+                search_goal, top_k=max(top_k * 2, top_k), offset=fb_offset,
+            )
             for track in fallback_batch:
                 if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track):
                     if not any(_track_key(track) == _track_key(v) for v in verified):

@@ -264,7 +264,11 @@ async def agent_stream(request: ChatRequest):
 
 @app.post("/discover/browse")
 def discover_browse(request: BrowseRequest):
-    """按曲风/心情/场景浏览歌曲。轻量双路搜索（网易云歌单 + Last.fm 标签），不走 LLM，秒级返回。"""
+    """按曲风/心情/场景浏览歌曲。轻量双路搜索（网易云歌单 + Last.fm 标签），不走 LLM，秒级返回。
+
+    seed 实现"换一批"：按 seed 轮换搜索关键词、加大候选歌单数，使同一分类能取到
+    不同批次的曲目（否则同一关键词 → 同一批歌单 → 每次结果一模一样）。
+    """
     from app.search.netease_playlist import search_and_extract
     from app.sources.lastfm_client import LastfmClient
 
@@ -279,10 +283,18 @@ def discover_browse(request: BrowseRequest):
         tracks.append({"title": title.strip(), "artist": artist.strip(), **extra})
         return True
 
-    # 1) 网易云歌单搜索（用 "{value}音乐"/"{value}歌曲" 做关键词）
+    # 关键词轮换：seed 决定从哪组词开始，保证"换一批"能拿到不同歌单。
+    keywords = [f"{request.value}音乐", f"{request.value}歌曲", f"{request.value}经典",
+                f"{request.value}热门", f"{request.value}精选"]
+    start = request.seed % len(keywords)
+    ordered_kw = keywords[start:] + keywords[:start]
+    # 候选歌单数随 seed 增长（2/3/4），从更多歌单里收歌，结果更丰富。
+    max_playlists = 2 + (request.seed % 3)
+
+    # 1) 网易云歌单搜索（轮换关键词）
     try:
-        for kw in [f"{request.value}音乐", f"{request.value}歌曲"]:
-            extracted = search_and_extract(kw, max_playlists=2, tracks_per_playlist=request.limit)
+        for kw in ordered_kw:
+            extracted = search_and_extract(kw, max_playlists=max_playlists, tracks_per_playlist=request.limit)
             for t in extracted:
                 _dedup_add(t.title, t.artist, {
                     "source": t.source or "netease",
@@ -312,6 +324,10 @@ def discover_browse(request: BrowseRequest):
                 "通勤": "commute", "派对": "party",
             }
             tag = (_GENRE_EN if request.category == "genre" else _MOOD_EN).get(request.value, "")
+            # 未映射的 value（如新加的曲风/场景）用 value 自身做 tag 兜底，
+            # 否则 Last.fm 路直接放弃，只剩网易云一条路，一旦限流就空。
+            if not tag:
+                tag = request.value.strip().lower()
             if tag:
                 for t in lfm.get_tag_top_tracks(tag, limit=request.limit):
                     _dedup_add(t["title"], t.get("artist", ""), {
@@ -322,7 +338,13 @@ def discover_browse(request: BrowseRequest):
         except Exception:
             logger.debug("Browse Last.fm tag search failed for %s", request.value, exc_info=True)
 
-    return {"tracks": tracks[:request.limit], "summary": f"为你找到 {len(tracks[:request.limit])} 首{request.value}相关歌曲"}
+    result = tracks[:request.limit]
+    # 两路皆空时给明确提示，前端据此显示"换一批试试"，而不是一张白板。
+    if not result:
+        summary = f"该分类暂时没搜到结果，可能是接口限流，点「换一批」再试试。"
+    else:
+        summary = f"为你找到 {len(result)} 首{request.value}相关歌曲"
+    return {"tracks": result, "summary": summary}
 
 
 @app.post("/discover/trending")

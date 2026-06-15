@@ -132,21 +132,34 @@ def _apply_dialogue_continuation(
     query: str,
     dialogue_state: dict[str, Any] | None,
 ) -> tuple[AgentPlan, str]:
-    """延续指令（再来几首/换一批/类似这个）程序化继承上一轮实体与标签。
+    """延续指令（再来几首/换一批/不要重复）程序化继承上一轮实体与标签，并挂跨轮去重排除集。
 
-    仅当本轮被判为延续、且本轮没抽到自己的实体时才继承；返回 (新计划, 继承说明)。
-    话题切换（本轮自带新实体/明确意图）不继承——交由 finalize 时覆盖旧状态。
+    仅当本轮被判为延续、且本轮没抽到自己的实体时才继承实体；返回 (新计划, 继承说明)。
+    话题切换（本轮自带新实体/明确意图）不继承实体——交由 finalize 时覆盖旧状态。
+
+    关键：跨轮去重的排除集（_excluded_tracks）与"是否自带实体"解耦——只要本轮是
+    延续指令就挂上。否则用户重提歌手名（"The Weeknd 再来几首"或再次搜同名）时，
+    rp.entities 非空会让这里整体提前 return，排除集永不挂，去重失效，netease 永远
+    返回同一批 top-N。
     """
     if not dialogue_state or not is_continuation(query):
         return plan, ""
+
+    def _mount_excluded(p: AgentPlan) -> AgentPlan:
+        prev_shown = dialogue_state.get("shown_tracks") or []
+        if prev_shown:
+            p._excluded_tracks = prev_shown  # type: ignore[attr-defined]
+        return p
+
     rp = plan.retrieval_plan
-    # 本轮已自带实体，说明用户给了新对象，不继承。
+    # 本轮已自带实体（用户重提了对象）→ 不继承旧实体，但排除集照挂，去重照常生效。
     if rp.entities:
-        return plan, ""
+        return _mount_excluded(plan), ""
+
     prev_entities = dialogue_state.get("entities") or []
     prev_intent = dialogue_state.get("last_intent") or plan.intent
     if not prev_entities and prev_intent in {"chat"}:
-        return plan, ""
+        return _mount_excluded(plan), ""
 
     # 继承上一轮意图（除非本轮 LLM 给了更具体的非 chat 意图）。
     intent = plan.intent if plan.intent not in {"chat"} else prev_intent
@@ -172,11 +185,7 @@ def _apply_dialogue_continuation(
         "online_required": use_web,
         "retrieval_plan": merged,
     })
-    # 把上一轮已展示的曲目挂到 new_plan 上，供 _run_tool 传给 recommend/search 层去重
-    prev_shown = dialogue_state.get("shown_tracks") or []
-    if prev_shown:
-        new_plan._excluded_tracks = prev_shown  # type: ignore[attr-defined]
-    return new_plan, "、".join(prev_entities) or prev_intent
+    return _mount_excluded(new_plan), "、".join(prev_entities) or prev_intent
 
 
 # artist_info 安全网信号——命中时从 discuss 升级到 artist_info

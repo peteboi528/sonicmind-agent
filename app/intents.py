@@ -245,22 +245,22 @@ def is_continuation(query: str) -> bool:
     if any(sig in q or sig in query for sig in _NEW_INTENT_SIGNALS):
         return False
 
-    # 自带英文实体（看起来像歌手名）→ 不是延续，是新意图
-    # 排除延续信号里的英文词（more/another/similar/keep 等）
+    # 明确延续信号 / 指代 / 纯数量：哪怕本轮带了英文实体（用户重提歌手名+"再来几首"），
+    # 也是延续——否则英文实体守卫会提前 return，去重永不触发。
+    has_continuation_signal = (
+        any(sig in q or sig in query for sig in _CONTINUATION_SIGNALS)
+        or any(pat.search(query) for pat in _COREFERENCE_PATTERNS)
+        or _is_count_continuation(query)
+    )
+    if has_continuation_signal:
+        return True
+
+    # 自带英文实体（看起来像歌手名）且无任何延续信号 → 不是延续，是新意图。
+    # 排除延续信号里的英文词（more/another/similar/keep 等）。
     _ENG_CONTINUATION_WORDS = {"more", "another", "similar", "same", "keep", "going", "vibe", "please", "give"}
     eng_words = set(w.lower() for w in re.findall(r"[A-Za-z]{3,}", query))
     if eng_words and not eng_words.issubset(_ENG_CONTINUATION_WORDS):
         return False
-
-    # 明确延续信号
-    if any(sig in q or sig in query for sig in _CONTINUATION_SIGNALS):
-        return True
-    # 指代消解信号
-    if any(pat.search(query) for pat in _COREFERENCE_PATTERNS):
-        return True
-    # 纯数量延续信号（"我需要12首""再多几首"）
-    if _is_count_continuation(query):
-        return True
     return False
 
 

@@ -176,6 +176,22 @@ class TestContinuationInheritance:
         assert inherited == ""
         assert new_plan.retrieval_plan.entities == ["林俊杰"]
 
+    def test_excluded_mounted_even_with_entities(self):
+        """Bug 回归：用户重提歌手名（"The Weeknd 再来几首"）时，实体不继承，
+        但跨轮去重排除集必须照挂——否则同一查询永远返回同一批 top-N，重复照旧。"""
+        prev = {
+            "entities": ["The Weeknd"], "last_intent": "search",
+            "shown_tracks": [{"title": "Blinding Lights", "source_id": "1"}],
+            "genre_tags": [], "mood_tags": [], "scenario_tags": [],
+        }
+        plan = _plan(intent="search", entities=["The Weeknd"])
+        new_plan, inherited = _apply_dialogue_continuation(plan, "The Weeknd 再来几首", prev)
+        assert inherited == ""  # 实体不继承
+        assert new_plan.retrieval_plan.entities == ["The Weeknd"]
+        # 排除集必须挂上（去重要生效）
+        assert getattr(new_plan, "_excluded_tracks", None)
+        assert new_plan._excluded_tracks[0]["title"] == "Blinding Lights"
+
     def test_no_inherit_when_not_continuation(self):
         prev = {"entities": ["周杰伦"], "last_intent": "recommend",
                 "genre_tags": [], "mood_tags": [], "scenario_tags": []}

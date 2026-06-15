@@ -13,10 +13,14 @@ class Settings:
         self.llm_base_url: str = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
         self.llm_api_key: str = os.getenv("LLM_API_KEY", "")
         self.llm_model: str = os.getenv("LLM_MODEL", "qwen2.5")
+        self.llm_fast_model: str = os.getenv("LLM_FAST_MODEL", self.llm_model)
+        self.llm_strong_model: str = os.getenv("LLM_STRONG_MODEL", self.llm_model)
         self.llm_timeout_seconds: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
         # 推理模型（deepseek-v4-flash 等）会先消耗 token 做推理，再产出 content。
         # 1024 容易被推理吃光导致 content 为空，故默认提到 2048。
         self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+        self.llm_input_price_per_1m_tokens: float = float(os.getenv("LLM_INPUT_PRICE_PER_1M_TOKENS", "0"))
+        self.llm_output_price_per_1m_tokens: float = float(os.getenv("LLM_OUTPUT_PRICE_PER_1M_TOKENS", "0"))
         # 温度三档：结构化任务要稳定、对话要自然、生成文案要有变化。
         self.struct_task_temperature: float = float(os.getenv("STRUCT_TASK_TEMPERATURE", "0.1"))
         self.dialog_temperature: float = float(os.getenv("DIALOG_TEMPERATURE", "0.6"))

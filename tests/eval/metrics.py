@@ -6,8 +6,8 @@
   must_mention_hit  必现关键词命中率 [0,1]。确定性。
   relevance         LLM judge 综合分（0-5）；无 key 时回退 None。
 
-diversity 在 A/B rerank 层度量（AgentAnswer 不暴露推荐曲目，端到端暂不可算；
-后续给 AgentAnswer 加 recommended_tracks 字段即可补齐端到端多样性）。
+diversity 现在既可在 A/B rerank 层度量，也可基于 AgentAnswer.recommended_tracks
+做端到端推荐多样性。
 """
 from __future__ import annotations
 
@@ -41,12 +41,21 @@ def compute_metrics(
     case: EvalCase, answer: AgentAnswer, relevance: float | None = None
 ) -> dict[str, Any]:
     """汇总单个 case 的指标字典。relevance 由调用方传入（有 LLM key 时取 judge 分）。"""
+    diversity = None
+    if answer.recommended_tracks:
+        diversity = intra_list_diversity(answer.recommended_tracks)
+    prompt_signature = ", ".join(
+        f"{key}={value}" for key, value in sorted(answer.prompt_versions.items())
+    )
     return {
         "intent_hit": intent_hit(case, answer),
         "anti_halluc_pass": anti_halluc_pass(case, answer),
         "must_mention_hit": round(must_mention_hit(case, answer), 3),
         "answer_len": len(answer.answer),
         "trace_steps": len(answer.agent_trace),
+        "recommended_tracks": len(answer.recommended_tracks),
+        "diversity": diversity,
+        "prompt_signature": prompt_signature,
         "fallback": bool(answer.fallback_reason),
         "relevance": round(relevance, 3) if relevance is not None else None,
     }
@@ -68,6 +77,11 @@ def aggregate(per_case: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "anti_halluc_rate": sum(1 for c in cases if c["anti_halluc_pass"]) / len(cases) if cases else None,
         "avg_must_mention_hit": (
             sum(c["must_mention_hit"] for c in cases) / len(cases) if cases else None
+        ),
+        "avg_diversity": (
+            sum(c["diversity"] for c in cases if c["diversity"] is not None) /
+            len([c for c in cases if c["diversity"] is not None])
+            if any(c["diversity"] is not None for c in cases) else None
         ),
         "avg_relevance": (sum(rel) / len(rel)) if rel else None,
         "n_cases": len(cases),

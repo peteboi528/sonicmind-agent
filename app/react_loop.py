@@ -34,7 +34,12 @@ from app.answer import (
 from app.answer import (
     infer_count as _infer_requested_count,
 )
+from app.answer import (
+    track_ref as _track_ref,
+)
+from app.llm.observability import capture_llm_stats, format_runtime_metrics, merge_runtime_metrics, tier_call_metrics
 from app.llm.protocol import LLMResponse, ToolCall
+from app.llm.routing import select_llm
 from app.llm.structured import extract_json_dict
 from app.llm.tools import (
     AGENT_TOOLS,
@@ -54,7 +59,13 @@ from app.llm.tools import (
     TOOL_WEB_MUSIC_SEARCH,
 )
 from app.models import AgentAnswer, AgentGoal, ReActStep
-from app.prompts import AGENT_SYSTEM_PROMPT, INTENT_CLASSIFIER_SYSTEM
+from app.prompts import (
+    AGENT_SYSTEM_PROMPT,
+    AGENT_SYSTEM_VERSION,
+    INTENT_CLASSIFIER_SYSTEM,
+    INTENT_CLASSIFIER_VERSION,
+)
+from app.tools.registry import normalize_tool_name
 
 if TYPE_CHECKING:
     from app.agent import CineSonicAgent
@@ -218,7 +229,7 @@ class ReActLoop:
     ) -> AgentAnswer:
         steps: list[ReActStep] = []
         results: list[dict[str, Any]] = []
-        tokens_total = 0
+        runtime_metrics = {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "latency_ms": 0.0, "estimated_cost_usd": 0.0}
 
         # 构造消息：system（含用户画像）+ history + 当前 user query
         system_prompt = _build_enriched_system_prompt(self.agent, user_id)
@@ -255,10 +266,19 @@ class ReActLoop:
         final_answer = ""
 
         for step_idx in range(MAX_REACT_STEPS):
-            response: LLMResponse = self.agent.llm.chat_with_tools(
+            llm = select_llm(self.agent, "strong")
+            response: LLMResponse = llm.chat_with_tools(
                 messages, AGENT_TOOLS, temperature=0.3
             )
-            tokens_total += response.prompt_tokens + response.completion_tokens
+            runtime_metrics = merge_runtime_metrics(runtime_metrics, {
+                "llm_calls": 1,
+                "prompt_tokens": response.prompt_tokens,
+                "completion_tokens": response.completion_tokens,
+                "total_tokens": response.prompt_tokens + response.completion_tokens,
+                "latency_ms": response.latency_ms,
+                "estimated_cost_usd": response.estimated_cost_usd,
+                **tier_call_metrics(response.tier or getattr(llm, "tier", ""), 1),
+            })
 
             # LLM 返回错误 → 降级到 fallback
             if response.finish_reason == "error":
@@ -366,11 +386,15 @@ class ReActLoop:
         trace = [f"[{s.action}] {s.thought} → {s.observation}" for s in steps]
         if hallucinated:
             trace.append(f"[answer_guard] 已移除 {len(hallucinated)} 个未核实歌名：{'、'.join(hallucinated[:8])}")
-        trace.append(f"[meta] tokens={tokens_total}")
+        trace.append(f"[prompt] agent_system={AGENT_SYSTEM_VERSION}")
+        trace.append(f"[meta] {format_runtime_metrics(runtime_metrics)}")
         return AgentAnswer(
             answer=final_answer,
             evidences=self._collect_evidences(results)[:8],
             recommended_segments=self._collect_segments(results),
+            recommended_tracks=_collect_recommended_tracks(results),
+            prompt_versions={"agent_system": AGENT_SYSTEM_VERSION},
+            runtime_metrics=runtime_metrics,
             memory_updated=any(
                 r.get("type") == "memory_update" and r.get("changed") for r in results
             ) or auto_memory_updated,
@@ -390,14 +414,15 @@ class ReActLoop:
         prior_results: list[dict[str, Any]] | None = None,
     ) -> tuple[ReActStep, dict[str, Any] | None, str]:
         """执行一次工具调用，返回 (step记录, 结构化结果, 给LLM看的observation文本)。"""
-        name = tc.name
+        original_name = tc.name
+        name = normalize_tool_name(tc.name)
         args = tc.arguments
         # 工具不在白名单 → 拒绝执行
-        if name not in ALL_TOOL_NAMES:
+        if name is None or original_name not in ALL_TOOL_NAMES:
             return (
-                ReActStep(thought=f"未知工具 {name}", action=name, observation="已拒绝"),
+                ReActStep(thought=f"未知工具 {original_name}", action=original_name, observation="已拒绝"),
                 None,
-                f"未知工具 {name}，已拒绝执行。",
+                f"未知工具 {original_name}，已拒绝执行。",
             )
 
         try:
@@ -584,7 +609,7 @@ class ReActLoop:
         history: list[dict[str, Any]] | None,
     ) -> str:
         """LLM 没给文本时，用结构化结果拼一个答案（兼容旧 _compose 路径）。"""
-        return _legacy_compose(query, results, history, self.agent.llm)
+        return _legacy_compose(query, results, history, select_llm(self.agent, "strong"))
 
     @staticmethod
     def _collect_evidences(results: list[dict[str, Any]]) -> list[Any]:
@@ -621,7 +646,8 @@ class ReActLoop:
                 recent = history[-3:]
                 ctx_lines = [f"{m['role']}: {m['content']}" for m in recent]
                 context = "近期对话：\n" + "\n".join(ctx_lines) + "\n\n" + context
-            result = self.agent.llm.generate(context, system=INTENT_CLASSIFIER_SYSTEM, temperature=0.1)
+            llm = select_llm(self.agent, "fast")
+            result = llm.generate(context, system=INTENT_CLASSIFIER_SYSTEM, temperature=0.1)
             data = extract_json_dict(result)
             if data and isinstance(data.get("actions"), list):
                 actions = [ActionType(a) for a in data["actions"] if a in _VALID_ACTIONS]
@@ -676,7 +702,9 @@ class ReActLoop:
             steps.append(step)
             if result is not None:
                 results.append(result)
-        answer = _legacy_compose(query, results, history, self.agent.llm)
+        llm = select_llm(self.agent, "strong")
+        answer = _legacy_compose(query, results, history, llm)
+        runtime_metrics = capture_llm_stats(llm)
         answer = _append_progress_note(answer, query, results)
         if _should_use_grounded_music_answer(query, results):
             answer = _grounded_music_answer(query, results)
@@ -686,10 +714,20 @@ class ReActLoop:
         legacy_trace = [f"[{s.action}] {s.thought} → {s.observation}" for s in steps]
         if hallucinated:
             legacy_trace.append(f"[answer_guard] 已移除 {len(hallucinated)} 个未核实歌名：{'、'.join(hallucinated[:8])}")
+        legacy_trace.append(
+            f"[prompt] agent_system={AGENT_SYSTEM_VERSION}, intent_classifier={INTENT_CLASSIFIER_VERSION}"
+        )
+        legacy_trace.append(f"[meta] {format_runtime_metrics(runtime_metrics)}")
         return AgentAnswer(
             answer=answer,
             evidences=self._collect_evidences(results)[:8],
             recommended_segments=self._collect_segments(results),
+            recommended_tracks=_collect_recommended_tracks(results),
+            prompt_versions={
+                "agent_system": AGENT_SYSTEM_VERSION,
+                "intent_classifier": INTENT_CLASSIFIER_VERSION,
+            },
+            runtime_metrics=runtime_metrics,
             memory_updated=any(r.get("type") == "memory_update" and r.get("changed") for r in results) or auto_memory_updated,
             agent_trace=legacy_trace,
             pending_goal=goal.goal if goal and goal.status == "active" else None,
@@ -929,6 +967,41 @@ def _collect_track_candidates(results: list[dict[str, Any]]) -> list[Any]:
         elif result_type == "daily_recommend":
             tracks.extend(item.asset for item in result["recommendation"].tracks)
     return tracks
+
+
+def _collect_recommended_tracks(results: list[dict[str, Any]]) -> list[Any]:
+    refs: list[Any] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    def add(track: Any, score: float | None = None, components: dict[str, float] | None = None) -> None:
+        ref = _track_ref(track, score=score, components=components)
+        key = (ref.title.lower(), ref.source, ref.source_id)
+        if not ref.title or key in seen:
+            return
+        seen.add(key)
+        refs.append(ref)
+
+    for result in results:
+        result_type = result.get("type")
+        if result_type == "daily_recommend":
+            for item in result["recommendation"].tracks:
+                add(item.asset, score=item.score, components=item.components)
+        elif result_type == "playlist":
+            for track in result["playlist"].tracks:
+                add(track)
+        elif result_type == "web_music_search":
+            for track in result["tracks"]:
+                add(track)
+        elif result_type == "search":
+            response = result["response"]
+            for track in response.external:
+                add(track)
+            for track in response.local:
+                add(track)
+        elif result_type == "import_netease_playlist":
+            for track in result["result"].get("tracks", []):
+                add(track)
+    return refs
 
 
 def _playlist_target_satisfied(query: str, results: list[dict[str, Any]]) -> bool:

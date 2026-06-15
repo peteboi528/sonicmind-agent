@@ -20,14 +20,24 @@ from app.answer import (
 from app.answer import (
     song_card as _song_card,
 )
+from app.answer import (
+    track_ref_from_card as _track_ref_from_card,
+)
 from app.config import settings
 from app.context import ContextBudgetManager, ContextSource
 from app.graph.tag_rules import extract_tags
 from app.intents import get_intent, is_continuation, is_valid_intent, match_intent_by_keywords
+from app.llm.observability import capture_llm_stats, empty_runtime_metrics, format_runtime_metrics, merge_runtime_metrics
+from app.llm.routing import select_llm
 from app.llm.structured import extract_json_dict
-from app.models import AgentAnswer, AgentPlan, RetrievalPlan, StreamEvent
-from app.prompts import QUERY_PLAN_SYSTEM
-from app.prompts.reflect import CANDIDATE_REFLECTION_SYSTEM, CANDIDATE_REFLECTION_USER
+from app.models import AgentAnswer, AgentPlan, QueryPlanPayload, RetrievalPlan, StreamEvent
+from app.prompts import QUERY_PLAN_REPAIR_SYSTEM, QUERY_PLAN_REPAIR_USER, QUERY_PLAN_SYSTEM, QUERY_PLAN_VERSION
+from app.prompts.reflect import (
+    CANDIDATE_REFLECTION_SYSTEM,
+    CANDIDATE_REFLECTION_USER,
+    CANDIDATE_REFLECTION_VERSION,
+)
+from app.tools.registry import get_handler
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +85,8 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         "resource_count": len(agent.list_resource_tracks(50)),
         "budget_report": report.as_lines(),
         "dialogue_state": dialogue.model_dump(mode="json"),
+        "prompt_versions": {},
+        "runtime_metrics": empty_runtime_metrics(),
     }
     return {
         **state,
@@ -89,16 +101,24 @@ def plan_intent(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     query = state["query"]
     context = state.get("context") or {}
     history_text = context.get("history_text", "")
-    plan = plan_with_llm(agent, query, history_text) or build_agent_plan(query)
+    plan, prompt_versions, runtime_metrics = plan_with_llm_with_meta(agent, query, history_text)
+    plan = plan or build_agent_plan(query)
     plan, inherited = _apply_dialogue_continuation(plan, query, context.get("dialogue_state"))
     # 安全网：LLM 可能把介绍/百科类问题误判为 discuss，检查关键词自动升级
     plan = _upgrade_artist_info(plan, query)
     trace_line = f"[plan] {plan.reasoning_summary}"
     if inherited:
         trace_line += f"（延续上一轮：继承 {inherited}）"
+    if prompt_versions:
+        trace_line += f" [prompt] {_format_prompt_versions(prompt_versions)}"
     return {
         **state,
         "plan": plan,
+        "context": {
+            **context,
+            "prompt_versions": _merge_prompt_versions(context.get("prompt_versions"), prompt_versions),
+            "runtime_metrics": runtime_metrics,
+        },
         "trace": [*state.get("trace", []), trace_line],
         "events": [
             *state.get("events", []),
@@ -192,6 +212,9 @@ def execute_tools(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     results = list(state.get("results", []))
     trace = list(state.get("trace", []))
     events = list(state.get("events", []))
+    refine_count = state.get("_refine_count", 0)
+    if state.get("_need_refine"):
+        refine_count += 1
 
     executed: set[str] = set()
     for tool in plan.tools_needed:
@@ -200,7 +223,15 @@ def execute_tools(agent: AudioVisualAgent, state: AgentState) -> AgentState:
 
     # 标记是否需要 web_fallback（由 route_after_execute 条件边消费）。
     need_fallback = _needs_web_fallback(plan, results, executed)
-    return {**state, "results": results, "trace": trace, "events": events, "_need_web_fallback": need_fallback}
+    return {
+        **state,
+        "results": results,
+        "trace": trace,
+        "events": events,
+        "_need_web_fallback": need_fallback,
+        "_need_refine": False,
+        "_refine_count": refine_count,
+    }
 
 
 def web_fallback(agent: AudioVisualAgent, state: AgentState) -> AgentState:
@@ -223,6 +254,11 @@ def web_fallback(agent: AudioVisualAgent, state: AgentState) -> AgentState:
 def route_after_execute(state: AgentState) -> str:
     """条件路由：候选不足 → web_fallback，否则 → evaluate。"""
     return "web_fallback" if state.get("_need_web_fallback") else "evaluate"
+
+
+def route_after_reflect(state: AgentState) -> str:
+    """reflect 后条件路由：候选不足且仍可补量时回 execute_tools。"""
+    return "refine" if state.get("_need_refine") else "finalize"
 
 
 def _needs_web_fallback(plan: AgentPlan, results: list[dict[str, Any]], executed: set[str]) -> bool:
@@ -315,6 +351,9 @@ def _run_tool(
     trace: list[str],
     events: list[StreamEvent],
 ) -> None:
+    handler = get_handler(tool)
+    if handler is None:
+        raise ValueError(f"Unknown tool: {tool}")
     events.append(StreamEvent(type="tool_start", content=f"调用 {tool}", payload={"tool": tool}))
     # P1 查询改写：优先用 LLM 在 query_plan 阶段合成的自包含正向 search_query
     # （已融合多轮上下文 + 把"不要中文"这类否定转成正向词）。为空才降级回
@@ -325,7 +364,7 @@ def _run_tool(
     language_filter = (getattr(plan.retrieval_plan, "language_filter", "") or "").strip().lower()
     # 延续指令时从 plan 中提取上一轮已展示的曲目（用于去重）
     excluded_tracks = getattr(plan, "_excluded_tracks", None) or []
-    if tool == "web_music_search":
+    if handler == "web_music_search":
         # 搜索用核心词 + plan 实体（LLM 抽取的歌手/歌名），相关性过滤只用核心词
         search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
         tracks = agent.search_web_music(search_q, top_k=max(plan.target_count or top_k, top_k), relevance_query=search_core)
@@ -341,7 +380,7 @@ def _run_tool(
         # 先吐候选卡片（对齐 SoulTuner __songs__ 先于解释文本的体验）。
         cards = [_song_card(t) for t in tracks]
         events.append(StreamEvent(type="candidates", content=f"候选 {len(tracks)} 个", payload={"count": len(tracks), "cards": cards}))
-    elif tool == "recommend":
+    elif handler == "recommend":
         # 延续指令（"多来几首"）本身不含实体，但 plan 从上一轮继承了实体；
         # 拼进 query 让 recommend_for_query 走精确搜索而非情绪/场景路由（否则搜空）。
         rec = agent.recommend_for_query(user_id, _query_with_entities(query, plan), top_k=top_k, excluded_tracks=excluded_tracks)
@@ -349,7 +388,7 @@ def _run_tool(
         trace.append(f"[recommend] 生成 {len(rec.tracks)} 首推荐。")
         cards = [_song_card(item.asset, reason=item.reason, score=item.score, components=item.components) for item in rec.tracks]
         events.append(StreamEvent(type="candidates", content=f"推荐 {len(cards)} 首", payload={"count": len(cards), "cards": cards}))
-    elif tool == "playlist":
+    elif handler == "playlist":
         seed_tracks = _collect_tracks(results)
         playlist = agent.generate_playlist(user_id, _query_with_entities(query, plan), seed_tracks=seed_tracks, target_count=plan.target_count)
         # 延续指令去重：过滤掉上一轮已展示的曲目
@@ -359,26 +398,26 @@ def _run_tool(
         trace.append(f"[playlist] 生成 {len(playlist.tracks)} 首歌单。")
         cards = [_song_card(t) for t in playlist.tracks]
         events.append(StreamEvent(type="candidates", content=f"歌单 {len(cards)} 首", payload={"count": len(cards), "cards": cards}))
-    elif tool == "search":
+    elif handler == "search":
         search = agent.search(user_id, _query_with_entities(query, plan), include_external=True, top_k=max(top_k, 12))
         # 延续指令去重：过滤掉上一轮已展示的曲目
         if excluded_tracks:
             search.external = _filter_excluded(search.external, excluded_tracks)
         results.append({"type": "search", "response": search})
         trace.append(f"[search] 本地 {len(search.local)} 首，外部 {len(search.external)} 首。")
-    elif tool == "taste":
+    elif handler == "taste":
         summary = agent.summarize_taste(user_id)
         results.append({"type": "taste", "summary": summary})
         trace.append("[taste] 已总结用户品味。")
-    elif tool == "import":
+    elif handler == "import_netease_playlist":
         imported = agent.import_netease_playlist(query, user_id=user_id, limit=plan.target_count or 100)
         results.append({"type": "import_netease_playlist", "result": imported})
         trace.append(f"[import] 导入歌单《{imported.get('name', '')}》：新增 {imported.get('imported', 0)} 首。")
-    elif tool == "journey":
+    elif handler == "journey":
         journey = agent.generate_music_journey(user_id, query)
         results.append({"type": "journey", "journey": journey})
         trace.append(f"[journey] 生成 {len(journey.get('phases', []))} 个音乐旅程阶段。")
-    elif tool == "video_search":
+    elif handler == "video_search":
         # video 意图：直接搜 B站/YouTube，不走网易云
         search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
         tracks = agent.search_videos(search_q, top_k=plan.target_count or top_k)
@@ -389,12 +428,16 @@ def _run_tool(
         trace.append(f"[video_search] 获取 {len(tracks)} 个视频结果（B站+YouTube）。")
         cards = [_song_card(t) for t in tracks]
         events.append(StreamEvent(type="candidates", content=f"视频 {len(tracks)} 个", payload={"count": len(tracks), "cards": cards}))
-    elif tool == "web_info_search":
+    elif handler == "web_info_search":
         # artist_info 意图：用搜索引擎查百科
         search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
         search_results = agent.search_artist_info(search_q)
         results.append({"type": "web_info_search", "search_results": search_results})
         trace.append(f"[web_info_search] 获取 {len(search_results)} 条搜索结果。")
+    elif handler == "fetch_metadata":
+        data = agent.fetch_track_metadata(use_network=True)
+        results.append({"type": "fetch_metadata", "metadata": data})
+        trace.append("[fetch_metadata] 已尝试补全真实元数据。")
     events.append(StreamEvent(type="tool_result", content=trace[-1], payload={"tool": tool}))
 
 
@@ -422,29 +465,48 @@ def reflect(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     """
     plan = state["plan"]
     if plan.intent not in {"recommend", "search", "playlist", "video"}:
-        return state
+        return {**state, "_need_refine": False}
     if settings.mock_mode:
-        return state
+        return {**state, "_need_refine": False}
     results = state.get("results", [])
     tracks = _collect_tracks(results)
     if not tracks:
-        return state
+        return {**state, "_need_refine": False}
     constraints = _gather_constraints(agent, state)
     if not constraints:
-        return state
-    drop_indices = _llm_reflect_tracks(agent, tracks, constraints)
+        return {**state, "_need_refine": False}
+    drop_indices, used_reflection_prompt, llm_metrics = _llm_reflect_tracks(agent, tracks, constraints)
     trace = list(state.get("trace", []))
     events = list(state.get("events", []))
+    context = dict(state.get("context") or {})
+    context["runtime_metrics"] = merge_runtime_metrics(context.get("runtime_metrics"), llm_metrics)
+    need_refine = False
     if drop_indices:
         drop_keys = {_track_key(tracks[i]) for i in drop_indices if i < len(tracks)}
         results = _drop_tracks_from_results(results, drop_keys)
+        excluded = _merge_excluded_tracks(
+            plan._excluded_tracks,
+            [_track_to_excluded_item(tracks[i]) for i in drop_indices if i < len(tracks)],
+        )
+        plan._excluded_tracks = excluded
+        remaining = len(_collect_tracks(results))
+        if plan.target_count and remaining < plan.target_count and state.get("_refine_count", 0) < 1:
+            need_refine = True
         labels = "、".join(_track_label(tracks[i]) for i in drop_indices if i < len(tracks))[:120]
         note = f"[reflect] LLM 核对剔除 {len(drop_indices)} 首违反约束候选：{labels}"
+        if need_refine:
+            note += "；候选不足，回环补量一次。"
     else:
         note = "[reflect] LLM 核对通过，无候选违反用户约束。"
+    if used_reflection_prompt:
+        context["prompt_versions"] = _merge_prompt_versions(
+            context.get("prompt_versions"),
+            {"candidate_reflection": CANDIDATE_REFLECTION_VERSION},
+        )
+        note += f" [prompt] candidate_reflection={CANDIDATE_REFLECTION_VERSION}"
     trace.append(note)
     events.append(StreamEvent(type="eval", content=note))
-    return {**state, "results": results, "trace": trace, "events": events}
+    return {**state, "results": results, "trace": trace, "events": events, "context": context, "_need_refine": need_refine}
 
 
 def _gather_constraints(agent: AudioVisualAgent, state: AgentState) -> list[str]:
@@ -482,7 +544,36 @@ def _track_label(track: Any) -> str:
     return f"{title}" + (f"-{artist}" if artist else "")
 
 
-def _llm_reflect_tracks(agent: AudioVisualAgent, tracks: list[Any], constraints: list[str]) -> list[int]:
+def _track_to_excluded_item(track: Any) -> dict[str, str]:
+    return {
+        "title": getattr(track, "title", "") or "",
+        "artist": getattr(track, "artist", "") or "",
+        "source": getattr(track, "source", "") or "",
+        "source_id": getattr(track, "external_id", "") or getattr(track, "asset_id", "") or "",
+    }
+
+
+def _merge_excluded_tracks(existing: list[dict[str, str]], new_items: list[dict[str, str]]) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in [*existing, *new_items]:
+        title = item.get("title", "").lower().strip()
+        source_id = item.get("source_id", "").strip()
+        if not title:
+            continue
+        key = (title, source_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
+def _llm_reflect_tracks(
+    agent: AudioVisualAgent,
+    tracks: list[Any],
+    constraints: list[str],
+) -> tuple[list[int], bool, dict[str, float | int]]:
     """让 LLM 核对候选 vs 约束，返回该剔除的下标。失败/无违反返回 []。"""
     catalog = "\n".join(
         f"[{i}] {_track_label(t)} | 曲风:{'/'.join(getattr(t, 'genre', []) or [])} "
@@ -492,14 +583,16 @@ def _llm_reflect_tracks(agent: AudioVisualAgent, tracks: list[Any], constraints:
     cons = "；".join(f"({i + 1}) {c}" for i, c in enumerate(constraints[:8]))
     prompt = CANDIDATE_REFLECTION_USER.format(catalog=catalog, constraints=cons)
     try:
-        raw = agent.llm.generate(prompt, system=CANDIDATE_REFLECTION_SYSTEM, temperature=0.0)
+        llm = select_llm(agent, "strong")
+        raw = llm.generate(prompt, system=CANDIDATE_REFLECTION_SYSTEM, temperature=0.0)
+        metrics = capture_llm_stats(llm)
         data = extract_json_dict(raw)
         drop = data.get("drop") if isinstance(data, dict) else None
         if isinstance(drop, list):
-            return [int(x) for x in drop if isinstance(x, (int, float)) and 0 <= int(x) < len(tracks)]
+            return [int(x) for x in drop if isinstance(x, (int, float)) and 0 <= int(x) < len(tracks)], True, metrics
     except Exception:
         logger.debug("reflect LLM 核对失败，跳过", exc_info=True)
-    return []
+    return [], True, capture_llm_stats(select_llm(agent, "strong"))
 
 
 def _drop_tracks_from_results(results: list[dict[str, Any]], drop_keys: set[str]) -> list[dict[str, Any]]:
@@ -512,7 +605,7 @@ def _drop_tracks_from_results(results: list[dict[str, Any]], drop_keys: set[str]
         if t in {"recommend", "recommend_music", "daily_recommend"}:
             rec = r.get("recommendation")
             if rec is not None and hasattr(rec, "tracks"):
-                rec.tracks = [tr for tr in rec.tracks if _track_key(tr) not in drop_keys]
+                rec.tracks = [tr for tr in rec.tracks if _track_key(getattr(tr, "asset", tr)) not in drop_keys]
         elif t == "playlist":
             pl = r.get("playlist")
             if pl is not None and hasattr(pl, "tracks"):
@@ -541,10 +634,18 @@ def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     if removed:
         trace.append(f"[guard] 移除 {len(removed)} 个未核实歌名。")
     trace.append("[final] 输出 grounded answer。")
+    runtime_metrics = dict((state.get("context") or {}).get("runtime_metrics") or {})
+    if runtime_metrics:
+        trace.append(f"[meta] {format_runtime_metrics(runtime_metrics)}")
     _persist_dialogue_state(agent, state)
+    listed = _select_listed_tracks(state.get("results", []), state["plan"])
+    aligned_cards = _aligned_cards(listed, state.get("events", [])) if listed else []
     answer = AgentAnswer(
         answer=answer_text,
         evidences=[],
+        recommended_tracks=[_track_ref_from_card(card) for card in aligned_cards],
+        prompt_versions=dict((state.get("context") or {}).get("prompt_versions") or {}),
+        runtime_metrics=runtime_metrics,
         memory_updated=memory_updated,
         agent_trace=trace,
         pending_goal=goal.goal if goal and goal.status == "active" else None,
@@ -553,9 +654,8 @@ def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     # 权威卡片：与答案文本实际列出的曲目严格一一对应，挂到 final 事件。
     # 前端收到后替换流式预览卡片，保证「文本列几首 = 底部几张卡」。
     final_payload = answer.model_dump(mode="json")
-    listed = _select_listed_tracks(state.get("results", []), state["plan"])
     if listed:
-        final_payload["cards"] = _aligned_cards(listed, state.get("events", []))
+        final_payload["cards"] = aligned_cards
     return {
         **state,
         "answer": answer,
@@ -645,6 +745,15 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
 
 
 def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -> AgentPlan | None:
+    plan, _, _ = plan_with_llm_with_meta(agent, query, history_text)
+    return plan
+
+
+def plan_with_llm_with_meta(
+    agent: AudioVisualAgent,
+    query: str,
+    history_text: str = "",
+) -> tuple[AgentPlan | None, dict[str, str], dict[str, float | int]]:
     """用 LLM 产出结构化 AgentPlan：LLM 判意图 + 抽实体，标签走确定性规则。
 
     history_text 非空时拼进 prompt，让意图规划理解多轮指代（如"再来几首"
@@ -656,25 +765,33 @@ def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -
             user_prompt = f"【最近对话】\n{history_text}\n\n【本轮输入】\n{query}"
         else:
             user_prompt = query
-        raw = agent.llm.generate(user_prompt, system=QUERY_PLAN_SYSTEM, temperature=0.1)
+        llm = select_llm(agent, "fast")
+        raw = llm.generate(user_prompt, system=QUERY_PLAN_SYSTEM, temperature=0.1)
     except Exception:
-        return None
-    data = extract_json_dict(raw)
-    if not data or not is_valid_intent(data.get("intent", "")):
-        return None
+        return None, {}, empty_runtime_metrics()
 
-    intent = data["intent"]
+    payload = _parse_query_plan_payload(raw)
+    prompt_versions: dict[str, str] = {"query_plan": QUERY_PLAN_VERSION}
+    runtime_metrics = capture_llm_stats(llm)
+    if payload is None:
+        payload, repair_metrics = _repair_query_plan_payload(agent, query, history_text, raw)
+        runtime_metrics = merge_runtime_metrics(runtime_metrics, repair_metrics)
+        if payload is not None:
+            prompt_versions["query_plan_repair"] = QUERY_PLAN_VERSION
+    if payload is None:
+        return None, {}, runtime_metrics
+
+    intent = payload.intent
     spec = get_intent(intent)
-    entities = [e for e in (data.get("entities") or []) if isinstance(e, str) and e.strip()]
-    use_local = bool(data.get("use_local", True))
-    use_vector = bool(data.get("use_vector", False))
-    use_web = bool(data.get("use_web", spec.online_default))
-    target = data.get("target_count")
-    target = int(target) if isinstance(target, (int, float)) and target else _infer_count(query)
+    entities = payload.entities
+    use_local = payload.use_local
+    use_vector = payload.use_vector
+    use_web = payload.use_web if payload.use_web is not None else spec.online_default
+    target = payload.target_count or _infer_count(query)
 
     tags = extract_tags(query)
-    search_query = (data.get("search_query") or "").strip()
-    language_filter = (data.get("language") or "").strip().lower()
+    search_query = payload.search_query.strip()
+    language_filter = payload.language.strip().lower()
     retrieval = RetrievalPlan(
         use_local=use_local,
         use_vector=use_vector,
@@ -692,9 +809,49 @@ def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -
         tools_needed=spec.tools_for(use_web),
         target_count=target,
         online_required=use_web,
-        reasoning_summary=(data.get("reasoning") or "").strip() or spec.summary,
+        reasoning_summary=payload.reasoning.strip() or spec.summary,
         retrieval_plan=retrieval,
-    )
+    ), prompt_versions, runtime_metrics
+
+
+def _merge_prompt_versions(existing: Any, incoming: dict[str, str] | None) -> dict[str, str]:
+    merged = dict(existing or {})
+    for key, value in (incoming or {}).items():
+        if value:
+            merged[key] = value
+    return merged
+
+
+def _format_prompt_versions(versions: dict[str, str]) -> str:
+    return ", ".join(f"{key}={value}" for key, value in sorted(versions.items()))
+
+
+def _parse_query_plan_payload(raw: str) -> QueryPlanPayload | None:
+    data = extract_json_dict(raw)
+    if not isinstance(data, dict):
+        return None
+    try:
+        return QueryPlanPayload.model_validate(data)
+    except Exception:
+        return None
+
+
+def _repair_query_plan_payload(
+    agent: AudioVisualAgent,
+    query: str,
+    history_text: str,
+    raw_output: str,
+) -> tuple[QueryPlanPayload | None, dict[str, float | int]]:
+    try:
+        llm = select_llm(agent, "fast")
+        repaired = llm.generate(
+            QUERY_PLAN_REPAIR_USER(query, history_text, raw_output),
+            system=QUERY_PLAN_REPAIR_SYSTEM,
+            temperature=0.0,
+        )
+    except Exception:
+        return None, empty_runtime_metrics()
+    return _parse_query_plan_payload(repaired), capture_llm_stats(llm)
 
 
 def _keyword_retrieval_plan(query: str, use_web: bool) -> RetrievalPlan:
@@ -827,7 +984,8 @@ def _compose_intro(
     if shortfall:
         fallback += f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
 
-    if agent is None or getattr(agent, "llm", None) is None:
+    llm = select_llm(agent, "strong") if agent is not None else None
+    if llm is None:
         return fallback
 
     titles_preview = "、".join(getattr(t, "title", "") for t in tracks[:5])
@@ -847,7 +1005,7 @@ def _compose_intro(
         "不要列歌名，不要编造任何歌曲，不要用书名号。只输出这一句话。"
     )
     try:
-        text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+        text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
         return fallback
     # LLM 兜底：异常输出（空/过长/含书名号疑似编造歌名）一律回退模板
@@ -860,7 +1018,8 @@ def _compose_intro(
 
 def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_text: str = "", user_id: str = "") -> str | None:
     """让 LLM 自然回复寒暄/闲聊，注入用户画像作为事实锚。"""
-    if agent is None or getattr(agent, "llm", None) is None:
+    llm = select_llm(agent, "strong") if agent is not None else None
+    if llm is None:
         return None
     history_hint = ""
     if history_text:
@@ -886,7 +1045,7 @@ def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_t
         "不要编造排名、发行时间、销量等你不确定的具体数据。"
     )
     try:
-        text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+        text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
         return None
     if not text or len(text) > 300:
@@ -907,7 +1066,8 @@ def _compose_discussion(
     - 搜到了 → LLM 只能基于真实曲目回答，不确定的说不知道
     - 限制 100 字（SoulTuner 的 general_chat 也是 100 字）
     """
-    if agent is None or getattr(agent, "llm", None) is None:
+    llm = select_llm(agent, "strong") if agent is not None else None
+    if llm is None:
         return None
     track_hint = ""
     if tracks:
@@ -939,7 +1099,7 @@ def _compose_discussion(
         "7. 可以挑几首真实曲目推荐并说明理由"
     )
     try:
-        text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+        text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
         return None
     if not text or len(text) > 300:
@@ -958,7 +1118,8 @@ def _compose_video_answer(
         return None
     # 构建 LLM 开场白
     intro = "我帮你搜到了这些视频："
-    if agent is not None and getattr(agent, "llm", None) is not None:
+    llm = select_llm(agent, "strong") if agent is not None else None
+    if llm is not None:
         titles_preview = "、".join(getattr(t, "title", "") for t in tracks[:5])
         history_hint = ""
         if history_text:
@@ -972,7 +1133,7 @@ def _compose_video_answer(
             "不要列视频名，不要编造信息，不要用书名号。只输出这一句话。"
         )
         try:
-            text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+            text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
             if text and len(text) <= 150 and "《" not in text:
                 intro = text
         except Exception:
@@ -1011,7 +1172,8 @@ def _compose_artist_info_answer(
     search_context = "\n\n".join(context_parts)
     source_urls = [item["url"] for item in search_results if item.get("url")]
 
-    if agent is None or getattr(agent, "llm", None) is None:
+    llm = select_llm(agent, "strong") if agent is not None else None
+    if llm is None:
         # 无 LLM，直接输出搜索摘要
         return search_context
 
@@ -1033,7 +1195,7 @@ def _compose_artist_info_answer(
         "5. 末尾附上参考来源链接"
     )
     try:
-        text = agent.llm.generate(prompt, temperature=settings.dialog_temperature).strip()
+        text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
         return search_context
     if not text or len(text) > 800:

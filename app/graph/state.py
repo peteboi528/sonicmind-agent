@@ -19,3 +19,5 @@ class AgentState(TypedDict, total=False):
     events: list[StreamEvent]
     error: str
     _need_web_fallback: bool
+    _need_refine: bool
+    _refine_count: int

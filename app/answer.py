@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.models import AgentGoal
+from app.models import AgentGoal, TrackRef
 
 # ── 回复模板（集中管理，Graph 与 ReAct fallback 共用） ──────────────────
 RESPONSE_TEMPLATES = {
@@ -149,6 +149,34 @@ def song_card(
         "components": components or {},
         "candidate_kind": getattr(track, "candidate_kind", "track"),
     }
+
+
+def track_ref(track: Any, score: float | None = None, components: dict[str, float] | None = None) -> TrackRef:
+    """把曲目对象压成结构化推荐结果，供 AgentAnswer / eval 指标复用。"""
+    return TrackRef(
+        title=getattr(track, "title", ""),
+        artist=getattr(track, "artist", "") or "",
+        source=getattr(track, "source", "local"),
+        source_id=getattr(track, "external_id", "") or getattr(track, "asset_id", ""),
+        genre=list(getattr(track, "genre", []) or []),
+        mood=list(getattr(track, "mood", []) or []),
+        score=score,
+        components=components or {},
+    )
+
+
+def track_ref_from_card(card: dict[str, Any]) -> TrackRef:
+    """从前端卡片字段回构 TrackRef，保留 score/components。"""
+    return TrackRef(
+        title=str(card.get("title", "")),
+        artist=str(card.get("artist", "") or ""),
+        source=str(card.get("source", "local")),
+        source_id=str(card.get("source_id", "")),
+        genre=list(card.get("genre", []) or []),
+        mood=list(card.get("mood", []) or []),
+        score=card.get("score"),
+        components=dict(card.get("components", {}) or {}),
+    )
 
 
 def guard_answer(answer: str, known_titles: set[str]) -> tuple[str, list[str]]:

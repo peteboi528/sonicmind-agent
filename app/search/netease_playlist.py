@@ -34,7 +34,17 @@ def search_netease_playlists(query: str, limit: int = 5) -> list[dict[str, Any]]
         logger.debug("Netease playlist search failed for %r", query, exc_info=True)
         return []
 
-    playlists = data.get("result", {}).get("playlists") or []
+    if not isinstance(data, dict):
+        logger.debug("Netease playlist search returned non-dict payload for %r: %r", query, type(data).__name__)
+        return []
+    result = data.get("result")
+    if not isinstance(result, dict):
+        logger.debug("Netease playlist search returned invalid result payload for %r: %r", query, type(result).__name__)
+        return []
+    playlists = result.get("playlists") or []
+    if not isinstance(playlists, list):
+        logger.debug("Netease playlist search returned invalid playlists payload for %r: %r", query, type(playlists).__name__)
+        return []
     return [
         {
             "id": pl["id"],
@@ -60,7 +70,17 @@ def get_playlist_tracks(playlist_id: int, limit: int = 30) -> list[ExternalTrack
         logger.debug("Netease playlist detail failed for id=%s", playlist_id, exc_info=True)
         return []
 
-    tracks_raw = data.get("playlist", {}).get("tracks") or []
+    if not isinstance(data, dict):
+        logger.debug("Netease playlist detail returned non-dict payload for id=%s: %r", playlist_id, type(data).__name__)
+        return []
+    playlist = data.get("playlist")
+    if not isinstance(playlist, dict):
+        logger.debug("Netease playlist detail returned invalid playlist payload for id=%s: %r", playlist_id, type(playlist).__name__)
+        return []
+    tracks_raw = playlist.get("tracks") or []
+    if not isinstance(tracks_raw, list):
+        logger.debug("Netease playlist detail returned invalid tracks payload for id=%s: %r", playlist_id, type(tracks_raw).__name__)
+        return []
     result: list[ExternalTrack] = []
     for t in tracks_raw[:limit]:
         song_id = t.get("id")

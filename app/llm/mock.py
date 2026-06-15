@@ -5,7 +5,9 @@ import re
 import uuid
 from typing import Any
 
+from app.intents import match_intent_by_keywords
 from app.llm.protocol import LLMResponse, ToolCall
+from app.llm.structured import extract_json_dict
 from app.llm.tools import (
     TOOL_ANALYZE,
     TOOL_FETCH_METADATA,
@@ -68,10 +70,29 @@ _TOOL_RULES: list[tuple[list[str], str]] = [
 class MockLLM:
     def __init__(self) -> None:
         self._tool_call_history: dict[str, list[str]] = {}
+        self.last_stats: dict[str, float | int | str] = {}
+
+    def _mark_call(self, kind: str) -> None:
+        self.last_stats = {
+            "llm_calls": 1,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "latency_ms": 0.0,
+            "estimated_cost_usd": 0.0,
+            "provider": f"mock:{kind}",
+        }
 
     def generate(self, prompt: str, system: str | None = None, temperature: float = 0.7) -> str:
+        self._mark_call("generate")
         # 同时检查 system，让意图分类器在 mock 下也能命中（system 含"意图"）
         haystack = f"{system or ''}\n{prompt}".lower()
+        if "复合任务拆解器" in (system or ""):
+            return self._decompose(prompt)
+        if "复合任务综合器" in (system or ""):
+            return self._compound_synthesis(prompt)
+        if "意图规划器修复器" in (system or ""):
+            return self._query_plan_repair(prompt)
         if "意图规划器" in (system or "") or "query_plan" in haystack:
             return self._query_plan(prompt)
         if "推荐理由" in prompt or "reason" in haystack:
@@ -85,6 +106,7 @@ class MockLLM:
         return self._chat(prompt)
 
     def chat(self, messages: list[dict[str, Any]], temperature: float = 0.7) -> str:
+        self._mark_call("chat")
         last_user = next(
             (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
         )
@@ -97,6 +119,7 @@ class MockLLM:
         temperature: float = 0.3,
         tool_choice: str = "auto",
     ) -> LLMResponse:
+        self._mark_call("chat_with_tools")
         """Mock 实现：第一轮根据关键词选 1 个 tool 调用，第二轮收到工具结果后给最终答案。"""
         # 找到最后一条 user 消息（原始 query）
         last_user = next(
@@ -211,6 +234,57 @@ class MockLLM:
             "target_count": target,
             "reasoning": f"mock：{intent} 意图",
         }, ensure_ascii=False)
+
+    def _decompose(self, prompt: str) -> str:
+        import json as _json
+
+        query = prompt.split("用户请求：", 1)[-1].strip()
+        lowered = query.lower()
+        if "然后" in prompt or "and then" in lowered:
+            raw_parts = re.split(r"(?:然后|之后|接着|and then|after that|finally)", query)
+            parts = [p.strip(" ：:\n\t，,。；;") for p in raw_parts if p.strip(" ：:\n\t，,。；;")]
+        else:
+            parts = [query]
+        subtasks = []
+        for idx, part in enumerate(parts):
+            intent = match_intent_by_keywords(part) or "recommend"
+            subtasks.append({
+                "intent": intent,
+                "query": part,
+                "depends_on_prev": idx > 0 and any(token in part for token in ["再", "类似", "基于", "继续"]),
+            })
+        return _json.dumps({"subtasks": subtasks}, ensure_ascii=False)
+
+    def _compound_synthesis(self, prompt: str) -> str:
+        query_match = re.search(r"用户原始请求：(.*?)\n\n", prompt, re.S)
+        query = query_match.group(1).strip() if query_match else "这次请求"
+        steps = re.findall(r"子任务 \d+（.*?）\n任务：(.+?)\n结果摘要：(.+?)(?:\n主要答复：(.+?))?(?=\n\n子任务 |\Z)", prompt, re.S)
+        if not steps:
+            return f"我已经完成“{query}”的处理，并整理好了结果。"
+        lines = [f"我已经把“{query}”分步处理好了。"]
+        for index, (_, summary, answer) in enumerate(steps, start=1):
+            lines.append(f"{index}. {summary.strip()}")
+            if (answer or "").strip():
+                lines.append(answer.strip().splitlines()[0][:120])
+        return "\n".join(lines)
+
+    def _query_plan_repair(self, prompt: str) -> str:
+        raw = prompt.split("待修复原始输出：", 1)[-1]
+        repaired = extract_json_dict(raw)
+        if repaired:
+            import json as _json
+
+            repaired.setdefault("entities", [])
+            repaired.setdefault("use_local", True)
+            repaired.setdefault("use_vector", False)
+            repaired.setdefault("use_web", False)
+            repaired.setdefault("search_query", "")
+            repaired.setdefault("language", "")
+            repaired.setdefault("target_count", None)
+            repaired.setdefault("reasoning", "")
+            repaired["intent"] = repaired.get("intent") or "chat"
+            return _json.dumps(repaired, ensure_ascii=False)
+        return '{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","language":"","target_count":null,"reasoning":"repair fallback"}'
 
     @staticmethod
     def _mock_search_query(prompt: str, intent: str) -> tuple[str, str]:

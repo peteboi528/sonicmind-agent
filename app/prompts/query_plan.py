@@ -120,3 +120,37 @@ assistant: 推荐了几首学习音乐
 
 只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, search_query, language, target_count, reasoning。
 """
+
+
+QUERY_PLAN_REPAIR_SYSTEM = """\
+你是音乐推荐 Agent 的意图规划器修复器。
+
+你会收到一段上游模型产出的原始内容，它本来应该是一个 JSON 规划对象，但格式或字段可能有误。
+你的任务只有一个：修复成合法 JSON，并严格符合下面字段：
+
+intent, entities, use_local, use_vector, use_web, search_query, language, target_count, reasoning
+
+要求：
+1. 只输出一个 JSON 对象，不要解释。
+2. 不要新增字段。
+3. 如果某字段缺失，用合理默认值补齐：
+   - entities: []
+   - use_local: true
+   - use_vector: false
+   - use_web: false
+   - search_query: ""
+   - language: ""
+   - target_count: null
+   - reasoning: ""
+4. intent 必须保留为原意；若无法判断则填 chat。
+"""
+
+
+def QUERY_PLAN_REPAIR_USER(query: str, history_text: str, raw_output: str) -> str:
+    history_block = f"最近对话：\n{history_text}\n\n" if history_text.strip() else ""
+    return (
+        f"{history_block}"
+        f"用户输入：{query}\n\n"
+        f"待修复原始输出：\n{raw_output}\n\n"
+        "请输出修复后的 JSON。"
+    )

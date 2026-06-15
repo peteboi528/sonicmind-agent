@@ -69,6 +69,31 @@ def test_plan_falls_back_to_keyword_on_bad_json(agent, monkeypatch):
     assert plan is None  # 调用方会降级到 build_agent_plan
 
 
+def test_plan_repairs_invalid_payload_once(agent, monkeypatch):
+    calls = {"n": 0}
+
+    def fake_generate(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return '{"intent":"recommend","entities":"周杰伦","use_local":true,"use_vector":true,"use_web":true}'
+        return '{"intent":"recommend","entities":["周杰伦"],"use_local":true,"use_vector":true,"use_web":true,"search_query":"周杰伦","language":"","target_count":5,"reasoning":"repair ok"}'
+
+    monkeypatch.setattr(agent.llm, "generate", fake_generate)
+    plan = nodes.plan_with_llm(agent, "推荐5首周杰伦的歌")
+
+    assert plan is not None
+    assert plan.intent == "recommend"
+    assert plan.target_count == 5
+    assert plan.retrieval_plan.entities == ["周杰伦"]
+    assert calls["n"] == 2
+
+
+def test_plan_returns_none_when_repair_still_invalid(agent, monkeypatch):
+    monkeypatch.setattr(agent.llm, "generate", lambda *a, **k: "not valid json at all")
+    plan = nodes.plan_with_llm(agent, "推荐几首歌")
+    assert plan is None
+
+
 # ---- web_fallback 条件路由 ----
 
 def test_needs_web_fallback_when_candidates_insufficient():

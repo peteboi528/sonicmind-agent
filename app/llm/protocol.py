@@ -24,6 +24,10 @@ class LLMResponse:
     # 可观测性字段
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    latency_ms: float = 0.0
+    estimated_cost_usd: float = 0.0
+    model: str = ""
+    tier: str = ""
     finish_reason: str = "stop"  # stop / tool_calls / length / error
     error: str | None = None
 

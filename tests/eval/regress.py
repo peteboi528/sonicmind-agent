@@ -80,7 +80,7 @@ def collect(case_filter: str | None = None) -> dict[str, Any]:
         mode = "LLM" if judge else "mock"
         print(f"  [{i}/{len(cases)}] {case.case_id}: intent={metrics['intent_hit']} "
               f"anti_halluc={metrics['anti_halluc_pass']} mm_hit={metrics['must_mention_hit']} "
-              f"({mode}, {len(answer.agent_trace)} steps)")
+              f"pv={metrics['prompt_signature'] or '-'} ({mode}, {len(answer.agent_trace)} steps)")
     per_case["__aggregate__"] = aggregate(per_case)
     return per_case
 
@@ -110,7 +110,7 @@ def print_diff(current: dict[str, Any], baseline: dict[str, Any]) -> None:
     agg_cur = current.get("__aggregate__", {})
     agg_base = baseline.get("__aggregate__", {})
     print("\n" + "=" * 82)
-    print(f"{'case':<22} {'intent':<16} {'anti_halluc':<14} {'mm_hit':<16} {'relevance'}")
+    print(f"{'case':<22} {'intent':<16} {'anti_halluc':<14} {'mm_hit':<10} {'diversity':<12} {'relevance'}")
     print("-" * 82)
     for cid, m in current.items():
         if cid.startswith("__"):
@@ -120,12 +120,13 @@ def print_diff(current: dict[str, Any], baseline: dict[str, Any]) -> None:
             f"{cid:<22} "
             f"{(_fmt(m['intent_hit']) + _delta(m['intent_hit'], b.get('intent_hit'))):<16} "
             f"{_fmt(m['anti_halluc_pass']):<14} "
-            f"{(_fmt(m['must_mention_hit']) + _delta(m['must_mention_hit'], b.get('must_mention_hit'))):<16} "
+            f"{(_fmt(m['must_mention_hit']) + _delta(m['must_mention_hit'], b.get('must_mention_hit'))):<10} "
+            f"{(_fmt(m['diversity']) + _delta(m['diversity'], b.get('diversity'))):<12} "
             f"{_fmt(m['relevance']) + _delta(m['relevance'], b.get('relevance'))}"
         )
     print("-" * 82)
     print("AGGREGATE (current vs baseline):")
-    for k in ("intent_hit_rate", "anti_halluc_rate", "avg_must_mention_hit", "avg_relevance"):
+    for k in ("intent_hit_rate", "anti_halluc_rate", "avg_must_mention_hit", "avg_diversity", "avg_relevance"):
         print(f"  {k:<24} {_fmt(agg_cur.get(k))}{_delta(agg_cur.get(k), agg_base.get(k))}")
 
 

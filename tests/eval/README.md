@@ -99,8 +99,8 @@ profile：`three_anchor`（默认 0.45/0.30/0.25）/ `pure_semantic` / `pure_per
 隔离 MMR（`apply_mmr=False`），纯看三锚权重差异——ranking 策略 A/B 的正确方法论。
 输出每个 profile 的 top-5 与列内多样性（`intra_list_diversity`，0=同质 / 1=多样）。
 
-> diversity 在 A/B 层度量，因为 `AgentAnswer` 当前不暴露推荐曲目列表；后续给它加
-> `recommended_tracks` 字段即可补齐端到端多样性。
+> A/B 层用于隔离观察 rerank 策略本身；端到端 regress 已可基于
+> `AgentAnswer.recommended_tracks` 计算推荐多样性与曲目级指标。
 
 ## 添加新 case
 

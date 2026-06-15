@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator
 
 
 def utc_now_iso() -> str:
@@ -149,12 +149,16 @@ class AgentAnswer(BaseModel):
     answer: str
     evidences: list[RagEvidence]
     recommended_segments: list[Segment] = Field(default_factory=list)
+    recommended_tracks: list[TrackRef] = Field(default_factory=list)
+    prompt_versions: dict[str, str] = Field(default_factory=dict)
+    runtime_metrics: dict[str, float | int] = Field(default_factory=dict)
     memory_updated: bool = False
     agent_trace: list[str] = Field(default_factory=list)
     pending_goal: str | None = None
     goal_progress: list[str] = Field(default_factory=list)
     # 标记本轮是否走了降级路径（LLM 失败 → 关键词/模板兜底），便于排查"对话僵硬"。
     fallback_reason: str | None = None
+    _compound_cards: list[dict[str, Any]] = PrivateAttr(default_factory=list)
 
 
 class IngestRequest(BaseModel):
@@ -268,6 +272,7 @@ class AgentPlan(BaseModel):
     online_required: bool = True
     reasoning_summary: str = ""
     retrieval_plan: RetrievalPlan = Field(default_factory=RetrievalPlan)
+    _excluded_tracks: list[dict[str, str]] = PrivateAttr(default_factory=list)
 
     @field_validator("intent", mode="before")
     @classmethod
@@ -275,6 +280,54 @@ class AgentPlan(BaseModel):
         from app.intents import is_valid_intent
         s = str(v or "chat")
         return s if is_valid_intent(s) else "chat"
+
+
+class QueryPlanPayload(BaseModel):
+    intent: str
+    entities: list[str] = Field(default_factory=list)
+    use_local: bool = True
+    use_vector: bool = False
+    use_web: bool = True
+    search_query: str = ""
+    language: str = ""
+    target_count: int | None = None
+    reasoning: str = ""
+
+    @field_validator("intent", mode="before")
+    @classmethod
+    def _validate_intent(cls, v: object) -> str:
+        from app.intents import is_valid_intent
+
+        s = str(v or "").strip()
+        if not is_valid_intent(s):
+            raise ValueError(f"invalid intent: {s}")
+        return s
+
+    @field_validator("entities", mode="before")
+    @classmethod
+    def _coerce_entities(cls, v: object) -> list[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("entities must be a list")
+        return [str(item).strip() for item in v if str(item).strip()]
+
+    @field_validator("search_query", "language", "reasoning", mode="before")
+    @classmethod
+    def _coerce_text(cls, v: object) -> str:
+        return str(v or "").strip()
+
+    @field_validator("target_count", mode="before")
+    @classmethod
+    def _coerce_target_count(cls, v: object) -> int | None:
+        if v in {None, "", 0, "0"}:
+            return None
+        if isinstance(v, (int, float)):
+            return int(v)
+        try:
+            return int(str(v).strip())
+        except Exception as exc:
+            raise ValueError("target_count must be int-like") from exc
 
 
 class ResourceTrack(BaseModel):
@@ -295,6 +348,17 @@ class RankingBreakdown(BaseModel):
     source: str
     score: float
     reason: str
+    components: dict[str, float] = Field(default_factory=dict)
+
+
+class TrackRef(BaseModel):
+    title: str
+    artist: str = ""
+    source: str = "local"
+    source_id: str = ""
+    genre: list[str] = Field(default_factory=list)
+    mood: list[str] = Field(default_factory=list)
+    score: float | None = None
     components: dict[str, float] = Field(default_factory=dict)
 
 

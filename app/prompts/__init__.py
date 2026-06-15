@@ -5,6 +5,12 @@
 """
 
 from app.prompts.agent_system import AGENT_SYSTEM_PROMPT, AGENT_SYSTEM_VERSION
+from app.prompts.compound import (
+    COMPOUND_SYNTH_SYSTEM,
+    COMPOUND_SYNTH_USER,
+    COMPOUND_SYNTH_VERSION,
+)
+from app.prompts.decompose import DECOMPOSE_SYSTEM, DECOMPOSE_USER, DECOMPOSE_VERSION
 from app.prompts.identify import IDENTIFY_FROM_URL_TEMPLATE, IDENTIFY_VERSION
 from app.prompts.intent import INTENT_CLASSIFIER_SYSTEM, INTENT_CLASSIFIER_VERSION
 from app.prompts.playlist import (
@@ -12,7 +18,12 @@ from app.prompts.playlist import (
     GENERATE_PLAYLIST_TEMPLATE,
     PLAYLIST_VERSION,
 )
-from app.prompts.query_plan import QUERY_PLAN_SYSTEM, QUERY_PLAN_VERSION
+from app.prompts.query_plan import (
+    QUERY_PLAN_REPAIR_SYSTEM,
+    QUERY_PLAN_REPAIR_USER,
+    QUERY_PLAN_SYSTEM,
+    QUERY_PLAN_VERSION,
+)
 from app.prompts.recommend import (
     DAILY_RECOMMEND_USER_TEMPLATE,
     DAILY_RECOMMEND_VERSION,
@@ -24,6 +35,12 @@ from app.prompts.search import LLM_SEARCH_TEMPLATE, LLM_SEARCH_VERSION
 __all__ = [
     "AGENT_SYSTEM_PROMPT",
     "AGENT_SYSTEM_VERSION",
+    "COMPOUND_SYNTH_SYSTEM",
+    "COMPOUND_SYNTH_USER",
+    "COMPOUND_SYNTH_VERSION",
+    "DECOMPOSE_SYSTEM",
+    "DECOMPOSE_USER",
+    "DECOMPOSE_VERSION",
     "INTENT_CLASSIFIER_SYSTEM",
     "INTENT_CLASSIFIER_VERSION",
     "REFLECTION_SYSTEM",
@@ -38,6 +55,8 @@ __all__ = [
     "PLAYLIST_VERSION",
     "IDENTIFY_FROM_URL_TEMPLATE",
     "IDENTIFY_VERSION",
+    "QUERY_PLAN_REPAIR_SYSTEM",
+    "QUERY_PLAN_REPAIR_USER",
     "QUERY_PLAN_SYSTEM",
     "QUERY_PLAN_VERSION",
 ]

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import socket
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -29,10 +30,12 @@ def _extract_message_text(msg: dict[str, Any]) -> str:
 
 
 class OpenAICompatibleLLM:
-    def __init__(self, base_url: str, api_key: str, model: str) -> None:
+    def __init__(self, base_url: str, api_key: str, model: str, tier: str = "default") -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.tier = tier
+        self.last_stats: dict[str, float | int | str] = {}
 
     def generate(self, prompt: str, system: str | None = None, temperature: float = 0.7) -> str:
         messages: list[dict[str, Any]] = [
@@ -94,11 +97,30 @@ class OpenAICompatibleLLM:
                     arguments=args,
                 ))
             usage = data.get("usage") or {}
+            latency_ms = float((data.get("_meta") or {}).get("latency_ms", 0.0))
+            estimated_cost = _estimate_cost_usd(
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+            )
+            self.last_stats = {
+                "llm_calls": 1,
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0),
+                "latency_ms": round(latency_ms, 2),
+                "estimated_cost_usd": estimated_cost,
+                "model": self.model,
+                "tier": self.tier,
+            }
             return LLMResponse(
                 content=content,
                 tool_calls=tool_calls,
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
+                latency_ms=latency_ms,
+                estimated_cost_usd=estimated_cost,
+                model=self.model,
+                tier=self.tier,
                 finish_reason=finish,
             )
         except (KeyError, IndexError, TypeError) as exc:
@@ -114,6 +136,21 @@ class OpenAICompatibleLLM:
         }
         try:
             data = self._post(payload)
+            usage = data.get("usage") or {}
+            latency_ms = float((data.get("_meta") or {}).get("latency_ms", 0.0))
+            self.last_stats = {
+                "llm_calls": 1,
+                "prompt_tokens": usage.get("prompt_tokens", 0),
+                "completion_tokens": usage.get("completion_tokens", 0),
+                "total_tokens": usage.get("prompt_tokens", 0) + usage.get("completion_tokens", 0),
+                "latency_ms": round(latency_ms, 2),
+                "estimated_cost_usd": _estimate_cost_usd(
+                    usage.get("prompt_tokens", 0),
+                    usage.get("completion_tokens", 0),
+                ),
+                "model": self.model,
+                "tier": self.tier,
+            }
             return _extract_message_text(data["choices"][0]["message"])
         except (urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError) as exc:
             raise LLMError(str(exc)) from exc
@@ -132,24 +169,43 @@ class OpenAICompatibleLLM:
         last_exc: Exception | None = None
         for _ in range(2):
             try:
+                started = time.perf_counter()
                 with urllib.request.urlopen(request, timeout=settings.llm_timeout_seconds) as response:
-                    return json.loads(response.read().decode("utf-8"))
+                    data = json.loads(response.read().decode("utf-8"))
+                    data["_meta"] = {"latency_ms": (time.perf_counter() - started) * 1000}
+                    return data
             except (urllib.error.URLError, TimeoutError) as exc:
                 last_exc = exc
                 continue
         raise last_exc if last_exc else RuntimeError("LLM request failed")
 
 
-def build_llm() -> LLMProvider:
+def _estimate_cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
+    input_cost = (prompt_tokens / 1_000_000) * settings.llm_input_price_per_1m_tokens
+    output_cost = (completion_tokens / 1_000_000) * settings.llm_output_price_per_1m_tokens
+    return round(input_cost + output_cost, 8)
+
+
+def build_llm(tier: str | None = None) -> LLMProvider:
     if settings.mock_mode:
         return MockLLM()
     if _local_endpoint_unavailable(settings.llm_base_url):
         return MockLLM()
+    resolved_tier = tier or "default"
     return OpenAICompatibleLLM(
         base_url=settings.llm_base_url,
         api_key=settings.llm_api_key,
-        model=settings.llm_model,
+        model=_model_for_tier(resolved_tier),
+        tier=resolved_tier,
     )
+
+
+def _model_for_tier(tier: str) -> str:
+    if tier == "fast":
+        return settings.llm_fast_model
+    if tier == "strong":
+        return settings.llm_strong_model
+    return settings.llm_model
 
 
 def _local_endpoint_unavailable(base_url: str) -> bool:

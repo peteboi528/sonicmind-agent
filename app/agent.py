@@ -78,6 +78,13 @@ class AudioVisualAgent:
         self.similarity = AssetSimilarity(self.store)
         self.library = ResourceLibrary(settings.resource_library_path)
         self.llm: LLMProvider = build_llm()
+        self._llm_default_ref: LLMProvider = self.llm
+        self.llm_fast: LLMProvider = (
+            self.llm if settings.llm_fast_model == settings.llm_model else build_llm("fast")
+        )
+        self.llm_strong: LLMProvider = (
+            self.llm if settings.llm_strong_model == settings.llm_model else build_llm("strong")
+        )
         # P1-G：把 LLM 注入记忆层，启用 LLM 偏好抽取兜底 + 巩固画像（mock 下自动跳过）。
         self.memory.llm = self.llm
         self.source: ExternalSource = _build_source()
@@ -887,9 +894,14 @@ class AudioVisualAgent:
 
     def chat(self, user_id: str, message: str, history: list[dict[str, Any]] | None = None) -> AgentAnswer:
         asset_id = self._resolve_asset_context(user_id, message)
-        # Deep/Agentic 模式：复合多步任务走真迭代 ReAct（一级分支，非降级兜底）。
-        # 仅真实 LLM 下生效——mock 模式仍走图，保持测试/demo 稳定。
+        # Deep/Agentic 模式：复合多步任务走 graph 内部的 compound 编排，
+        # 不再单独分流到第二执行引擎。ReAct 仅保留为图失败时的兜底。
         if settings.enable_deep_mode and not settings.mock_mode and is_compound_task(message):
+            if self.graph is not None:
+                try:
+                    return self.graph.invoke_compound(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
+                except Exception:
+                    logger.debug("Compound graph invoke failed; falling back to ReActLoop", exc_info=True)
             return self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
         if self.graph is not None:
             try:
@@ -900,8 +912,14 @@ class AudioVisualAgent:
 
     def stream_chat(self, user_id: str, message: str, history: list[dict[str, Any]] | None = None):
         asset_id = self._resolve_asset_context(user_id, message)
-        # 复合任务走 Deep 模式（ReAct 整合后一次性发 final）；单意图走图（SSE 流式）。
+        # 复合任务走 compound graph；单意图走常规图；ReAct 仅兜底。
         if settings.enable_deep_mode and not settings.mock_mode and is_compound_task(message):
+            if self.graph is not None:
+                try:
+                    yield from self.graph.stream_compound(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
+                    return
+                except Exception:
+                    logger.debug("Compound graph stream failed; falling back to ReActLoop", exc_info=True)
             answer = self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
             from app.models import StreamEvent
             yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))

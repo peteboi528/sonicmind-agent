@@ -203,11 +203,40 @@ class MockLLM:
                                 "reasoning": "mock：寒暄"}, ensure_ascii=False)
         else:
             intent, use_vector = "recommend", True
+        search_query, language = self._mock_search_query(prompt, intent)
         return _json.dumps({
             "intent": intent, "entities": [], "use_local": True,
-            "use_vector": use_vector, "use_web": True, "target_count": target,
+            "use_vector": use_vector, "use_web": True,
+            "search_query": search_query, "language": language,
+            "target_count": target,
             "reasoning": f"mock：{intent} 意图",
         }, ensure_ascii=False)
+
+    @staticmethod
+    def _mock_search_query(prompt: str, intent: str) -> tuple[str, str]:
+        """Mock 版查询改写：粗粒度把否定转正向 + 抓场景词，复刻真实 LLM 的 search_query。
+
+        不追求精度（mock 仅供 demo/测试），但要体现"否定不原样发搜索、保留场景"的形状：
+        - 含"不要中文/英文歌" → 正向词加"英文 欧美"，language=en
+        - 含"不要英文/中文歌" → language=zh
+        - 抓常见场景/情绪词（深夜/学习/跑步/放松…）拼进正向词
+        """
+        if intent in {"taste", "chat", "import"}:
+            return "", ""
+        lowered = prompt.lower()
+        language = ""
+        positives: list[str] = []
+        if ("不要中文" in prompt) or ("不要华语" in prompt) or ("英文" in prompt and "不要英文" not in prompt):
+            language = "en"
+            positives.append("英文 欧美")
+        elif ("不要英文" in prompt) or ("要中文" in prompt) or ("中文" in prompt and "不要中文" not in prompt):
+            language = "zh"
+            positives.append("华语")
+        scene_words = ["深夜", "学习", "跑步", "运动", "放松", "睡前", "通勤", "工作", "chill", "安静"]
+        for w in scene_words:
+            if w in lowered or w in prompt:
+                positives.append(w)
+        return " ".join(dict.fromkeys(positives)).strip(), language
 
     def _reason(self, prompt: str) -> str:
         template = random.choice(REASON_TEMPLATES)

@@ -249,6 +249,11 @@ class RetrievalPlan(BaseModel):
     genre_filter: list[str] = Field(default_factory=list)    # 规则填充
     mood_filter: list[str] = Field(default_factory=list)     # 规则填充
     scenario_filter: list[str] = Field(default_factory=list) # 规则填充
+    # LLM 合成的自包含正向检索词：把对话历史 + 本轮约束（含"不要中文"这类否定）
+    # 改写成可直接喂搜索 API 的正向 query（否定尽量转正向，如"不要中文"→"英文 欧美"）。
+    # 为空时检索层降级回 _extract_search_query 关键词切词路径（mock/无 key 不破）。
+    search_query: str = ""
+    language_filter: str = ""      # 语言偏好 zh/en/ja/ko/...，非空时对候选做安全后过滤
 
 
 class AgentPlan(BaseModel):

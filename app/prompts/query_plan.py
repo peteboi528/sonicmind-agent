@@ -14,7 +14,7 @@ v3 升级（对齐 SoulTuner 的 UNIFIED_PLANNER 精度）：
 
 from app.intents import intent_prompt_block
 
-QUERY_PLAN_VERSION = "v3-2026-06-11"
+QUERY_PLAN_VERSION = "v4-2026-06-15"
 
 QUERY_PLAN_SYSTEM = f"""\
 你是音乐推荐 Agent 的意图规划器。阅读用户输入（含可选的对话历史），输出一个 JSON 规划对象。
@@ -32,6 +32,20 @@ QUERY_PLAN_SYSTEM = f"""\
 - 中英文都写：如 "周杰伦" → entities 同时包含 "周杰伦" 和 "Jay Chou"（如果知道的话）。
 - 不要编造实体——只从用户输入中提取明确出现的。
 
+## ⭐ search_query：自包含的正向检索词（核心）
+把【对话历史 + 本轮输入】合成一句**可直接喂给音乐平台搜索的正向关键词**。这是搜索质量的关键，务必认真生成：
+- **融合多轮上下文**：本轮是"不要中文歌曲""换英文的""再快一点"等追问时，必须把上一轮的场景/情绪（如"深夜""跑步"）一起带进来，不能只看本轮孤立这句。
+- **否定尽量转正向**：把"不要 X"改写成"要什么"。
+  - "不要中文歌曲" → search_query 写"英文歌 欧美"，language 写 "en"
+  - "不要吵的" → search_query 写"安静 舒缓 轻音乐"
+  - "别推抖音神曲" → search_query 写正经曲风词（无法转正向的留给 hard_exclude 概念，但本字段只写正向）
+- **纯实体查询**：直接用实体名，如"周杰伦"。
+- 只写检索词，不要整句，不要"推荐""帮我"这类功能词。情绪/场景用具体词（深夜→"深夜 安静 慵懒"）。
+- chat/taste 等不需要检索的意图，search_query 留空字符串。
+
+## language：语言偏好
+用户明确表达语言倾向时填（"不要中文"→"en"，"要中文的"→"zh"，"日语歌"→"ja"，"韩语"→"ko"），没表达就留空字符串。
+
 ## 确定性路由规则（LLM 必须遵守）
 1. 纯情绪/氛围描述（无实体）→ intent=recommend, use_web=true, use_vector=true
    例："心情不好""来点放松的""深夜一个人""chill 一下"
@@ -48,9 +62,9 @@ QUERY_PLAN_SYSTEM = f"""\
 10. 明确要MV/现场/演唱会/视频/Live → intent=video（直接搜B站/YouTube，不走网易云）
 
 ## 多轮对话规则
-- 若提供了【最近对话】，且本轮输入是"再来几首""换一批""还要""类似这个"等延续指令：
-  沿用上文最近提到的歌手/歌名作为 entities，保持与上一轮一致的 intent。
-- 用户说"换成/改成"追问时，继承上一轮未被否定的实体，只覆盖冲突维度。
+- 若提供了【最近对话】，且本轮输入是"再来几首""换一批""还要""类似这个""不要X""换成Y"等延续/修正指令：
+  沿用上文最近提到的歌手/歌名作为 entities，保持与上一轮一致的 intent，**并把上一轮的场景/情绪合进 search_query**。
+- 用户说"换成/改成/不要"追问时，继承上一轮未被否定的维度，只覆盖冲突维度。
 - **不可降级检索策略**：如果上一轮是 recommend + use_web=true，追问时不可关闭 use_web。
 
 ## 输出约束
@@ -61,52 +75,48 @@ QUERY_PLAN_SYSTEM = f"""\
 ## few-shot 示例
 
 用户：给我推荐几首适合跑步的歌
-{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":null,"reasoning":"按场景推荐，需语义+联网"}}
+{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"跑步 动感 节奏","language":"","target_count":null,"reasoning":"按场景推荐，需语义+联网"}}
 
 用户：找一些 Beyond 的歌
-{{"intent":"search","entities":["Beyond"],"use_local":true,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"搜歌手，实体匹配+联网"}}
+{{"intent":"search","entities":["Beyond"],"use_local":true,"use_vector":false,"use_web":true,"search_query":"Beyond","language":"","target_count":null,"reasoning":"搜歌手，实体匹配+联网"}}
 
 用户：帮我做 20 首 chill 歌单
-{{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":20,"reasoning":"生成歌单，20首候选"}}
+{{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"chill 放松 轻松","language":"","target_count":20,"reasoning":"生成歌单，20首候选"}}
 
 用户：分析下我的音乐品味
-{{"intent":"taste","entities":[],"use_local":false,"use_vector":false,"use_web":false,"target_count":null,"reasoning":"只读记忆画像"}}
-
-用户：做一个从清晨到深夜的音乐旅程
-{{"intent":"journey","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":null,"reasoning":"多阶段情绪曲线编排"}}
+{{"intent":"taste","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","language":"","target_count":null,"reasoning":"只读记忆画像"}}
 
 用户：你好
-{{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"target_count":null,"reasoning":"普通寒暄"}}
+{{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","language":"","target_count":null,"reasoning":"普通寒暄"}}
 
 用户：asen牛逼吗
-{{"intent":"discuss","entities":["Asen"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"讨论歌手，联网搜曲目"}}
+{{"intent":"discuss","entities":["Asen"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"Asen","language":"","target_count":null,"reasoning":"讨论歌手，联网搜曲目"}}
 
-用户：Blonde 这张专辑的创作背景是什么
-{{"intent":"discuss","entities":["Blonde","Frank Ocean"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"讨论专辑，联网搜曲目"}}
+【最近对话】
+user: 推荐几首适合深夜的歌
+assistant: 为你推荐了 7 首深夜歌曲
+【本轮输入】
+不要中文歌曲
+{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"深夜 英文歌 欧美 安静","language":"en","target_count":null,"reasoning":"延续深夜场景，转英文正向查询"}}
 
-用户：推荐一些适合学习的音乐
-{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":null,"reasoning":"学习场景，需语义匹配"}}
-
-用户：Drake 和 The Weeknd 谁更牛
-{{"intent":"discuss","entities":["Drake","The Weeknd"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"对比讨论两位歌手"}}
+【最近对话】
+user: 推荐几首适合学习的音乐
+assistant: 推荐了几首学习音乐
+【本轮输入】
+太吵了，要安静点的
+{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"学习 安静 轻音乐 纯音乐","language":"","target_count":null,"reasoning":"延续学习场景，转安静正向查询"}}
 
 用户：来个 20 首的运动歌单
-{{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":20,"reasoning":"运动歌单，20首"}}
-
-用户：深夜一个人开车，高速公路空旷无人
-{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"target_count":null,"reasoning":"场景+画面感，语义+联网"}}
+{{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"运动 动感 节奏","language":"","target_count":20,"reasoning":"运动歌单，20首"}}
 
 用户：我想听 keshi 的歌
-{{"intent":"recommend","entities":["keshi"],"use_local":true,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"歌手推荐，实体+联网"}}
+{{"intent":"recommend","entities":["keshi"],"use_local":true,"use_vector":false,"use_web":true,"search_query":"keshi","language":"","target_count":null,"reasoning":"歌手推荐，实体+联网"}}
 
 用户：帮我找 The Weeknd 的 MV
-{{"intent":"video","entities":["The Weeknd"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"找MV，搜视频平台"}}
+{{"intent":"video","entities":["The Weeknd"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"The Weeknd MV","language":"","target_count":null,"reasoning":"找MV，搜视频平台"}}
 
 用户：介绍一下 NewJeans 这个团体
-{{"intent":"artist_info","entities":["NewJeans"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"了解歌手背景，用搜索引擎"}}
+{{"intent":"artist_info","entities":["NewJeans"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"NewJeans","language":"","target_count":null,"reasoning":"了解歌手背景，用搜索引擎"}}
 
-用户：有没有 Adele 的现场演唱视频
-{{"intent":"video","entities":["Adele"],"use_local":false,"use_vector":false,"use_web":true,"target_count":null,"reasoning":"现场视频，搜B站/YouTube"}}
-
-只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, target_count, reasoning。
+只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, search_query, language, target_count, reasoning。
 """

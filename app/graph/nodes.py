@@ -140,6 +140,10 @@ def _apply_dialogue_continuation(
         genre_filter=rp.genre_filter or dialogue_state.get("genre_tags") or [],
         mood_filter=rp.mood_filter or dialogue_state.get("mood_tags") or [],
         scenario_filter=rp.scenario_filter or dialogue_state.get("scenario_tags") or [],
+        # search_query/language 由 LLM 在 query_plan 阶段已合并了多轮上下文，
+        # 程序化延续只兜底保留本轮 LLM 给的值（不回退覆盖，避免丢"转正向"结果）。
+        search_query=rp.search_query,
+        language_filter=rp.language_filter,
     )
     new_plan = plan.model_copy(update={
         "intent": intent,
@@ -239,16 +243,35 @@ def _query_with_entities(query: str, plan: AgentPlan) -> str:
     实体是从上一轮 DialogueState 继承到 retrieval_plan 的；不拼进 query 的话
     recommend/search/playlist 工具拿不到实体，会走情绪/场景路由搜空。
 
-    实体已出现在 query 中则不重复拼接（避免 "找 The Weeknd The Weeknd"）。
+    P1 查询改写：plan 带 LLM 合成的 search_query 时，以它为基底（已融合多轮
+    上下文 + 否定转正向），而非原始 query——否则"不要中文歌曲"会原样发给搜索层。
+    实体已出现在基底中则不重复拼接（避免 "找 The Weeknd The Weeknd"）。
     """
+    base = (getattr(plan.retrieval_plan, "search_query", "") or "").strip() or query
     entities = plan.retrieval_plan.entities
     if not entities:
-        return query
-    lowered = query.lower()
+        return base
+    lowered = base.lower()
     extra = [e for e in entities if e and e.lower() not in lowered]
     if not extra:
-        return query
-    return " ".join([query, *extra]).strip()
+        return base
+    return " ".join([base, *extra]).strip()
+
+
+def _apply_language_filter(tracks: list[Any], language_filter: str, target: int) -> list[Any]:
+    """按语言偏好对候选做安全后过滤（detect_language 仅判 zh/en）。
+
+    安全原则：仅在 zh/en 两种可判定语言上过滤；过滤后candidate 太少（<目标一半）
+    时回退不过滤，避免把结果删空——语言偏好是"倾向"不是"硬删到空"。
+    LLM 已把语言需求转进 search_query 做正向检索，这里只是兜底纠偏。
+    """
+    if language_filter not in {"zh", "en"} or not tracks:
+        return tracks
+    from app.recommend.rerank import detect_language
+    kept = [t for t in tracks if detect_language(t) == language_filter]
+    if len(kept) < max(1, target // 2):
+        return tracks  # 过滤过狠，宁可不过滤也不删空
+    return kept
 
 
 def _filter_excluded(tracks: list[Any], excluded: list[dict[str, str]]) -> list[Any]:
@@ -293,10 +316,13 @@ def _run_tool(
     events: list[StreamEvent],
 ) -> None:
     events.append(StreamEvent(type="tool_start", content=f"调用 {tool}", payload={"tool": tool}))
-    # 从原始 query 中提取核心搜索词（去掉中文功能词），用于搜索 API 和相关性过滤。
-    # 不做这步的话 "帮我生成一些drake的歌" 直接发到网易云 API，搜不到结果。
+    # P1 查询改写：优先用 LLM 在 query_plan 阶段合成的自包含正向 search_query
+    # （已融合多轮上下文 + 把"不要中文"这类否定转成正向词）。为空才降级回
+    # _extract_search_query 关键词切词路径（mock/无 key/旧 plan 不破）。
     from app.agent import _extract_search_query as _extract_core
-    search_core = _extract_core(query) or query
+    llm_search_query = (getattr(plan.retrieval_plan, "search_query", "") or "").strip()
+    search_core = llm_search_query or _extract_core(query) or query
+    language_filter = (getattr(plan.retrieval_plan, "language_filter", "") or "").strip().lower()
     # 延续指令时从 plan 中提取上一轮已展示的曲目（用于去重）
     excluded_tracks = getattr(plan, "_excluded_tracks", None) or []
     if tool == "web_music_search":
@@ -306,6 +332,7 @@ def _run_tool(
         # 去除上一轮已展示的歌曲
         if excluded_tracks:
             tracks = _filter_excluded(tracks, excluded_tracks)
+        tracks = _apply_language_filter(tracks, language_filter, plan.target_count or top_k)
         for track in tracks:
             if hasattr(agent, "library"):
                 agent.library.upsert_external(track)
@@ -646,6 +673,8 @@ def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -
     target = int(target) if isinstance(target, (int, float)) and target else _infer_count(query)
 
     tags = extract_tags(query)
+    search_query = (data.get("search_query") or "").strip()
+    language_filter = (data.get("language") or "").strip().lower()
     retrieval = RetrievalPlan(
         use_local=use_local,
         use_vector=use_vector,
@@ -654,6 +683,8 @@ def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -
         genre_filter=tags["genre"],
         mood_filter=tags["mood"],
         scenario_filter=tags["scenario"],
+        search_query=search_query,
+        language_filter=language_filter,
     )
     return AgentPlan(
         intent=intent,

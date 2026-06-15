@@ -44,6 +44,12 @@ class Settings:
         # Deep/Agentic 模式：复合多步任务走真迭代 ReAct（一级分支，非降级兜底）。
         # 仅真实 LLM（非 mock）下生效；mock 模式仍走图，保持测试/demo 稳定。
         self.enable_deep_mode: bool = os.getenv("ENABLE_DEEP_MODE", "true").lower() == "true"
+        # P1-G 记忆升级：语义召回 + LLM 偏好抽取兜底 + 巩固画像。
+        # 仅真实 LLM 下做 LLM 抽取/巩固；语义召回随 embeddings 开关自动降级。
+        self.enable_semantic_memory: bool = os.getenv("ENABLE_SEMANTIC_MEMORY", "true").lower() == "true"
+        self.memory_consolidation_interval: int = int(os.getenv("MEMORY_CONSOLIDATION_INTERVAL", "5"))
+        self.memory_recall_top_k: int = int(os.getenv("MEMORY_RECALL_TOP_K", "3"))
+        self.episodic_memory_cap: int = int(os.getenv("EPISODIC_MEMORY_CAP", "120"))
 
         # ---- Bot 适配器配置（留空禁用） ----
         self.feishu_app_id: str = os.getenv("FEISHU_APP_ID", "")

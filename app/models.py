@@ -92,6 +92,22 @@ class MemoryEntry(BaseModel):
     source: str = "user_event"
 
 
+class EpisodicMemory(BaseModel):
+    """情景记忆：某一次具体交互的快照（"3 周前说过想要慵懒爵士"）。
+
+    与 structured_preferences（语义记忆：稳定口味）区分：
+    - kind="episodic"：一次性事件，带 embedding 供跨会语义召回。
+    - embedding 为空时（无 sentence-transformers）退化为不可语义召回，
+      但仍按时间衰减作为近期事件保留，零依赖路径不破坏。
+    """
+
+    text: str
+    kind: str = "episodic"  # episodic | semantic
+    embedding: list[float] = Field(default_factory=list)
+    source: str = "turn"
+    timestamp: str = Field(default_factory=utc_now_iso)
+
+
 class ListeningEvent(BaseModel):
     asset_id: str
     timestamp: str = Field(default_factory=utc_now_iso)
@@ -121,6 +137,10 @@ class UserMemory(BaseModel):
     dislikes: list[str] = Field(default_factory=list)
     exclusion_rules: list[str] = Field(default_factory=list)  # 用户明确排除的风格/类型，如 ["抖音热歌", "中文孟菲斯说唱"]
     taste_profile: TasteProfile | None = None
+    # P1-G 记忆升级：情景记忆（跨会语义召回）+ 巩固画像（一句话稳定口味）。
+    episodic_memory: list[EpisodicMemory] = Field(default_factory=list)
+    consolidated_profile: str = ""  # 每 N 轮由 LLM 把零散偏好巩固成一句话画像
+    turns_since_consolidation: int = 0
     daily_rec_last_generated: str | None = None
     updated_at: str = Field(default_factory=utc_now_iso)
 

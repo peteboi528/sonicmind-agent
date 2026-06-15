@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
 import math
 import re
 from datetime import UTC, datetime
 from typing import Any
 
+from app.config import settings
+from app.llm.structured import extract_json_dict
 from app.models import (
     AgentGoal,
     Asset,
     DialogueState,
+    EpisodicMemory,
     ListeningEvent,
     MemoryEntry,
     MemoryUpdateRequest,
@@ -18,8 +22,17 @@ from app.models import (
     UserMemory,
     utc_now_iso,
 )
+from app.prompts.memory import (
+    CONSOLIDATION_SYSTEM,
+    CONSOLIDATION_USER,
+    PREFERENCE_EXTRACTION_SYSTEM,
+    PREFERENCE_EXTRACTION_USER,
+)
 from app.recommend.engine import compute_taste_profile
+from app.retrieval import embeddings
 from app.storage import JsonStore
+
+logger = logging.getLogger(__name__)
 
 PREFERENCE_PATTERNS = [
     re.compile(r"(?:i\s+)?(?:like|love|prefer)\s+(.+)", re.IGNORECASE),
@@ -61,8 +74,11 @@ TECHNICAL_ACTIONS = {
 
 
 class MemoryManager:
-    def __init__(self, store: JsonStore) -> None:
+    def __init__(self, store: JsonStore, llm: Any | None = None) -> None:
         self.store = store
+        # P1-G：可选 LLM，由 agent 在两者都构造后注入（self.memory.llm = self.llm）。
+        # 为 None 或 mock 模式时，LLM 抽取/巩固自动跳过，正则+TF 路径不变。
+        self.llm = llm
 
     def get_memory(self, user_id: str) -> UserMemory:
         memory = self.store.read_model("memory", user_id, UserMemory)
@@ -271,6 +287,12 @@ class MemoryManager:
                     memory.preferences.append(explicit)
                     changed = True
 
+            # P1-G：正则未命中绕口表述时，用 LLM 兜底抽结构化偏好。
+            if not explicit:
+                for pref in self._llm_extract_preferences(query):
+                    if self._upsert_entry(memory, pref, "llm_extract"):
+                        changed = True
+
             # 从检索结果中提取歌手/歌名作为兴趣信号（即使没有明确说"喜欢"）
             entities_from_results = _extract_entities_from_results(results)
             for entity in entities_from_results:
@@ -288,10 +310,142 @@ class MemoryManager:
                 if self._upsert_entry(memory, item, "inferred_from_result"):
                     changed = True
 
+            # P1-G：把本轮 query 作为情景记忆 embed 入库（跨会语义召回的素材）。
+            if self._record_episode(memory, query):
+                changed = True
+
+            # P1-G：每 N 轮把零散偏好巩固成一句话画像。
+            memory.turns_since_consolidation += 1
+            if self._maybe_consolidate(memory):
+                changed = True
+
             if changed:
                 memory.updated_at = utc_now_iso()
                 self.store.write_model("memory", user_id, memory)
             return changed
+
+    # ── P1-G 记忆升级：LLM 抽取 / 语义召回 / 巩固 ─────────────────────
+    def _llm_ready(self) -> bool:
+        """仅当注入了真实 LLM（非 mock、非空）时做 LLM 抽取/巩固。"""
+        return (
+            settings.enable_semantic_memory
+            and self.llm is not None
+            and not settings.mock_mode
+        )
+
+    def _llm_extract_preferences(self, query: str) -> list[str]:
+        """正则未命中时用 LLM 兜底抽结构化偏好；失败/不可用返回 []。"""
+        if not self._llm_ready() or len((query or "").strip()) < 4:
+            return []
+        prompt = PREFERENCE_EXTRACTION_USER.format(utterance=query.strip())
+        try:
+            raw = self.llm.generate(prompt, system=PREFERENCE_EXTRACTION_SYSTEM, temperature=0.0)
+            data = extract_json_dict(raw)
+            prefs = data.get("preferences") if isinstance(data, dict) else None
+            if isinstance(prefs, list):
+                out: list[str] = []
+                for p in prefs:
+                    text = cleanup(str(p)) if p is not None else ""
+                    if 2 <= len(text) <= 40:
+                        out.append(text)
+                return out[:3]
+        except Exception:
+            logger.debug("LLM 偏好抽取失败，跳过", exc_info=True)
+        return []
+
+    def _record_episode(self, memory: UserMemory, query: str, source: str = "turn") -> bool:
+        """把本轮交互作为情景记忆入库；可用时带 embedding 供跨会语义召回。
+
+        去抖：与最近一条情景记忆文本相同则不重复写。超出 cap 时丢弃最旧。
+        """
+        text = (query or "").strip()
+        if not settings.enable_semantic_memory or len(text) < 4:
+            return False
+        if memory.episodic_memory and memory.episodic_memory[-1].text == text:
+            return False
+        vector: list[float] = []
+        if embeddings.embeddings_available():
+            try:
+                encoded = embeddings.encode([text])
+                if encoded:
+                    vector = encoded[0]
+            except Exception:
+                logger.debug("情景记忆 embed 失败，降级为无向量", exc_info=True)
+        memory.episodic_memory.append(
+            EpisodicMemory(text=text, kind="episodic", embedding=vector, source=source)
+        )
+        cap = max(10, settings.episodic_memory_cap)
+        if len(memory.episodic_memory) > cap:
+            memory.episodic_memory = memory.episodic_memory[-cap:]
+        return True
+
+    def recall_episodes(self, user_id: str, query: str, top_k: int | None = None) -> list[str]:
+        """跨会语义召回：返回与 query 最相关的历史情景记忆文本。
+
+        embeddings 可用时按 cosine 排序；不可用时退化为按时间取最近几条
+        （仍保留"记得近期说过什么"的能力，零依赖路径不破坏）。
+        """
+        if not settings.enable_semantic_memory:
+            return []
+        top_k = top_k or settings.memory_recall_top_k
+        memory = self.get_memory(user_id)
+        episodes = memory.episodic_memory
+        if not episodes:
+            return []
+        query_vec: list[float] | None = None
+        if embeddings.embeddings_available():
+            try:
+                encoded = embeddings.encode([query])
+                query_vec = encoded[0] if encoded else None
+            except Exception:
+                query_vec = None
+        if query_vec is not None:
+            scored = [
+                (ep.text, embeddings.cosine_normalized(query_vec, ep.embedding))
+                for ep in episodes
+                if ep.embedding
+            ]
+            scored = [s for s in scored if s[1] > 0.35]  # 弱相关过滤，避免噪声召回
+            scored.sort(key=lambda x: x[1], reverse=True)
+            recalled = [text for text, _ in scored[:top_k]]
+            if recalled:
+                return recalled
+        # 降级：取最近 top_k 条去重文本
+        seen: set[str] = set()
+        recent: list[str] = []
+        for ep in reversed(episodes):
+            if ep.text not in seen:
+                seen.add(ep.text)
+                recent.append(ep.text)
+            if len(recent) >= top_k:
+                break
+        return recent
+
+    def _maybe_consolidate(self, memory: UserMemory) -> bool:
+        """每 N 轮把零散偏好巩固成一句话画像；仅真实 LLM 下触发。"""
+        if not self._llm_ready():
+            return False
+        interval = max(1, settings.memory_consolidation_interval)
+        if memory.turns_since_consolidation < interval:
+            return False
+        memory.turns_since_consolidation = 0
+        scored = score_entries(memory.structured_preferences)
+        if not scored:
+            return False
+        signals = "\n".join(f"- {entry.text}（权重 {weight:.1f}）" for entry, weight in scored[:10])
+        prompt = CONSOLIDATION_USER.format(
+            existing=memory.consolidated_profile or "（无）", signals=signals
+        )
+        try:
+            raw = self.llm.generate(prompt, system=CONSOLIDATION_SYSTEM, temperature=0.3)
+            data = extract_json_dict(raw)
+            profile = data.get("profile") if isinstance(data, dict) else None
+            if isinstance(profile, str) and profile.strip():
+                memory.consolidated_profile = profile.strip()[:120]
+                return True
+        except Exception:
+            logger.debug("记忆巩固失败，跳过", exc_info=True)
+        return False
 
     def get_active_goal(self, user_id: str) -> AgentGoal | None:
         goal = self.store.read_model("goals", user_id, AgentGoal)

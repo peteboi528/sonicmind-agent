@@ -42,18 +42,34 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     memory_query = agent.memory.weighted_query(memory)
     dialogue = agent.memory.get_dialogue_state(state["user_id"])
 
+    # P1-G：跨会语义召回——把与本轮 query 相关的历史情景记忆 + 巩固画像并入记忆上下文，
+    # 让"你三周前说过想要慵懒爵士"这类信号也能影响检索与作答。
+    recall_lines: list[str] = []
+    try:
+        recalled = agent.memory.recall_episodes(state["user_id"], state["query"])
+    except Exception:
+        recalled = []
+        logger.debug("load_context: 语义召回失败，跳过", exc_info=True)
+    profile = (memory.consolidated_profile or "").strip()
+    memory_parts = [p for p in [memory_query, profile, *recalled] if p]
+    enriched_memory = " ".join(memory_parts)
+    if profile:
+        recall_lines.append(f"巩固画像：{profile}")
+    if recalled:
+        recall_lines.append(f"语义召回 {len(recalled)} 条相关历史偏好。")
+
     # GSSC：按优先级把用户输入/记忆/历史压进 token 预算，产出追踪报告。
     history = state.get("history") or []
     history_text = "\n".join(f"{m.get('role', '')}: {m.get('content', '')}" for m in history)
     sources = [
         ContextSource(name="user_query", content=state["query"], priority=0, min_tokens=200),
-        ContextSource(name="memory", content=memory_query, priority=1, min_tokens=80),
+        ContextSource(name="memory", content=enriched_memory, priority=1, min_tokens=80),
         ContextSource(name="history", content=history_text, priority=2, min_tokens=40),
     ]
     budgeted, report = ContextBudgetManager(total_budget=2000).allocate(sources)
 
     context = {
-        "memory_query": budgeted.get("memory", memory_query),
+        "memory_query": budgeted.get("memory", enriched_memory),
         "history_text": budgeted.get("history", ""),
         "active_goal": goal.model_dump(mode="json") if goal else None,
         "resource_count": len(agent.list_resource_tracks(50)),
@@ -64,7 +80,7 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         **state,
         "context": context,
         "results": [],
-        "trace": ["[load_context] 载入记忆、目标和资源库摘要。", *report.as_lines()],
+        "trace": ["[load_context] 载入记忆、目标和资源库摘要。", *recall_lines, *report.as_lines()],
         "events": [StreamEvent(type="plan", content="正在读取记忆和资源库状态。")],
     }
 

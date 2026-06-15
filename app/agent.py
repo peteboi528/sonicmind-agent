@@ -78,6 +78,8 @@ class AudioVisualAgent:
         self.similarity = AssetSimilarity(self.store)
         self.library = ResourceLibrary(settings.resource_library_path)
         self.llm: LLMProvider = build_llm()
+        # P1-G：把 LLM 注入记忆层，启用 LLM 偏好抽取兜底 + 巩固画像（mock 下自动跳过）。
+        self.memory.llm = self.llm
         self.source: ExternalSource = _build_source()
         self.engine = RecommendEngine()
         self.daily = DailyRecommender(self.engine, self.source, self.llm)

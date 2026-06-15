@@ -86,6 +86,32 @@ class TestShownTracksAccumulation:
         saved = agent.memory.get_dialogue_state("u").shown_tracks
         assert all(s.get("title") != "Old A" for s in saved)
 
+    def test_accumulate_even_with_inherited_entities(self, tmp_path):
+        """Bug 回归（实测第三轮重复第一轮的歌）：延续指令会从上一轮"继承"实体，
+        继承后 rp.entities 非空。若累积条件写成 `is_continuation and not rp.entities`，
+        会把"继承实体"误判成话题切换而重置，丢掉前几轮记录 → 第三轮排除集缺第一轮
+        → 第一轮的歌被捞回来。累积必须只看 is_continuation，与实体无关。"""
+        from app.graph.nodes import _persist_dialogue_state
+        from app.models import RetrievalPlan
+        from app.agent import AudioVisualAgent
+        from app.storage import JsonStore
+
+        agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+        # 模拟第二轮"多来几首"：延续 + 继承了实体 The Weeknd（非空）
+        prev_shown = [{"title": "Blinding Lights", "source_id": "1"}]  # 第一轮展示的
+        plan = AgentPlan(
+            intent="recommend", online_required=True,
+            retrieval_plan=RetrievalPlan(entities=["The Weeknd"], use_web=True),  # 继承来的，非空
+        )
+        state = {
+            "user_id": "u", "query": "多来几首", "plan": plan, "results": [], "trace": [],
+            "events": [], "context": {"dialogue_state": {"shown_tracks": prev_shown, "entities": ["The Weeknd"]}},
+        }
+        _persist_dialogue_state(agent, state)
+        saved = agent.memory.get_dialogue_state("u").shown_tracks
+        # 第一轮的 Blinding Lights 必须保留在累积记录里（不能被继承实体触发的重置丢掉）
+        assert any(s.get("title") == "Blinding Lights" for s in saved)
+
 
 class TestPersistence:
     def test_default_state_when_empty(self, memory):

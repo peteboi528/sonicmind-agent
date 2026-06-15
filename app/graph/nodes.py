@@ -734,10 +734,14 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
     不会错误复用过期实体）。其余意图覆盖保存最新一轮上下文。
     同时记录本轮展示给用户的曲目（shown_tracks），供下一轮去重。
 
-    shown_tracks 的累积规则：本轮是"延续同一话题"（is_continuation 且本轮没抽到
-    新实体）时，把本轮 shown 追加到前轮累积记录上，去重后封顶保存——这样第 N 轮
-    "不要重复"能排除整个会话里已展示过的曲目，而不只是上一轮的。话题切换（新实体/
-    非延续）则重置为本轮 shown，避免跨话题把无关旧歌长期挂在排除集里。
+    shown_tracks 的累积规则：本轮是延续指令时，把本轮 shown 追加到前轮累积记录上，
+    去重后封顶保存——这样第 N 轮"不要重复"能排除整个会话里已展示过的曲目，而不只是
+    上一轮的。非延续（全新话题）则重置为本轮 shown。
+
+    关键：累积只看 is_continuation，不看 rp.entities。因为延续指令会从上一轮"继承"
+    实体（"多来几首"继承 The Weeknd），继承后 rp.entities 非空——若用 `not rp.entities`
+    做条件，会把"继承实体"误判成"话题切换"而重置，导致前几轮的展示记录被丢、
+    第三轮去重又把第一轮的歌捞回来。
     """
     plan = state["plan"]
     user_id = state["user_id"]
@@ -756,10 +760,10 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         }
         for t in listed
     ]
-    # 跨轮累积：延续同一话题时把前轮记录并入，否则视为新话题重置。
+    # 跨轮累积：延续指令时并入前轮记录（继承实体也算同一话题），否则视为新话题重置。
     context = state.get("context") or {}
     prev_shown = (context.get("dialogue_state") or {}).get("shown_tracks") or []
-    if is_continuation(state["query"]) and not rp.entities:
+    if is_continuation(state["query"]):
         merged_shown = _merge_excluded_tracks(prev_shown, shown)
     else:
         merged_shown = shown

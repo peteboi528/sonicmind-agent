@@ -26,8 +26,13 @@ from app.answer import (
 from app.config import settings
 from app.context import ContextBudgetManager, ContextSource
 from app.graph.tag_rules import extract_tags
-from app.intents import get_intent, is_continuation, is_valid_intent, match_intent_by_keywords
-from app.llm.observability import capture_llm_stats, empty_runtime_metrics, format_runtime_metrics, merge_runtime_metrics
+from app.intents import get_intent, is_continuation, match_intent_by_keywords
+from app.llm.observability import (
+    capture_llm_stats,
+    empty_runtime_metrics,
+    format_runtime_metrics,
+    merge_runtime_metrics,
+)
 from app.llm.routing import select_llm
 from app.llm.structured import extract_json_dict
 from app.models import AgentAnswer, AgentPlan, QueryPlanPayload, RetrievalPlan, StreamEvent

@@ -41,9 +41,9 @@ class TestShownTracksAccumulation:
     的排除集只有第二轮那几首，第一轮展示过的又会漏回来。"""
 
     def test_accumulate_on_continuation(self, tmp_path):
+        from app.agent import AudioVisualAgent
         from app.graph.nodes import _persist_dialogue_state
         from app.models import RetrievalPlan
-        from app.agent import AudioVisualAgent
         from app.storage import JsonStore
 
         agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
@@ -66,9 +66,9 @@ class TestShownTracksAccumulation:
         assert any(s.get("title") == "Old B" for s in saved)
 
     def test_reset_on_topic_switch(self, tmp_path):
+        from app.agent import AudioVisualAgent
         from app.graph.nodes import _persist_dialogue_state
         from app.models import RetrievalPlan
-        from app.agent import AudioVisualAgent
         from app.storage import JsonStore
 
         agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
@@ -91,9 +91,9 @@ class TestShownTracksAccumulation:
         继承后 rp.entities 非空。若累积条件写成 `is_continuation and not rp.entities`，
         会把"继承实体"误判成话题切换而重置，丢掉前几轮记录 → 第三轮排除集缺第一轮
         → 第一轮的歌被捞回来。累积必须只看 is_continuation，与实体无关。"""
+        from app.agent import AudioVisualAgent
         from app.graph.nodes import _persist_dialogue_state
         from app.models import RetrievalPlan
-        from app.agent import AudioVisualAgent
         from app.storage import JsonStore
 
         agent = AudioVisualAgent(JsonStore(tmp_path / "store"))

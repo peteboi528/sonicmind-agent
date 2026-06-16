@@ -95,7 +95,7 @@ class AgentGraphRunner:
         )
         cards = _merge_compound_cards(states)
         if cards:
-            setattr(compound_answer, "_compound_cards", cards)
+            compound_answer._compound_cards = cards
         return compound_answer
 
     def stream(
@@ -318,7 +318,7 @@ def _synthesize_compound_answer(
 
 def _format_compound_subtask_block(subtasks: list[Any], answers: list[AgentAnswer]) -> str:
     chunks: list[str] = []
-    for index, (task, answer) in enumerate(zip(subtasks, answers), start=1):
+    for index, (task, answer) in enumerate(zip(subtasks, answers, strict=False), start=1):
         summary = answer.answer.strip().splitlines()[0] if answer.answer.strip() else "本步没有拿到明确结果。"
         lines = [
             f"子任务 {index}（{task.intent}）",
@@ -333,7 +333,7 @@ def _format_compound_subtask_block(subtasks: list[Any], answers: list[AgentAnswe
 
 def _compose_compound_fallback(query: str, subtasks: list[Any], answers: list[AgentAnswer]) -> str:
     lines = [f"我把“{query}”拆成了 {len(subtasks)} 步来处理："]
-    for index, (task, answer) in enumerate(zip(subtasks, answers), start=1):
+    for index, (task, answer) in enumerate(zip(subtasks, answers, strict=False), start=1):
         lines.append(f"{index}. {task.query}")
         lines.append(answer.answer)
     return "\n".join(lines)

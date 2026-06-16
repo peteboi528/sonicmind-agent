@@ -3,11 +3,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from app.compound import _STRONG_CHAIN, is_compound_task
+from app.intents import match_intent_by_keywords
 from app.llm.observability import capture_llm_stats, empty_runtime_metrics
 from app.llm.routing import select_llm
 from app.llm.structured import extract_json_dict
-from app.compound import _STRONG_CHAIN, is_compound_task
-from app.intents import match_intent_by_keywords
 from app.prompts import DECOMPOSE_SYSTEM, DECOMPOSE_USER, DECOMPOSE_VERSION
 
 
@@ -120,8 +120,8 @@ def _split_by_action_markers(query: str) -> list[str]:
 
 
 def _clean_segment(segment: str) -> str:
-    cleaned = segment.strip(" ，,。；; \n\t")
+    cleaned = segment.strip(" ，,。；; \n\t")  # noqa: B005 - 刻意按字符集剥离空白/标点
     for token in _STRONG_CHAIN:
         if cleaned.lower().startswith(token.lower()):
-            cleaned = cleaned[len(token):].strip(" ，,。；; \n\t")
+            cleaned = cleaned[len(token):].strip(" ，,。；; \n\t")  # noqa: B005
     return cleaned

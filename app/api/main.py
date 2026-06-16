@@ -341,7 +341,7 @@ def discover_browse(request: BrowseRequest):
     result = tracks[:request.limit]
     # 两路皆空时给明确提示，前端据此显示"换一批试试"，而不是一张白板。
     if not result:
-        summary = f"该分类暂时没搜到结果，可能是接口限流，点「换一批」再试试。"
+        summary = "该分类暂时没搜到结果，可能是接口限流，点「换一批」再试试。"
     else:
         summary = f"为你找到 {len(result)} 首{request.value}相关歌曲"
     return {"tracks": result, "summary": summary}
@@ -414,6 +414,7 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
     延迟从"三者之和"降到"最慢者"。旧实现串行，歌手卡加载明显偏慢。
     """
     import asyncio
+
     from app.models import ExternalTrack
 
     info = {"name": request.artist, "image": "", "bio": "", "tags": [], "top_albums": [], "top_tracks": []}

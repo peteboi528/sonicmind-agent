@@ -47,6 +47,7 @@ const browseCategory = ref(null); // { type: "genre"|"mood", value: "摇滚", tr
 const browseSeed = ref(0);        // 换一批：递增 seed 让后端轮换关键词/歌单，取不同曲目
 const artistInfo = ref(null);     // { name, image, bio, tags, top_albums, top_tracks }
 const artistLoading = ref(false);
+const bioExpanded = ref(false);   // 歌手简介展开/收起（默认收起，CSS max-height 裁剪）
 
 const toast = ref("");
 const toastKey = ref(0);
@@ -114,10 +115,16 @@ async function search() {
   searchMsg.value = "";
   searchResults.value = null;
   artistInfo.value = null;
+  bioExpanded.value = false;
   artistLoading.value = true;
 
-  // Fire artist info lookup in parallel with search
-  const artistPromise = api.artistInfo(q).catch(() => null);
+  // 歌手信息独立 resolve：一到就渲染，不串在 search 后面（旧实现先 await search 再
+  // await artistPromise，歌手卡被搜索拖慢才出现）。
+  api.artistInfo(q).then((info) => {
+    if (info && info.name && (info.bio || info.top_tracks?.length || info.top_albums?.length)) {
+      artistInfo.value = info;
+    }
+  }).catch(() => { /* no artist info, fine */ }).finally(() => { artistLoading.value = false; });
 
   try {
     const data = await api.search(store.userId, q);
@@ -127,15 +134,23 @@ async function search() {
   } finally {
     loading.value = false;
   }
+}
 
-  // Resolve artist info
+// ── Play an album: 用 "歌手+专辑名" 搜真实曲目再播放（后端无专辑曲目接口，复用 search） ──
+async function playAlbum(album) {
+  if (!album?.name || !artistInfo.value?.name) return;
   try {
-    const info = await artistPromise;
-    if (info && info.name && (info.bio || info.top_tracks?.length || info.top_albums?.length)) {
-      artistInfo.value = info;
+    const data = await api.search(store.userId, `${artistInfo.value.name} ${album.name}`);
+    const cards = (data.external || []).slice(0, 12).map(toCard);
+    if (cards.length) {
+      store.playAll(cards);
+      showToast(`播放《${album.name}》：${cards.length} 首`);
+    } else {
+      showToast(`没找到《${album.name}》的可播放曲目`);
     }
-  } catch { /* no artist info, fine */ }
-  artistLoading.value = false;
+  } catch {
+    showToast("专辑加载失败，稍后重试");
+  }
 }
 
 // ── Browse genre / mood ──
@@ -203,6 +218,18 @@ onMounted(() => {
     </div>
     <div v-if="searchMsg" class="empty-hint">{{ searchMsg }}</div>
 
+    <!-- ── Artist Info Skeleton (loading) ── -->
+    <div v-if="artistLoading && !artistInfo" class="artist-card artist-skeleton">
+      <div class="artist-header">
+        <div class="skeleton-cover shimmer" style="width:88px;height:88px;border-radius:50%;flex-shrink:0"></div>
+        <div class="skeleton-lines" style="flex:1">
+          <div class="skeleton-line shimmer" style="width:40%;height:20px"></div>
+          <div class="skeleton-line shimmer" style="width:70%"></div>
+          <div class="skeleton-line shimmer" style="width:55%"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Artist Info Card (on search) ── -->
     <div v-if="artistInfo" class="artist-card stagger-item">
       <div class="artist-header">
@@ -221,7 +248,10 @@ onMounted(() => {
           <div v-if="artistInfo.tags?.length" class="artist-tags">
             <span v-for="tag in artistInfo.tags.slice(0, 5)" :key="tag" class="tag-chip">{{ tag }}</span>
           </div>
-          <div v-if="artistInfo.bio" class="artist-bio">{{ artistInfo.bio }}</div>
+          <div v-if="artistInfo.bio" class="artist-bio" :class="{ expanded: bioExpanded }">{{ artistInfo.bio }}</div>
+          <button v-if="artistInfo.bio" class="bio-toggle" @click="bioExpanded = !bioExpanded">
+            {{ bioExpanded ? '收起' : '展开' }}
+          </button>
         </div>
       </div>
 
@@ -229,7 +259,15 @@ onMounted(() => {
       <div v-if="artistInfo.top_albums?.length" class="artist-albums">
         <div class="artist-section-label">代表专辑</div>
         <div class="album-grid">
-          <div v-for="album in artistInfo.top_albums.slice(0, 6)" :key="album.name" class="album-item">
+          <div
+            v-for="album in artistInfo.top_albums.slice(0, 6)"
+            :key="album.name"
+            class="album-item"
+            role="button"
+            tabindex="0"
+            @click="playAlbum(album)"
+            @keydown.enter="playAlbum(album)"
+          >
             <div class="album-cover-wrap">
               <img v-if="album.image" class="album-cover" :src="album.image" alt="" loading="lazy" />
               <div v-else class="album-cover-ph">💿</div>
@@ -528,12 +566,21 @@ onMounted(() => {
   line-height: 1.6; max-height: 80px;
   overflow: hidden; position: relative;
 }
+.artist-bio.expanded { max-height: none; }
+.artist-bio.expanded::after { display: none; }
 .artist-bio::after {
   content: "";
   position: absolute; bottom: 0; left: 0; right: 0;
   height: 30px;
   background: linear-gradient(transparent, var(--bg-card));
 }
+.bio-toggle {
+  margin-top: 6px; padding: 2px 10px;
+  background: none; border: none;
+  color: var(--accent); font-size: 0.78rem;
+  font-weight: 600; cursor: pointer;
+}
+.bio-toggle:hover { text-decoration: underline; }
 .artist-section-label {
   font-family: var(--font-display);
   font-weight: 700; color: var(--text-sub);
@@ -548,7 +595,7 @@ onMounted(() => {
   grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
   gap: 14px;
 }
-.album-item { text-align: center; }
+.album-item { text-align: center; cursor: pointer; }
 .album-cover-wrap {
   width: 100%; aspect-ratio: 1; border-radius: var(--radius-sm);
   overflow: hidden; margin-bottom: 6px;

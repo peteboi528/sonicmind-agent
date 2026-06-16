@@ -407,40 +407,77 @@ def discover_trending(request: TrendingRequest):
 
 
 @app.post("/artist/info")
-def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
-    """获取歌手资料：简介、代表专辑、热门歌曲。"""
+async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
+    """获取歌手资料：简介、代表专辑、热门歌曲。
+
+    三个外部请求（Last.fm 歌手资料 / Last.fm 代表专辑 / 网易云热门歌曲）并发执行，
+    延迟从"三者之和"降到"最慢者"。旧实现串行，歌手卡加载明显偏慢。
+    """
+    import asyncio
+    from app.models import ExternalTrack
+
     info = {"name": request.artist, "image": "", "bio": "", "tags": [], "top_albums": [], "top_tracks": []}
 
-    # 1) Last.fm：歌手资料 + 代表专辑
+    lfm = None
     if settings.lastfm_api_key:
+        from app.sources.lastfm_client import LastfmClient
+        lfm = LastfmClient(settings.lastfm_api_key)
+
+    async def _artist_data():
+        if not lfm:
+            return None
         try:
-            from app.sources.lastfm_client import LastfmClient
-            lfm = LastfmClient(settings.lastfm_api_key)
-            artist_data = lfm.get_artist_info(request.artist)
-            info["name"] = artist_data.get("name") or request.artist
-            info["image"] = artist_data.get("image", "")
-            info["bio"] = artist_data.get("bio", "")
-            info["tags"] = artist_data.get("tags", [])
-            albums = lfm.get_artist_top_albums(request.artist, limit=6)
-            info["top_albums"] = [{"name": a["name"], "image": a["image"]} for a in albums]
+            return await asyncio.to_thread(lfm.get_artist_info, request.artist)
         except Exception:
             logger.debug("Last.fm artist info failed", exc_info=True)
+            return None
 
-    # 2) 热门歌曲：网易云搜索补充
-    try:
-        from app.models import ExternalTrack
-        raw_tracks = agent.search_web_music(f"{request.artist} 热门歌曲", top_k=6)
-        ext: list[ExternalTrack] = []
-        for t in raw_tracks[:6]:
-            ext.append(ExternalTrack(
-                external_id=t.external_id or "",
-                title=t.title, artist=t.artist or request.artist,
-                cover_url=t.cover_url, source=t.source,
-                playback_url=t.playback_url, candidate_kind=t.candidate_kind,
-            ))
-        info["top_tracks"] = ext
-    except Exception:
-        logger.debug("Artist hot tracks search failed", exc_info=True)
+    async def _albums():
+        if not lfm:
+            return []
+        try:
+            return await asyncio.to_thread(lfm.get_artist_top_albums, request.artist, 6)
+        except Exception:
+            logger.debug("Last.fm top albums failed", exc_info=True)
+            return []
+
+    async def _hot_tracks():
+        try:
+            raw_tracks = await asyncio.to_thread(agent.search_web_music, f"{request.artist} 热门歌曲", 6)
+            return [
+                ExternalTrack(
+                    external_id=t.external_id or "",
+                    title=t.title, artist=t.artist or request.artist,
+                    cover_url=t.cover_url, source=t.source,
+                    playback_url=t.playback_url, candidate_kind=t.candidate_kind,
+                )
+                for t in raw_tracks[:6]
+            ]
+        except Exception:
+            logger.debug("Artist hot tracks search failed", exc_info=True)
+            return []
+
+    async def _netease_image():
+        # 网易云歌手头像（type=100）比 Last.fm 的 image 字段可靠得多——直接去搜一张图。
+        try:
+            from app.sources.netease import search_netease_artist_image
+            return await asyncio.to_thread(search_netease_artist_image, request.artist)
+        except Exception:
+            logger.debug("NetEase artist image failed", exc_info=True)
+            return None
+
+    artist_data, albums, ext, netease_img = await asyncio.gather(
+        _artist_data(), _albums(), _hot_tracks(), _netease_image()
+    )
+
+    if artist_data:
+        info["name"] = artist_data.get("name") or request.artist
+        info["bio"] = artist_data.get("bio", "")
+        info["tags"] = artist_data.get("tags", [])
+    # 头像优先网易云（可靠），Last.fm image 字段兜底
+    info["image"] = netease_img or (artist_data.get("image", "") if artist_data else "")
+    info["top_albums"] = [{"name": a["name"], "image": a["image"]} for a in albums]
+    info["top_tracks"] = ext
 
     return ArtistInfoResponse(**info)
 

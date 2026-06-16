@@ -17,6 +17,19 @@ _BASE_URL = "https://ws.audioscrobbler.com/2.0/"
 _HEADERS = {"User-Agent": "MusicAgent/1.0"}
 
 
+def _pick_image(images: Any) -> str:
+    """Last.fm 的 image 是按尺寸排列的数组（small→…→mega）。最大尺寸(mega)的 #text
+    常为空，盲取最后一张会导致很多歌手/专辑返回空图。从大到小取第一个非空 url，全空
+    返回 ""。"""
+    if not isinstance(images, list) or not images:
+        return ""
+    for item in reversed(images):
+        url = (item.get("#text") or "").strip() if isinstance(item, dict) else ""
+        if url:
+            return url
+    return ""
+
+
 class LastfmClient:
     def __init__(self, api_key: str) -> None:
         self.api_key = api_key
@@ -101,11 +114,9 @@ class LastfmClient:
         """获取歌手资料：头像、简介摘要、标签。返回 { name, image, bio, tags[] }。"""
         data = self._get("artist.getInfo", artist=artist, autocorrect=1)
         raw = data.get("artist") or {}
-        # 头像：取最大尺寸
-        images = raw.get("image") or []
-        image_url = ""
-        if isinstance(images, list) and images:
-            image_url = images[-1].get("#text", "") if images else ""
+        # 头像：从大到小取第一个非空尺寸（mega 尺寸 #text 常为空，旧逻辑盲取最后一张
+        # 导致大量歌手返回空图、前端只显示占位 emoji）
+        image_url = _pick_image(raw.get("image"))
         # 简介
         bio = (raw.get("bio") or {}).get("summary", "") or ""
         # 清理 Last.fm 里的 HTML 标签
@@ -134,7 +145,6 @@ class LastfmClient:
             name = a.get("name", "").strip()
             if not name:
                 continue
-            images = a.get("image") or []
-            image_url = images[-1].get("#text", "") if isinstance(images, list) and images else ""
+            image_url = _pick_image(a.get("image"))
             result.append({"name": name, "image": image_url})
         return result

@@ -255,9 +255,12 @@ class MemoryManager:
     def weighted_query(self, memory: UserMemory) -> str:
         scored = score_entries(memory.structured_preferences)
         parts: list[str] = []
-        for entry, weight in scored[:8]:
-            repeat = max(1, int(weight * 2))
-            parts.extend([entry.text] * repeat)
+        # 每个偏好只出现一次。旧逻辑按 int(weight*2) 重复——"The Weeknd"被堆 7-8 次，
+        # 但网易云搜索不做查询词频加权，重复纯属噪声：要么被归一化掉，要么把搜索
+        # 强行偏向单一歌手，还污染 LLM 上下文与库检索。频率已体现在 score_entries
+        # 的排序里（排前面的更靠前），不需要再用重复次数表达权重。
+        for entry, _weight in scored[:8]:
+            parts.append(entry.text)
         parts.extend(memory.common_goals[-3:])
         # 关键修复：把从上传/收听歌曲算出的品味档案也带进查询。
         # 否则用户上传一堆 Beatles（taste=摇滚），推荐查询却完全不含"摇滚"，
@@ -271,7 +274,16 @@ class MemoryManager:
             # 艺术家偏好：高分歌手带进搜索查询，提升同风格歌曲召回
             for artist, _ in taste.top_artists[:3]:
                 parts.append(artist)
-        return " ".join(parts)
+        # 大小写不敏感去重（保留顺序）：structured_preferences 与 taste_profile.top_artists
+        # 可能含同一歌手（如 "The Weeknd"），不去重就会重复塞进搜索查询。
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for p in parts:
+            key = (p or "").strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                deduped.append(p)
+        return " ".join(deduped)
 
     def auto_learn_from_turn(self, user_id: str, query: str, results: list[dict[str, Any]]) -> bool:
         """Conservatively learn from an agent turn without requiring an explicit memory tool call."""

@@ -594,6 +594,24 @@ class AudioVisualAgent:
                 expanded_query, top_k=top_k, relevance_query=search_goal, offset=offset,
             )
 
+        # 抽象词（"痛苦""孤独""emo"）的字面歌曲搜索常归零——没有歌名叫"痛苦"，
+        # netease type=1 又只按标题/歌词做相关性过滤。此时回退到歌单搜索：复用
+        # search_and_extract 从真人策划歌单里捞相关曲目，让情绪/概念词也能返回结果
+        # 而非 0。仅在外部候选不足时触发，不影响正常歌手/歌名搜索。
+        if include_external and len(external_results) < 3:
+            try:
+                from app.search.netease_playlist import search_and_extract
+                playlist_hits = search_and_extract(
+                    f"{search_goal or query}音乐", max_playlists=3, tracks_per_playlist=top_k,
+                )
+                existing_keys = {_track_key(t) for t in external_results}
+                for t in playlist_hits:
+                    if _is_verified_online_track(t) and _track_key(t) not in existing_keys:
+                        external_results.append(t)
+                        existing_keys.add(_track_key(t))
+            except Exception:
+                logger.debug("search playlist fallback failed for %s", query, exc_info=True)
+
         summary = _format_search_summary(
             query=query,
             local=list(local_by_id.values())[:top_k],

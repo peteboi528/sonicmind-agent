@@ -69,6 +69,32 @@ def search_netease(query: str) -> str | None:
     return None
 
 
+def search_netease_artist_image(artist: str) -> str | None:
+    """搜网易云歌手（type=100）取头像 url（picUrl，回退 img1v1Url）。
+
+    比 Last.fm 的 image 字段可靠得多——Last.fm artist.getInfo 的最大尺寸 #text
+    对大量歌手为空，导致歌手卡只显示占位 emoji。网易云歌手页几乎都有 picUrl。
+    多端点轮询，首个非空即返回。
+    """
+    headers = dict(_HEADERS)
+    encoded = urllib.parse.quote(artist)
+    for base in _SEARCH_ENDPOINTS:
+        try:
+            search_url = f"{base}?s={encoded}&type=100&limit=1"
+            req = urllib.request.Request(search_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as response:
+                data = json.loads(response.read().decode())
+            artists = data.get("result", {}).get("artists", []) or []
+            if artists:
+                a = artists[0]
+                url = a.get("picUrl") or a.get("img1v1Url")
+                if url:
+                    return url
+        except Exception:
+            logger.debug("NetEase artist image search failed for %s", artist, exc_info=True)
+    return None
+
+
 def search_netease_many(query: str, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
     """搜索网易云，返回多条真实曲目元数据（用于推荐/歌单候选）。
 

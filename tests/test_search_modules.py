@@ -684,3 +684,98 @@ class TestCandidateGeneratorPrompt:
         from app.prompts.candidate_generator import CANDIDATE_GENERATOR_VERSION
 
         assert CANDIDATE_GENERATOR_VERSION.startswith("v")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# lastfm_client._pick_image + agent.search 抽象词回退（本轮新增回归）
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class TestPickImage:
+    """_pick_image: 从大到小取首个非空尺寸。mega 尺寸常空，旧逻辑盲取最后一张
+    导致大量歌手/专辑返回空图。"""
+
+    def test_mega_empty_falls_back_to_smaller(self):
+        from app.sources.lastfm_client import _pick_image
+        images = [
+            {"#text": "small.jpg", "size": "small"},
+            {"#text": "large.jpg", "size": "large"},
+            {"#text": "", "size": "mega"},
+        ]
+        # mega 空 → 取最大的非空 large
+        assert _pick_image(images) == "large.jpg"
+
+    def test_all_empty_returns_empty(self):
+        from app.sources.lastfm_client import _pick_image
+        assert _pick_image([{"#text": "", "size": "small"}, {"#text": "", "size": "mega"}]) == ""
+
+    def test_not_a_list_returns_empty(self):
+        from app.sources.lastfm_client import _pick_image
+        assert _pick_image(None) == ""
+        assert _pick_image([]) == ""
+
+
+class TestSearchAbstractFallback:
+    """agent.search: 字面歌曲搜索归零时回退歌单搜索，让"痛苦"这类抽象词有结果。"""
+
+    def test_literal_empty_triggers_playlist_fallback(self):
+        from app.agent import AudioVisualAgent
+        from app.memory import TasteProfile, UserMemory
+
+        mock_memory = MagicMock()
+        mock_memory.get_memory.return_value = UserMemory(
+            user_id="test", taste_profile=TasteProfile()
+        )
+        mock_memory.weighted_query.return_value = ""
+
+        mock_library = MagicMock()
+        mock_library.is_disliked.return_value = False
+
+        agent = AudioVisualAgent.__new__(AudioVisualAgent)
+        agent.memory = mock_memory
+        agent.library = mock_library
+        agent.llm = MagicMock()
+        agent.list_assets = MagicMock(return_value=[])
+
+        # 字面 netease 搜空（"痛苦"没有同名歌曲）
+        agent.search_web_music = lambda query, top_k=5, relevance_query="", offset=0, **_: []
+
+        fallback_track = ExternalTrack(
+            external_id="pl-1", title="治愈系", artist="某歌手", source="netease",
+        )
+
+        with patch("app.search.netease_playlist.search_and_extract",
+                   return_value=[fallback_track]) as mock_extract:
+            result = agent.search("user1", "痛苦", include_external=True, top_k=8)
+
+        # 触发了歌单回退，且返回了回退曲目
+        assert mock_extract.called
+        assert any(t.title == "治愈系" for t in result.external)
+
+    def test_literal_hits_skip_fallback(self):
+        """正常歌手/歌名搜索有结果时不触发歌单回退。"""
+        from app.agent import AudioVisualAgent
+        from app.memory import TasteProfile, UserMemory
+
+        mock_memory = MagicMock()
+        mock_memory.get_memory.return_value = UserMemory(
+            user_id="test", taste_profile=TasteProfile()
+        )
+        mock_memory.weighted_query.return_value = ""
+
+        agent = AudioVisualAgent.__new__(AudioVisualAgent)
+        agent.memory = mock_memory
+        agent.library = MagicMock(is_disliked=MagicMock(return_value=False))
+        agent.llm = MagicMock()
+        agent.list_assets = MagicMock(return_value=[])
+
+        hits = [ExternalTrack(external_id=f"h-{i}", title=f"Hit{i}", artist="Drake", source="netease")
+                for i in range(5)]
+        agent.search_web_music = lambda query, top_k=5, relevance_query="", offset=0, **_: hits
+
+        with patch("app.search.netease_playlist.search_and_extract",
+                   return_value=[]) as mock_extract:
+            agent.search("user1", "Drake", include_external=True, top_k=8)
+
+        # 有足够字面结果 → 不触发歌单回退
+        assert not mock_extract.called

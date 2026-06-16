@@ -91,3 +91,22 @@ def test_weighted_query_empty_without_any_signal(tmp_path):
 
     agent = CineSonicAgent(JsonStore(tmp_path / "store"))
     assert agent.memory.weighted_query(UserMemory(user_id="u2")) == ""
+
+
+def test_weighted_query_no_repeat_and_cross_source_dedup(tmp_path):
+    """回归：偏好不应被重复 N 次（旧 int(weight*2) 把高频歌手堆 7-8 次，纯噪声、
+    还污染搜索/LLM 上下文）；且 structured_preferences 与 taste_profile.top_artists
+    同一歌手必须去重，不能各塞一份。"""
+    from app.models import MemoryEntry, TasteProfile, UserMemory
+
+    agent = CineSonicAgent(JsonStore(tmp_path / "store"))
+    memory = UserMemory(
+        user_id="u1",
+        structured_preferences=[
+            MemoryEntry(text="The Weeknd", frequency=10, source="test"),
+        ],
+        taste_profile=TasteProfile(top_artists=[("the weeknd", 12.0)]),
+    )
+    query = agent.memory.weighted_query(memory)
+    # "The Weeknd" 整串只出现一次（既不因高频重复，也不因 taste_profile 再加一份）
+    assert query.lower().count("the weeknd") == 1

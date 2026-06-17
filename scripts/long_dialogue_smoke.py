@@ -4,10 +4,10 @@ import json
 import os
 import shutil
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
-
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_DIR = ROOT / "artifacts"
@@ -734,7 +734,7 @@ def main() -> int:
         print(f"JSON report: {REPORT_JSON}")
         return 1
 
-    from app.api.main import app, agent
+    from app.api.main import agent, app
     from app.config import settings
 
     settings.lastfm_api_key = ""

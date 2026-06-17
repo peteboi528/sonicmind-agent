@@ -1786,7 +1786,7 @@ class AudioVisualAgent:
 
     @staticmethod
     def _new_taste_experiment_id(user_id: str, prompt: str) -> str:
-        raw = f"{user_id}|{prompt}|{datetime.now(UTC).isoformat()}".encode("utf-8")
+        raw = f"{user_id}|{prompt}|{datetime.now(UTC).isoformat()}".encode()
         return "taste_" + hashlib.sha1(raw).hexdigest()[:12]
 
     def _taste_experiment_hypothesis(self, memory: UserMemory) -> str:

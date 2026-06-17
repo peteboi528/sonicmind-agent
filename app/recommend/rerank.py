@@ -5,8 +5,9 @@
 - 个性化锚 personalize：4 维 Jaccard（genre/mood/scenario/theme）对用户偏好集合。
 - 行为锚 behavior：BaRT 收听奖励（听完/秒跳），替代 SoulTuner 的 GPU 声学锚。
 
-三锚权重自动归一化；某锚缺失（如无语义模型、无行为数据）时，其权重重分配给其余锚，
-不让缺项把分数拉平。每个候选产出 RankingBreakdown 透明打分明细。
+三锚权重自动归一化；某锚缺失（如无行为数据）时，其权重重分配给其余锚，
+不让缺项把分数拉平。语义锚无 dense 向量时回退 TF 词项重叠——仍作为有效弱锚参与
+（不再清零），避免三锚退化成单锚。每个候选产出 RankingBreakdown 透明打分明细。
 
 MMR 在三锚精排之后做多样性重排：mmr = λ·rel − (1−λ)·max_overlap，
 overlap 用候选间 4 维标签 Jaccard 度量，避免连续推荐高度同质的歌。
@@ -192,14 +193,16 @@ def _semantic_anchor(query: str, tracks: list[Any]) -> tuple[list[float], bool]:
         dense = None
     if dense is not None:
         return dense, True
-    # TF 回退 + 同义词 boost
+    # TF 回退 + 同义词 boost：无 sentence-transformers 时仍作为有效弱锚参与精排。
+    # 旧实现返回 available=False，导致 _normalized_weights 把语义权重清零、重分配给
+    # 个性化锚——正确的语义匹配（如 query「说唱」命中 Eminem）被整体丢弃，三锚退化成单锚。
     q_tokens = _tokens(query)
     scores: list[float] = []
     for text in texts:
         base = _jaccard(q_tokens, _tokens(text))
         boost = _synonym_boost(q_tokens, _tokens(text))
         scores.append(min(base + boost, 1.0))
-    return scores, False
+    return scores, True
 
 
 def _personalize_anchor(tracks: list[Any], profile: PreferenceProfile) -> list[float]:

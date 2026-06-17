@@ -1,6 +1,7 @@
 <script setup>
 import { ref, watch, computed } from "vue";
 import { store } from "../store.js";
+import { api } from "../api.js";
 
 const audio = ref(null);
 const spinning = ref(false);
@@ -13,11 +14,50 @@ const queueProgress = computed(() =>
   store.queueIndex >= 0 ? `${store.queueIndex + 1} / ${store.queue.length}` : "",
 );
 
-// URL 变化时自动播放
+// ── 收听行为采集（喂行为锚：听完=completed，秒跳=skip）──
+// 每首歌一个 session：累计听了多少秒、是否已上报。切歌/播完时上报 /listen。
+// key 用 asset_id(本地) 或 source_id(在线)，与后端 rerank 的 _track_id 同命名空间，
+// 行为锚才能把"听完/秒跳"映射回候选并改变排序。
+const session = { key: "", elapsed: 0, reported: false };
+let lastCurrentTime = 0;
+
+function playerKey() {
+  return store.player.assetId || store.player.sourceId || "";
+}
+
+function flushSession(completed) {
+  if (!session.key || session.reported) return;
+  // 秒跳类：只在真正听过(≥1s)才报，避免 VIP/取流失败被误记成秒跳（伪负反馈）
+  if (!completed && session.elapsed < 1) {
+    session.reported = true;
+    return;
+  }
+  session.reported = true;
+  api
+    .listen(store.userId, session.key, Math.round(session.elapsed), completed)
+    .catch(() => {});
+}
+
+function onTimeUpdate() {
+  const a = audio.value;
+  if (!a) return;
+  const delta = a.currentTime - lastCurrentTime;
+  if (delta > 0 && delta < 5) session.elapsed += delta; // 只累加正常播放增量，忽略拖拽大跳
+  lastCurrentTime = a.currentTime;
+}
+
+// URL 变化 = 换曲：先结算上一首(没听完被换走=秒跳)，再开新 session 并自动播放
 watch(() => store.player.url, (url) => {
+  flushSession(false);
   if (url && audio.value) {
+    session.key = playerKey();
+    session.elapsed = 0;
+    session.reported = false;
+    lastCurrentTime = 0;
     audio.value.src = url;
     audio.value.play().catch(() => {});
+  } else {
+    session.key = "";
   }
 });
 
@@ -32,11 +72,15 @@ watch(() => store.toastKey, () => {
 });
 
 function onEnded() {
+  const a = audio.value;
+  if (a) session.elapsed = Math.max(session.elapsed, a.duration || a.currentTime || 0);
+  flushSession(true); // 自然播完 = completed
   spinning.value = false;
   store.nextTrack();
 }
 
 function close() {
+  flushSession(false);
   if (audio.value) { audio.value.pause(); audio.value.src = ""; }
   spinning.value = false;
   store.closePlayer();
@@ -80,7 +124,8 @@ function close() {
     <div class="audio-wrap">
       <audio
         ref="audio" controls
-        @play="spinning = true" @pause="spinning = false" @ended="onEnded"
+        @play="spinning = true" @pause="spinning = false"
+        @timeupdate="onTimeUpdate" @ended="onEnded"
       ></audio>
     </div>
     <button class="close" @click="close">

@@ -5,7 +5,7 @@ import re
 import uuid
 from typing import Any
 
-from app.intents import match_intent_by_keywords
+from app.intents import get_intent, is_continuation, match_intent_by_keywords
 from app.llm.protocol import LLMResponse, ToolCall
 from app.llm.structured import extract_json_dict
 from app.llm.tools import (
@@ -204,32 +204,19 @@ class MockLLM:
         """模拟结构化意图规划：根据关键词判意图，复刻真实 LLM 的 JSON 输出。"""
         import json as _json
 
-        lowered = prompt.lower()
-        target = _infer_count(prompt)
-        if any(k in lowered for k in ["旅程", "journey", "热身", "冲刺"]):
-            intent, use_vector = "journey", True
-        elif any(k in lowered for k in ["网易云歌单", "导入歌单", "playlist?id"]):
-            intent, use_vector = "import", False
-        elif any(k in lowered for k in ["歌单", "playlist", "合集"]):
-            intent, use_vector = "playlist", True
-        elif any(k in lowered for k in ["品味", "分析我", "taste", "偏好档案"]):
-            return _json.dumps({"intent": "taste", "entities": [], "use_local": False,
-                                "use_vector": False, "use_web": False, "target_count": None,
-                                "reasoning": "mock：只读品味画像"}, ensure_ascii=False)
-        elif any(k in lowered for k in ["搜索", "找歌", "search", "找一些"]):
-            intent, use_vector = "search", False
-        elif any(k in lowered for k in ["推荐", "suggest", "recommend", "适合", "chill", "跑步"]):
-            intent, use_vector = "recommend", True
-        elif any(k in lowered for k in ["你好", "hi", "hello", "嗨", "在吗"]):
-            return _json.dumps({"intent": "chat", "entities": [], "use_local": False,
-                                "use_vector": False, "use_web": False, "target_count": None,
-                                "reasoning": "mock：寒暄"}, ensure_ascii=False)
-        else:
-            intent, use_vector = "recommend", True
-        search_query, language = self._mock_search_query(prompt, intent)
+        current_query = _extract_current_query(prompt)
+        intent = _mock_intent_for_query(current_query)
+        spec = get_intent(intent)
+        target = _infer_count(current_query)
+        use_web = spec.online_default
+        use_local = intent not in {"chat", "taste", "video", "artist_info", "import"}
+        use_vector = intent in {"recommend", "playlist", "journey", "taste_experiment"}
+        query_for_rewrite = prompt if _needs_history_for_mock_rewrite(current_query) else current_query
+        entities = _mock_entities(current_query, intent)
+        search_query, language = self._mock_search_query(query_for_rewrite, intent, entities)
         return _json.dumps({
-            "intent": intent, "entities": [], "use_local": True,
-            "use_vector": use_vector, "use_web": True,
+            "intent": intent, "entities": entities, "use_local": use_local,
+            "use_vector": use_vector, "use_web": use_web,
             "search_query": search_query, "language": language,
             "target_count": target,
             "reasoning": f"mock：{intent} 意图",
@@ -287,7 +274,7 @@ class MockLLM:
         return '{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","language":"","target_count":null,"reasoning":"repair fallback"}'
 
     @staticmethod
-    def _mock_search_query(prompt: str, intent: str) -> tuple[str, str]:
+    def _mock_search_query(prompt: str, intent: str, entities: list[str] | None = None) -> tuple[str, str]:
         """Mock 版查询改写：粗粒度把否定转正向 + 抓场景词，复刻真实 LLM 的 search_query。
 
         不追求精度（mock 仅供 demo/测试），但要体现"否定不原样发搜索、保留场景"的形状：
@@ -300,6 +287,7 @@ class MockLLM:
         lowered = prompt.lower()
         language = ""
         positives: list[str] = []
+        entities = [e for e in (entities or []) if e]
         if ("不要中文" in prompt) or ("不要华语" in prompt) or ("英文" in prompt and "不要英文" not in prompt):
             language = "en"
             positives.append("英文 欧美")
@@ -310,6 +298,12 @@ class MockLLM:
         for w in scene_words:
             if w in lowered or w in prompt:
                 positives.append(w)
+        if intent == "taste_experiment":
+            positives.extend(["探索", "新风格", "相邻风格"])
+        if entities:
+            positives = [*entities, *positives]
+        if intent == "video" and positives and not any(k in " ".join(positives).lower() for k in ["mv", "video"]):
+            positives.append("MV")
         return " ".join(dict.fromkeys(positives)).strip(), language
 
     def _reason(self, prompt: str) -> str:
@@ -346,3 +340,82 @@ def _infer_count(text: str) -> int | None:
     if not match:
         return None
     return max(1, min(int(match.group(1)), 100))
+
+
+def _extract_current_query(prompt: str) -> str:
+    """Extract the current user turn from the query-plan prompt.
+
+    Mock planning must not scan the whole prompt/history; otherwise an old
+    "音乐旅程/热身/冲刺" turn poisons later unrelated turns.
+    """
+    text = (prompt or "").strip()
+    if "【本轮输入】" in text:
+        return text.rsplit("【本轮输入】", 1)[-1].strip()
+    assistant_matches = list(
+        re.finditer(r"(?:^|\n)\s*(?:assistant|助手)\s*[:：][^\n]*(?:\n|$)", text, flags=re.IGNORECASE)
+    )
+    if assistant_matches:
+        trailing = text[assistant_matches[-1].end():].strip()
+        if trailing:
+            return trailing
+    matches = re.findall(r"(?:^|\n)\s*(?:用户|user)\s*[:：]\s*(.+)", text, flags=re.IGNORECASE)
+    if matches:
+        return matches[-1].strip()
+    return text
+
+
+def _mock_intent_for_query(query: str) -> str:
+    lowered = query.lower()
+    stripped = lowered.strip()
+    if (
+        any(k in query for k in ["你好", "嗨", "在吗"])
+        or re.fullmatch(r"(hi|hello|hey)[!！。.\s]*", stripped)
+    ):
+        return "chat"
+    if any(k in lowered for k in ["网易云歌单", "导入歌单", "playlist?id", "导入"]):
+        return "import"
+    # "跑步冲刺歌单" 是歌单，不是多阶段旅程；只有明确说旅程/journey/从X到Y才走 journey。
+    if any(k in lowered for k in ["歌单", "playlist", "合集"]):
+        return "playlist"
+    if any(k in lowered for k in ["音乐旅程", "journey"]) or ("从" in query and "到" in query):
+        return "journey"
+    return match_intent_by_keywords(query) or "recommend"
+
+
+def _needs_history_for_mock_rewrite(query: str) -> bool:
+    return is_continuation(query) or any(token in query for token in ("不要", "别", "换成", "改成", "太吵", "安静点"))
+
+
+def _mock_entities(query: str, intent: str) -> list[str]:
+    if intent in {"chat", "taste", "taste_experiment", "import", "journey"}:
+        return []
+    if any(token in query for token in ("不要", "别", "换成", "改成")):
+        return []
+    english_stop = {
+        "mv", "video", "live", "concert", "playlist", "album", "albums",
+        "recommend", "suggest", "search", "find", "about", "biography",
+    }
+    english = [
+        token for token in re.findall(r"[A-Za-z][A-Za-z0-9'&\-]*", query)
+        if token.lower() not in english_stop
+    ]
+    entities: list[str] = []
+    if english:
+        entities.append(" ".join(english))
+
+    cleaned = query
+    cjk_noise = [
+        "帮我", "给我", "推荐", "搜索", "搜一下", "找", "找一下", "一些",
+        "几首", "一首", "的歌", "歌曲", "音乐", "专辑", "唱片", "大碟",
+        "有哪些", "有哪几张", "哪几张", "几张", "介绍一下", "介绍",
+        "背景", "成员", "出道", "简介", "资料", "百科", "是谁", "这个团体",
+        "牛逼吗", "怎么样", "评价", "风格", "什么水平", "视频", "现场",
+        "演唱会", "导入", "网易云歌单", "歌单",
+    ]
+    for noise in sorted(cjk_noise, key=len, reverse=True):
+        cleaned = cleaned.replace(noise, " ")
+    for token in re.findall(r"[一-鿿㐀-䶿豈-﫿]{2,}", cleaned):
+        token = token.strip()
+        if token and token not in entities:
+            entities.append(token)
+    return entities[:3]

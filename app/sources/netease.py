@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import time
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from typing import Any
 
 from app.netease_auth import _cookie_header
@@ -26,8 +28,26 @@ _SEARCH_ENDPOINTS = (
     "https://music.163.com/api/cloudsearch/pc",
     "https://music.163.com/api/search/get/web",
 )
+_ALBUM_SEARCH_ENDPOINTS = (
+    "https://music.163.com/api/search/get",
+    "https://music.163.com/api/cloudsearch/pc",
+)
 _SEARCH_RETRIES = 2
 _SEARCH_BACKOFF = 0.5
+
+# 专辑详情进程内缓存：按 album_id 缓存完整曲目，重复点击同一专辑不再重复打网易云。
+# FIFO + 上限，避免长跑实例无限增长；FIFO 而非 LRU 是因为专辑曲目稳定、不需要按热度复用。
+_ALBUM_DETAIL_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
+_ALBUM_DETAIL_CACHE_LOCK = threading.Lock()
+_ALBUM_DETAIL_CACHE_MAX = 64
+
+
+def clear_album_detail_cache() -> int:
+    """清空专辑详情缓存，返回清掉的条目数（供 /cache 主动刷新用）。"""
+    with _ALBUM_DETAIL_CACHE_LOCK:
+        n = len(_ALBUM_DETAIL_CACHE)
+        _ALBUM_DETAIL_CACHE.clear()
+        return n
 
 
 def _fetch_netease_songs(query: str, limit: int, offset: int = 0) -> list[dict[str, Any]]:
@@ -95,6 +115,179 @@ def search_netease_artist_image(artist: str) -> str | None:
     return None
 
 
+def search_netease_album(artist: str, album: str) -> dict[str, Any] | None:
+    """Search a NetEase album by artist + album name and return album metadata."""
+    artist = (artist or "").strip()
+    album = (album or "").strip()
+    if not album:
+        return None
+    query = " ".join(part for part in [artist, album] if part)
+    albums = _fetch_netease_albums(query, limit=8)
+    if not albums and artist:
+        albums = _fetch_netease_albums(album, limit=8)
+    if not albums:
+        return None
+
+    wanted_album = _normalize_music_name(album)
+    wanted_artist = _normalize_music_name(artist)
+
+    def score(item: dict[str, Any]) -> tuple[int, int]:
+        item_name = _normalize_music_name(item.get("name", ""))
+        item_artist = _normalize_music_name(_album_artist_name(item))
+        name_score = 3 if item_name == wanted_album else 2 if wanted_album in item_name or item_name in wanted_album else 0
+        artist_score = 2 if wanted_artist and item_artist == wanted_artist else 1 if wanted_artist and wanted_artist in item_artist else 0
+        return name_score + artist_score, int(item.get("size") or 0)
+
+    best = max(albums, key=score)
+    if score(best)[0] <= 0:
+        return None
+    return {
+        "id": str(best.get("id") or best.get("idStr") or ""),
+        "name": (best.get("name") or album).strip(),
+        "artist": _album_artist_name(best) or artist,
+        "cover": best.get("picUrl") or best.get("blurPicUrl") or "",
+        "track_count": int(best.get("size") or 0) or None,
+        "raw": best,
+    }
+
+
+def fetch_netease_album_tracks(album_id: str, limit: int = 100) -> dict[str, Any] | None:
+    """Fetch an album detail from NetEase, preserving the original album track order.
+
+    结果按 album_id 进程内缓存（FIFO，上限 64）：重复点击同一专辑不再重复打网易云，
+    只在首次访问时网络取一次。缓存的是完整曲目，limit 仅在返回时裁剪，故不同 limit
+    的调用互不影响。返回的是缓存对象的浅拷贝（tracks 已按 limit 裁剪），调用方改不动缓存。
+    """
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        return None
+    n = max(0, int(limit or 0))
+
+    with _ALBUM_DETAIL_CACHE_LOCK:
+        cached = _ALBUM_DETAIL_CACHE.get(album_id)
+        if cached is not None:
+            _ALBUM_DETAIL_CACHE.move_to_end(album_id)  # 命中即续命（保持 FIFO 顺序）
+    if cached is not None:
+        tracks = cached["tracks"][:n] if n > 0 else list(cached["tracks"])
+        return {**cached, "tracks": tracks}
+
+    # 缓存未命中：网络取完整专辑详情（不裁剪，完整曲目入缓存）
+    try:
+        api = f"https://music.163.com/api/v1/album/{album_id}"
+        with urllib.request.urlopen(urllib.request.Request(api, headers=_HEADERS), timeout=8) as response:
+            data = json.loads(response.read().decode())
+    except Exception:
+        logger.debug("NetEase album detail fetch failed: %s", album_id, exc_info=True)
+        return None
+    if not isinstance(data, dict) or data.get("code") not in (None, 200):
+        return None
+    album = data.get("album") or {}
+    songs = data.get("songs") or []
+    if not isinstance(songs, list):
+        songs = []
+    album_name = (album.get("name") or "").strip()
+    album_artist = _album_artist_name(album)
+    cover = album.get("picUrl") or album.get("blurPicUrl") or ""
+    tracks: list[dict[str, Any]] = []
+    for song in songs:
+        song_id = song.get("id")
+        title = (song.get("name") or "").strip()
+        if not song_id or not title:
+            continue
+        al = song.get("al") or song.get("album") or {}
+        tracks.append({
+            "song_id": str(song_id),
+            "title": title,
+            "artist": _song_artists(song) or album_artist,
+            "album": (al.get("name") or album_name or "").strip() or None,
+            "cover": al.get("picUrl") or cover or None,
+        })
+    full = {
+        "id": album_id,
+        "name": album_name,
+        "artist": album_artist,
+        "cover": cover,
+        "track_count": int(album.get("size") or len(songs) or len(tracks)) or None,
+        "tracks": tracks,
+    }
+    with _ALBUM_DETAIL_CACHE_LOCK:
+        _ALBUM_DETAIL_CACHE[album_id] = full
+        _ALBUM_DETAIL_CACHE.move_to_end(album_id)
+        while len(_ALBUM_DETAIL_CACHE) > _ALBUM_DETAIL_CACHE_MAX:
+            _ALBUM_DETAIL_CACHE.popitem(last=False)
+    return {**full, "tracks": full["tracks"][:n] if n > 0 else list(full["tracks"])}
+
+
+def search_netease_artist_albums(artist: str, limit: int = 6) -> list[dict[str, Any]]:
+    """搜某歌手的专辑，返回带真实 album_id 的专辑元数据列表（供歌手页代表专辑）。
+
+    Last.fm 的 artist.getTopAlbums 只给 name/image、没有 id，点进去还得二次
+    search_netease_album 按名字猜匹配，容易猜错（同名合集/精选混入）。这里直接
+    拿网易云专辑搜索结果，album_id 真实可信，点击直达专辑详情，省掉二次猜测。
+
+    返回 [{id, name, image, artist, track_count}]，本歌手专辑排前（按歌手名匹配
+    排序），按归一化名称去重，最多 limit 条。失败/无结果返回 []。
+    """
+    artist = (artist or "").strip()
+    if not artist:
+        return []
+    # 多取一些再排序去重，确保过滤掉同名合集后仍能凑够 limit。
+    albums = _fetch_netease_albums(artist, limit=max(limit * 3, 12))
+    if not albums:
+        return []
+
+    wanted_artist = _normalize_music_name(artist)
+
+    def artist_rank(item: dict[str, Any]) -> int:
+        item_artist = _normalize_music_name(_album_artist_name(item))
+        if not wanted_artist or not item_artist:
+            return 1
+        if item_artist == wanted_artist:
+            return 2
+        if wanted_artist in item_artist or item_artist in wanted_artist:
+            return 1
+        return 0
+
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in sorted(albums, key=artist_rank, reverse=True):
+        name = (item.get("name") or "").strip()
+        album_id = str(item.get("id") or item.get("idStr") or "")
+        if not name or not album_id:
+            continue
+        key = _normalize_music_name(name)
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append({
+            "id": album_id,
+            "name": name,
+            "image": item.get("picUrl") or item.get("blurPicUrl") or "",
+            "artist": _album_artist_name(item) or artist,
+            "track_count": int(item.get("size") or 0) or None,
+        })
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _fetch_netease_albums(query: str, limit: int = 8) -> list[dict[str, Any]]:
+    headers = dict(_HEADERS)
+    encoded = urllib.parse.quote(query)
+    for base in _ALBUM_SEARCH_ENDPOINTS:
+        try:
+            search_url = f"{base}?s={encoded}&type=10&limit={limit}"
+            req = urllib.request.Request(search_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=8) as response:
+                data = json.loads(response.read().decode())
+            albums = data.get("result", {}).get("albums", []) or []
+            if isinstance(albums, list) and albums:
+                return albums
+        except Exception:
+            logger.debug("NetEase album search failed for %s via %s", query, base, exc_info=True)
+    return []
+
+
 def search_netease_many(query: str, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
     """搜索网易云，返回多条真实曲目元数据（用于推荐/歌单候选）。
 
@@ -122,6 +315,28 @@ def search_netease_many(query: str, limit: int = 20, offset: int = 0) -> list[di
             "cover": album.get("picUrl"),
         })
     return results
+
+
+def _normalize_music_name(value: str) -> str:
+    return re.sub(r"[\s\-_:：·•.'\"“”‘’()（）\[\]【】]+", "", (value or "").lower())
+
+
+def _album_artist_name(album: dict[str, Any]) -> str:
+    artist = album.get("artist")
+    if isinstance(artist, dict) and artist.get("name"):
+        return str(artist.get("name", "")).strip()
+    artists = album.get("artists")
+    if isinstance(artists, list):
+        names = [str(a.get("name", "")).strip() for a in artists if isinstance(a, dict) and a.get("name")]
+        return "、".join(names)
+    return ""
+
+
+def _song_artists(song: dict[str, Any]) -> str:
+    raw = song.get("ar") or song.get("artists") or []
+    if not isinstance(raw, list):
+        return ""
+    return "、".join(str(a.get("name", "")).strip() for a in raw if isinstance(a, dict) and a.get("name"))
 
 
 def search_netease_detail(query: str) -> dict[str, Any] | None:

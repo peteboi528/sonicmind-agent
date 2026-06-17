@@ -50,6 +50,15 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         },
         required=("query",),
     ),
+    "artist_albums": ToolSpec(
+        name="artist_albums",
+        aliases=("recommend_albums",),
+        description="获取某歌手的真实专辑清单（网易云专辑搜索，带真实 album_id，可整张播放）。适用于：用户想听/推荐/列举某歌手的专辑、唱片、大碟、discography。不走单曲搜索。",
+        args_schema={
+            "query": {"type": "string", "description": "歌手名或含歌手名的专辑请求，例如 'The Weeknd 的专辑'"},
+        },
+        required=("query",),
+    ),
     "playlist": ToolSpec(
         name="playlist",
         aliases=("generate_playlist",),
@@ -65,6 +74,16 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         aliases=("summarize_taste",),
         description="总结用户的音乐品味档案。适用于：用户想了解自己的偏好、风格画像。",
         args_schema={},
+    ),
+    "taste_experiment": ToolSpec(
+        name="taste_experiment",
+        aliases=("generate_taste_experiment",),
+        description="生成个人音乐品味实验：safe/stretch/bold 三档候选，用播放、跳过、收藏、不喜欢等反馈验证用户探索边界。",
+        args_schema={
+            "prompt": {"type": "string", "description": "用户的探索请求，例如 '推荐点不一样的'"},
+            "total": {"type": "integer", "description": "实验总曲目数，默认 12", "default": 12},
+        },
+        required=("prompt",),
     ),
     "similar_cross": ToolSpec(
         name="similar_cross",

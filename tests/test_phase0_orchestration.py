@@ -63,6 +63,36 @@ def test_plan_with_llm_playlist_target_count(agent):
     assert plan.target_count == 20
 
 
+def test_mock_plan_uses_current_turn_not_journey_history(agent):
+    history = "user: 做一个清晨到深夜的音乐旅程，热身到冲刺再放松\nassistant: 已生成音乐旅程"
+    plan = nodes.plan_with_llm(agent, "分析我的音乐品味", history_text=history)
+    assert plan is not None
+    assert plan.intent == "taste"
+    assert plan.strategy == "memory_only"
+    assert plan.online_required is False
+
+
+@pytest.mark.parametrize("query,expected_intent,expected_tool", [
+    ("推荐 Taylor Swift 的专辑", "artist_albums", "artist_albums"),
+    ("推荐点不一样的，做个品味实验", "taste_experiment", "taste_experiment"),
+    ("找 NewJeans 的 MV 视频", "video", "video_search"),
+    ("介绍 NewJeans 的背景", "artist_info", "web_info_search"),
+    ("帮我导入这个网易云歌单 playlist?id=123456", "import", "import"),
+])
+def test_mock_plan_routes_new_intents(agent, query, expected_intent, expected_tool):
+    plan = nodes.plan_with_llm(agent, query)
+    assert plan is not None
+    assert plan.intent == expected_intent
+    assert expected_tool in plan.tools_needed
+
+
+def test_keyword_plan_artist_albums_uses_album_tool():
+    plan = nodes.build_agent_plan("推荐 The Weeknd 的专辑")
+    assert plan.intent == "artist_albums"
+    assert plan.tools_needed == ["artist_albums"]
+    assert plan.strategy == "online_first"
+
+
 def test_plan_falls_back_to_keyword_on_bad_json(agent, monkeypatch):
     monkeypatch.setattr(agent.llm, "generate", lambda *a, **k: "这不是 JSON")
     plan = nodes.plan_with_llm(agent, "推荐几首歌")

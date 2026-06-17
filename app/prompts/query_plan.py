@@ -59,7 +59,11 @@ QUERY_PLAN_SYSTEM = f"""\
 8. 纯寒暄/与音乐无关 → intent=chat, 所有开关 false
 9. ⭐ 用户要了解歌手/乐队信息（介绍/背景/成员/出道/简介/百科/是谁/about/biography）→ intent=artist_info（用搜索引擎查百科，不走网易云）。**此规则优先于 discuss**——当用户问的是"是什么/介绍/百科"等事实性问题，而非"怎么看/评价/聊聊"等主观讨论时，必须选 artist_info。
    例："介绍NewJeans""Taylor Swift的背景""Adele是谁""Coldplay出道经历"
-10. 明确要MV/现场/演唱会/视频/Live → intent=video（直接搜B站/YouTube，不走网易云）
+10. ⭐ 用户想探索/扩展自己的口味（探索我的口味/推荐点不一样/听腻了/发现新风格/做品味实验/大胆一点）→ intent=taste_experiment, use_web=true, use_vector=true。生成 safe/stretch/bold 三档实验，不是普通推荐。
+    例："推荐点不一样的""我听腻了，帮我发现新风格""做个品味实验"
+11. 明确要MV/现场/演唱会/视频/Live → intent=video（直接搜B站/YouTube，不走网易云）
+12. ⭐ 用户要某歌手的**专辑**（专辑/唱片/大碟/discography/哪几张专辑/推荐专辑/听专辑）→ intent=artist_albums, entities=[歌手名], use_web=true。**直接取真实专辑清单，不走单曲搜索**——这样能拿到可整张播放的真实专辑，而非限流后的假候选。
+   例："推荐他的专辑""The Weeknd 有哪些专辑""听周杰伦的专辑""Taylor Swift 的唱片"
 
 ## 多轮对话规则
 - 若提供了【最近对话】，且本轮输入是"再来几首""换一批""还要""类似这个""不要X""换成Y"等延续/修正指令：
@@ -85,6 +89,9 @@ QUERY_PLAN_SYSTEM = f"""\
 
 用户：分析下我的音乐品味
 {{"intent":"taste","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","language":"","target_count":null,"reasoning":"只读记忆画像"}}
+
+用户：推荐点不一样的，做个品味实验
+{{"intent":"taste_experiment","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"探索 新风格 相邻风格","language":"","target_count":null,"reasoning":"生成三档品味实验"}}
 
 用户：你好
 {{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","language":"","target_count":null,"reasoning":"普通寒暄"}}

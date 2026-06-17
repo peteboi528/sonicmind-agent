@@ -41,7 +41,7 @@ class IntentDef:
 # 关键词 fallback 的匹配优先级（从具体到泛化）：journey/import 要早于
 # playlist（"导入歌单""音乐旅程"含子串），discuss 作为音乐知识类兜底放在
 # recommend 之后、chat 之前。
-_INTENT_PRIORITY = ("journey", "import", "playlist", "video", "search", "taste", "recommend", "artist_info", "discuss")
+_INTENT_PRIORITY = ("journey", "import", "playlist", "video", "search", "taste_experiment", "taste", "artist_albums", "recommend", "artist_info", "discuss")
 
 _DISCUSS_KEYWORDS = (
     "牛逼", "怎么样", "评价", "风格是", "什么水平", "好听吗",
@@ -59,6 +59,31 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         base_tools=("recommend",),
         prepend_web_search=True,
         keyword_signals=("推荐", "适合", "recommend", "chill", "来点", "来几首", "给我来", "放松", "类似", "像"),
+    ),
+    "artist_albums": IntentDef(
+        name="artist_albums",
+        summary="用户要某歌手的专辑，直接取网易云真实专辑清单（带 album_id，可整张播放）。",
+        prompt_desc="artist_albums：推荐/列举某歌手的专辑、唱片、大碟、discography（直接取真实专辑清单，不走单曲搜索）",
+        base_tools=("artist_albums",),
+        prepend_web_search=False,  # 不走单曲搜索（避开限流假候选）；专辑端点独立且带缓存
+        strategy_web="online_first",
+        strategy_no_web="no_search",
+        keyword_signals=("专辑", "唱片", "大碟", "discography", "album", "哪几张", "几张专辑"),
+    ),
+    "taste_experiment": IntentDef(
+        name="taste_experiment",
+        summary="用户要探索/扩展自己的音乐口味，生成 safe/stretch/bold 三档品味实验并收集反馈。",
+        prompt_desc="taste_experiment：探索口味 / 推荐点不一样 / 听腻了 / 发现新风格 / 做品味实验",
+        base_tools=("taste_experiment",),
+        prepend_web_search=False,
+        strategy_web="online_first",
+        strategy_no_web="online_first",
+        online_default=True,
+        keyword_signals=(
+            "探索我的口味", "探索口味", "口味实验", "品味实验", "taste lab",
+            "推荐点不一样", "推荐一点不一样", "听腻了", "发现新风格",
+            "帮我发现新风格", "做个品味实验", "探索边界", "大胆一点",
+        ),
     ),
     "search": IntentDef(
         name="search",

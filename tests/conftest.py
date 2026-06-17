@@ -79,3 +79,12 @@ def fake_online_music_search(monkeypatch):
         return seeds[:top_k]
 
     monkeypatch.setattr(AudioVisualAgent, "search_web_music", _fake_search_web_music)
+
+
+@pytest.fixture(autouse=True)
+def _reset_netease_album_cache():
+    """专辑详情缓存是进程级全局的，测试间共享会互相污染（A 缓存的 "18893" 让 B 拿不到
+    它打桩的 urlopen）。每个测试前清空，保证隔离。"""
+    from app.sources.netease import clear_album_detail_cache
+    clear_album_detail_cache()
+    yield

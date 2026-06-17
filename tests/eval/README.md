@@ -102,6 +102,12 @@ profile：`three_anchor`（默认 0.45/0.30/0.25）/ `pure_semantic` / `pure_per
 > A/B 层用于隔离观察 rerank 策略本身；端到端 regress 已可基于
 > `AgentAnswer.recommended_tracks` 计算推荐多样性与曲目级指标。
 
+## 真实源 Golden Cases
+
+`golden_real_sources.json` 记录少量发布前检查场景，覆盖网易云搜索、专辑顺序、
+MV、歌手信息、歌单导入和长对话延续。它不进默认 CI，因为真实平台接口会限流
+或波动；发布前用真实 key/网络环境手动或半自动跑一遍即可。
+
 ## 添加新 case
 
 编辑 `tests/eval/cases.py`，追加 `EvalCase(...)`。建议：

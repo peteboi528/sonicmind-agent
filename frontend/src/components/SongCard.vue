@@ -28,6 +28,9 @@ async function play() {
     store.playTrack({
       title: props.card.title, artist: props.card.artist || "",
       cover: props.card.cover_url || "", url: data.url,
+      source: props.card.source || "",
+      sourceId: props.card.source_id || "",
+      assetId: props.card.asset_id || "",
     });
   } catch { emit("toast", "⚠️ 播放失败"); }
 }

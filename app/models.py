@@ -362,10 +362,59 @@ class TrackRef(BaseModel):
     components: dict[str, float] = Field(default_factory=dict)
 
 
+class TasteExperimentFeedback(BaseModel):
+    completed: int = 0
+    skipped: int = 0
+    liked: int = 0
+    disliked: int = 0
+    saved: int = 0
+    rated: int = 0
+    too_safe: int = 0
+    too_far: int = 0
+    scores: list[float] = Field(default_factory=list)
+    last_signal: str = ""
+
+
+class TasteExperimentTrack(BaseModel):
+    track: TrackRef
+    bucket: Literal["safe", "stretch", "bold"]
+    reason: str = ""
+    expected_signal: str = ""
+    components: dict[str, float] = Field(default_factory=dict)
+    feedback: TasteExperimentFeedback = Field(default_factory=TasteExperimentFeedback)
+
+
+class TasteExperimentSegment(BaseModel):
+    name: Literal["safe", "stretch", "bold"]
+    label: str
+    description: str
+    tracks: list[TasteExperimentTrack] = Field(default_factory=list)
+
+
+class TasteExperimentReport(BaseModel):
+    summary: str = ""
+    bucket_stats: dict[str, dict[str, float | int]] = Field(default_factory=dict)
+    hypothesis_result: str = ""
+    next_recommendation_strategy: str = ""
+
+
+class TasteExperiment(BaseModel):
+    experiment_id: str
+    user_id: str
+    hypothesis: str
+    status: Literal["collecting", "ready", "reported"] = "collecting"
+    prompt: str = ""
+    segments: list[TasteExperimentSegment] = Field(default_factory=list)
+    result_summary: str = ""
+    report: TasteExperimentReport | None = None
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
 class StreamEvent(BaseModel):
     type: Literal[
         "plan", "thinking", "tool_start", "tool_result", "candidates",
-        "song_card", "eval", "final", "guard", "error",
+        "song_card", "album_card", "eval", "final", "guard", "error",
     ]
     content: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -375,6 +424,34 @@ class FeedbackRequest(BaseModel):
     user_id: str = "demo-user"
     segment_id: str
     accepted: bool
+
+
+class TasteExperimentRequest(BaseModel):
+    user_id: str = "demo-user"
+    prompt: str = "探索我的口味"
+    total: int = Field(default=12, ge=3, le=30)
+
+
+class TasteExperimentFeedbackRequest(BaseModel):
+    user_id: str = "demo-user"
+    experiment_id: str
+    track_key: str
+    signal: Literal[
+        "completed", "skipped", "liked", "disliked", "saved",
+        "rated", "too_safe", "too_far",
+    ]
+    score: float | None = Field(default=None, ge=0.0, le=10.0)
+
+
+class TasteExperimentReportRequest(BaseModel):
+    user_id: str = "demo-user"
+    experiment_id: str
+
+
+class TasteExperimentRegenerateRequest(BaseModel):
+    user_id: str = "demo-user"
+    experiment_id: str
+    bucket: Literal["safe", "stretch", "bold"]
 
 
 class DislikeRequest(BaseModel):
@@ -571,8 +648,49 @@ class ArtistInfoRequest(BaseModel):
 
 
 class ArtistAlbum(BaseModel):
+    id: str = ""
     name: str
     image: str = ""
+    artist: str = ""
+    track_count: int | None = None
+
+
+class AlbumTracksRequest(BaseModel):
+    artist: str
+    album: str
+    album_id: str | None = None
+    limit: int = Field(default=100, ge=1, le=100)
+
+
+class AlbumTracksResponse(BaseModel):
+    album: ArtistAlbum
+    tracks: list[ExternalTrack] = Field(default_factory=list)
+    summary: str = ""
+
+
+class SavedAlbum(BaseModel):
+    """用户收藏的专辑：保存专辑元数据 + 完整曲目，便于从「我的库」直接整张播放，
+    无需重新搜索/取网易云。与 Playlist 同构存储（collection=saved_albums，
+    key=f"{user_id}_{album_id}"）。只有带真实 album_id 的专辑（网易云源）可收藏，
+    故回放可靠。"""
+    album_id: str
+    user_id: str = "demo-user"
+    name: str
+    artist: str = ""
+    image: str = ""
+    track_count: int | None = None
+    tracks: list[ExternalTrack] = Field(default_factory=list)
+    saved_at: str = Field(default_factory=utc_now_iso)
+
+
+class SaveAlbumRequest(BaseModel):
+    user_id: str = "demo-user"
+    album_id: str
+    name: str
+    artist: str = ""
+    image: str = ""
+    track_count: int | None = None
+    tracks: list[ExternalTrack] = Field(default_factory=list)
 
 
 class ArtistInfoResponse(BaseModel):

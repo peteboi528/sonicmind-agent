@@ -5,6 +5,12 @@ import { api } from "./api.js";
 
 const STORED_USER = localStorage.getItem("sonicmind_user") || "web_user";
 
+/** 收听上报用的曲目 key：本地曲=asset_id，在线(netease 等)=source_id。
+ *  与后端 rerank 的 _track_id 同命名空间，行为锚才能命中候选。 */
+export function listenKey(card) {
+  return card?.asset_id || card?.source_id || "";
+}
+
 export const store = reactive({
   userId: STORED_USER,
   netease: { bound: false, nickname: null, avatar: null, vipLabel: "" },
@@ -33,8 +39,11 @@ export const store = reactive({
     };
   },
 
-  playTrack({ title, artist, cover, url }) {
-    this.player = { visible: true, title, artist, cover, url };
+  playTrack({ title, artist, cover, url, source, sourceId, assetId }) {
+    this.player = {
+      visible: true, title, artist, cover, url,
+      source: source || "", sourceId: sourceId || "", assetId: assetId || "",
+    };
     // 同步队列索引：如果这首歌在队列中，更新 queueIndex
     if (this.queue.length) {
       const idx = this.queue.findIndex(
@@ -125,6 +134,9 @@ export const store = reactive({
         artist: card.artist || "",
         cover: card.cover_url || "",
         url: data.url,
+        source: card.source || "",
+        sourceId: card.source_id || "",
+        assetId: card.asset_id || "",
       });
     } catch {
       if (seq !== this._playSeq) return;

@@ -77,7 +77,7 @@ def dedupe_tracks(tracks: list[Any]) -> list[Any]:
 def collect_tracks(results: list[dict[str, Any]]) -> list[Any]:
     """从工具结果里收集所有候选 track 并去重（Graph live 路径用）。
 
-    覆盖 web_music_search / daily_recommend / playlist / search / import。
+    覆盖 web_music_search / daily_recommend / playlist / search / video_search / import。
     排序策略：verified 在线（netease/bilibili/youtube）优先 → 其他在线 → 本地库。
     避免本地歌淹没在线真实候选。
     """
@@ -106,6 +106,13 @@ def collect_tracks(results: list[dict[str, Any]]) -> list[Any]:
                 else:
                     other_online.append(track)
             local.extend(result["response"].local)
+        elif t == "video_search":
+            for track in result["tracks"]:
+                src = getattr(track, "source", "")
+                if src in _VERIFIED_SOURCES:
+                    verified_online.append(track)
+                else:
+                    other_online.append(track)
         elif t == "import_netease_playlist":
             verified_online.extend(result["result"].get("tracks", []))
     # verified 在线优先，其他在线其次，本地兜底
@@ -114,12 +121,30 @@ def collect_tracks(results: list[dict[str, Any]]) -> list[Any]:
 
 
 def collect_known_titles(results: list[dict[str, Any]]) -> set[str]:
-    """Answer Guard 白名单：所有可追溯候选的标题（Graph live 路径用）。"""
-    return {
+    """Answer Guard 白名单：所有可追溯候选的标题（Graph live 路径用）。
+
+    含专辑名——artist_albums 结果里的专辑名来自网易云回查、可追溯，必须纳入白名单，
+    否则 guard 会把答案里的《专辑名》当成幻觉歌名删掉。
+    """
+    titles = {
         getattr(track, "title", "")
         for track in collect_tracks(results)
         if getattr(track, "title", "")
     }
+    for r in results:
+        if r.get("type") == "artist_albums":
+            for a in r.get("albums") or []:
+                name = (a.get("name") or "").strip() if isinstance(a, dict) else ""
+                if name:
+                    titles.add(name)
+        if r.get("type") == "taste_experiment":
+            exp = r.get("experiment")
+            for segment in getattr(exp, "segments", []) or []:
+                for item in getattr(segment, "tracks", []) or []:
+                    title = getattr(getattr(item, "track", None), "title", "")
+                    if title:
+                        titles.add(title)
+    return titles
 
 
 def song_card(

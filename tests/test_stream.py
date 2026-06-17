@@ -48,6 +48,19 @@ def test_final_event_carries_answer_payload(agent):
     assert final.type == "final"
     assert final.content
     assert "answer" in final.payload
+    assert final.payload["trace_summary"]["intent"] == "recommend"
+    assert "tools" in final.payload["trace_summary"]
+
+
+def test_taste_experiment_stream_payload(agent):
+    events, types = _stream_types(agent, "推荐点不一样的，做个品味实验")
+    assert "candidates" in types
+    cand = next(e for e in events if e.type == "candidates")
+    final = events[-1]
+    assert cand.payload["taste_experiment"]["segments"]
+    assert final.payload["taste_experiment"]["segments"]
+    assert final.payload["trace_summary"]["intent"] == "taste_experiment"
+    assert "taste_experiment" in final.payload["trace_summary"]["tools"]
 
 
 def test_stream_chat_matches_chat_answer(agent):

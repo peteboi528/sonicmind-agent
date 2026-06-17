@@ -8,6 +8,9 @@ def test_api_flow():
 
     health = client.get("/health")
     assert health.status_code == 200
+    assert "auth_mode" in health.json()["details"]
+    assert "smoke" in health.json()["details"]
+    assert "frontend_build_hash" in health.json()["details"]
 
     ingest = client.post("/assets/ingest", json={"url": "https://example.com/api-test"})
     assert ingest.status_code == 200
@@ -27,6 +30,31 @@ def test_api_flow():
 
     taste = client.get("/taste/api-user")
     assert taste.status_code == 200
+
+    experiment = client.post("/taste/experiment/generate", json={
+        "user_id": "api-user",
+        "prompt": "推荐点不一样的，做个品味实验",
+        "total": 9,
+    })
+    assert experiment.status_code == 200
+    exp_json = experiment.json()
+    assert [s["name"] for s in exp_json["segments"]] == ["safe", "stretch", "bold"]
+    first_item = next(item for s in exp_json["segments"] for item in s["tracks"])
+    track = first_item["track"]
+    track_key = f'{track["source"]}:{track["source_id"]}' if track["source_id"] else f'title:{track["title"].lower()}:{track["artist"].lower()}'
+    feedback = client.post("/taste/experiment/feedback", json={
+        "user_id": "api-user",
+        "experiment_id": exp_json["experiment_id"],
+        "track_key": track_key,
+        "signal": "liked",
+    })
+    assert feedback.status_code == 200
+    report = client.post("/taste/experiment/report", json={
+        "user_id": "api-user",
+        "experiment_id": exp_json["experiment_id"],
+    })
+    assert report.status_code == 200
+    assert "bucket_stats" in report.json()
 
     daily = client.post("/recommend/daily", json={"user_id": "api-user", "time_of_day": "evening"})
     assert daily.status_code == 200
@@ -82,3 +110,111 @@ def test_ingest_full_runs_three_steps():
     # analyze 步骤跑过 → 状态应为 analyzed（而非停在 ingested 占位）
     assert asset["status"] == "analyzed"
     client.delete(f"/assets/{asset['asset_id']}")
+
+
+def test_artist_album_tracks_returns_full_ordered_album(monkeypatch):
+    """专辑点击不能复用 top_k=12 的搜索结果；应返回专辑详情原始顺序。"""
+    from app.sources import netease as ns
+
+    monkeypatch.setattr(ns, "search_netease_album", lambda artist, album: {
+        "id": "18893",
+        "name": album,
+        "artist": artist,
+        "cover": "cover",
+        "track_count": 14,
+    })
+    monkeypatch.setattr(ns, "fetch_netease_album_tracks", lambda album_id, limit=100: {
+        "id": album_id,
+        "name": "Ordered Album",
+        "artist": "Artist",
+        "cover": "cover",
+        "track_count": 14,
+        "tracks": [
+            {"song_id": str(i), "title": f"Track {i}", "artist": "Artist", "album": "Ordered Album", "cover": "cover"}
+            for i in range(1, 15)
+        ],
+    })
+
+    client = TestClient(app)
+    resp = client.post("/artist/album_tracks", json={"artist": "Artist", "album": "Ordered Album"})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["album"]["id"] == "18893"
+    assert len(data["tracks"]) == 14
+    assert [t["title"] for t in data["tracks"][:3]] == ["Track 1", "Track 2", "Track 3"]
+
+
+def test_artist_album_tracks_not_found_returns_empty(monkeypatch):
+    """找不到专辑时不能回退到乱序搜索结果：返回 200 + 空 tracks + 可读 summary。"""
+    from app.sources import netease as ns
+
+    monkeypatch.setattr(ns, "search_netease_album", lambda artist, album: None)
+    monkeypatch.setattr(ns, "fetch_netease_album_tracks", lambda album_id, limit=100: None)
+
+    client = TestClient(app)
+    resp = client.post("/artist/album_tracks", json={"artist": "谁", "album": "不存在的专辑"})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["tracks"] == []
+    assert data["summary"]  # 可读非空提示
+    assert data["album"]["name"] == "不存在的专辑"
+
+
+def test_artist_info_top_albums_use_netease_ids(monkeypatch):
+    """歌手页代表专辑优先用网易云带真实 id 的专辑，而非 Last.fm 无 id 的（点击免二次猜匹配）。"""
+    from app.sources import netease as ns
+
+    # 强制离线：关掉 Last.fm（否则开发机的 key 会触发真实网络请求）
+    monkeypatch.setattr("app.api.main.settings.lastfm_api_key", "")
+    monkeypatch.setattr(ns, "search_netease_artist_albums", lambda artist, limit=6: [
+        {"id": "18893", "name": "依然范特西", "image": "cover", "artist": "周杰伦", "track_count": 10},
+        {"id": "18894", "name": "叶惠美", "image": "cover2", "artist": "周杰伦", "track_count": 11},
+    ])
+    monkeypatch.setattr(ns, "search_netease_artist_image", lambda artist: None)
+
+    client = TestClient(app)
+    resp = client.post("/artist/info", json={"artist": "周杰伦"})
+
+    assert resp.status_code == 200
+    albums = resp.json()["top_albums"]
+    assert albums
+    assert albums[0]["id"] == "18893"
+    assert albums[0]["track_count"] == 10
+    assert albums[1]["id"] == "18894"
+
+
+def test_saved_album_save_list_delete_and_isolation():
+    """收藏专辑：保存→状态→列表→用户隔离→删除 全链路。"""
+    client = TestClient(app)
+    uid = "album-saver"
+    tracks = [{"external_id": "s1", "title": "T1", "artist": "A", "source": "netease", "playback_url": "https://music.163.com/song?id=1"}]
+
+    save = client.post("/album/save", json={
+        "user_id": uid, "album_id": "18893", "name": "Album", "artist": "A",
+        "track_count": 1, "tracks": tracks,
+    })
+    assert save.status_code == 200
+    assert save.json()["saved"] is True
+
+    # 状态查询
+    assert client.get(f"/album/saved/{uid}/18893").json()["saved"] is True
+    assert client.get(f"/album/saved/{uid}/00000").json()["saved"] is False
+
+    # 列表
+    lst = client.get(f"/albums/saved/{uid}").json()["albums"]
+    assert any(a["album_id"] == "18893" for a in lst)
+    saved = next(a for a in lst if a["album_id"] == "18893")
+    assert saved["tracks"][0]["title"] == "T1"
+    assert saved["user_id"] == uid
+
+    # 用户隔离：别的用户看不到
+    other = client.get("/albums/saved/someone-else").json()["albums"]
+    assert not any(a["album_id"] == "18893" for a in other)
+
+    # 删除
+    dele = client.delete(f"/album/saved/{uid}/18893")
+    assert dele.status_code == 200
+    assert dele.json()["deleted"] is True
+    assert client.get(f"/album/saved/{uid}/18893").json()["saved"] is False

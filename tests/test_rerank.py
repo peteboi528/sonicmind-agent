@@ -68,6 +68,45 @@ def test_breakdown_has_components():
     assert {"semantic", "personalize", "behavior", "w_semantic"} <= set(comp)
 
 
+# ---- 锚复活回归（旧 bug：语义/行为在生产恒为 0，三锚退化成单锚）----
+
+def test_semantic_tf_fallback_is_live_anchor():
+    """无 sentence-transformers 时 TF 兜底不再被清零——语义锚真正参与精排。
+
+    回归旧 bug：_semantic_anchor 在 TF 兜底时返回 available=False，_normalized_weights
+    随即把 w_semantic 清零、正确的语义匹配（如 query「说唱」命中说唱曲）被整体丢弃。
+    """
+    from app.recommend.rerank import _semantic_anchor
+    tracks = [_track("RapTrack", ["说唱"], ["激昂"], ext_id="r1")]
+    _, ok = _semantic_anchor("说唱 hip hop", tracks)
+    assert ok is True  # TF 兜底现在是有效锚
+    ranked = tri_anchor_rerank(
+        "说唱", tracks, PreferenceProfile.from_taste(TasteProfile(top_genres=[("流行", 1.0)]))
+    )
+    assert ranked[0][1].components["w_semantic"] > 0.0  # 语义权重不再被清零
+
+
+def test_behavior_anchor_moves_ranking_when_data_exists():
+    """注入收听数据后行为锚有权重、能改变排序。
+
+    回归旧 bug：前端从不调 /listen → listening_history 恒空 → behavior_scores 恒空
+    → 行为锚 available=False → w_behavior 恒为 0，从未改变过任何推荐。
+    """
+    from app.recommend.rerank import _behavior_anchor
+    # 两首口味/语义同分，但一首被反复听完(+行为)、一首被秒跳(-行为)
+    tracks = [
+        _track("Finished", ["R&B"], ["放松"], ext_id="fin"),
+        _track("Skipped", ["R&B"], ["放松"], ext_id="skip"),
+    ]
+    behavior = {"fin": 3.0, "skip": -3.0}  # key = external_id，与候选 _track_id 同命名空间
+    _, ok = _behavior_anchor(tracks, behavior)
+    assert ok is True
+    taste = TasteProfile(top_genres=[("R&B", 1.0)], top_moods=[("放松", 1.0)])
+    ranked = tri_anchor_rerank("chill", tracks, PreferenceProfile.from_taste(taste), behavior_scores=behavior)
+    assert ranked[0][1].components["w_behavior"] > 0.0
+    assert ranked[0][0].title == "Finished"  # 听完的行为分高，排到前面
+
+
 # ---- MMR 多样性 ----
 
 def test_mmr_promotes_diversity():

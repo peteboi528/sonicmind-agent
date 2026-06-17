@@ -11,12 +11,14 @@ const input = ref("");
 const isStreaming = ref(false);
 const thinking = ref("");
 const scroller = ref(null);
+const savedAlbumIds = ref(new Set());
 const history = [];
 let msgId = 0;
 let abortController = null;
 
 const QUICK = [
   { text: "🎵 推荐几首适合深夜的歌", prompt: "推荐几首适合深夜的歌" },
+  { text: "🧪 推荐点不一样的", prompt: "推荐点不一样的，做个品味实验" },
   { text: "🏃 帮我做 20 首跑步歌单", prompt: "帮我做 20 首跑步歌单" },
   { text: "🔍 找 The Weeknd 的歌", prompt: "找 The Weeknd 的歌" },
   { text: "🌅 清晨到深夜的音乐旅程", prompt: "做一个清晨到深夜的音乐旅程" },
@@ -27,8 +29,46 @@ function scrollDown() {
 }
 
 function toast(text) {
-  messages.value.push({ id: ++msgId, role: "bot", text, cards: [] });
+  messages.value.push({ id: ++msgId, role: "bot", text, cards: [], albums: [], traceSummary: null, tasteExperiment: null });
   scrollDown();
+}
+
+function trackToCard(track) {
+  return {
+    title: track.title,
+    artist: track.artist || "",
+    source: track.source || "netease",
+    source_id: track.source_id || track.external_id || "",
+    cover_url: track.cover_url,
+    playback_url: track.playback_url,
+  };
+}
+
+function cardToExternalTrack(card) {
+  return {
+    external_id: card.source_id || card.external_id || "",
+    title: card.title,
+    artist: card.artist || "",
+    source: card.source || "netease",
+    cover_url: card.cover_url,
+    playback_url: card.playback_url,
+  };
+}
+
+function normalizeAlbumCard(payload) {
+  const raw = payload?.album || payload || {};
+  const id = raw.id || raw.album_id || "";
+  return {
+    id,
+    name: raw.name || "",
+    artist: raw.artist || payload?.artist || "",
+    image: raw.image || raw.cover || "",
+    track_count: raw.track_count || raw.size || null,
+    tracks: Array.isArray(raw.tracks) ? raw.tracks.map(trackToCard) : [],
+    loading: false,
+    saving: false,
+    saved: !!id && savedAlbumIds.value.has(String(id)),
+  };
 }
 
 // ── Persistence ──
@@ -37,11 +77,17 @@ function saveToStorage() {
     const data = {
       messages: messages.value.map(m => ({
         id: m.id, role: m.role, text: m.text,
-        cards: m.cards.map(c => ({
+        cards: (m.cards || []).map(c => ({
           title: c.title, artist: c.artist, source: c.source,
           source_id: c.source_id, cover_url: c.cover_url,
           playback_url: c.playback_url, reason: c.reason,
         })),
+        albums: (m.albums || []).map(a => ({
+          id: a.id, name: a.name, artist: a.artist, image: a.image,
+          track_count: a.track_count, tracks: a.tracks || [], saved: !!a.saved,
+        })),
+        traceSummary: m.traceSummary || null,
+        tasteExperiment: m.tasteExperiment || null,
       })),
       history: history.slice(-20),
       msgId,
@@ -56,7 +102,13 @@ function loadFromStorage() {
     if (!raw) return;
     const data = JSON.parse(raw);
     if (data.messages?.length) {
-      messages.value = data.messages;
+      messages.value = data.messages.map(m => ({
+        ...m,
+        cards: m.cards || [],
+        albums: (m.albums || []).map(a => ({ ...a, loading: false, saving: false })),
+        traceSummary: m.traceSummary || null,
+        tasteExperiment: m.tasteExperiment || null,
+      }));
       msgId = data.msgId || data.messages.length;
     }
     if (data.history?.length) {
@@ -72,11 +124,97 @@ function clearHistory() {
   localStorage.removeItem(STORAGE_KEY);
 }
 
+function refreshAlbumSavedState() {
+  for (const message of messages.value) {
+    for (const album of message.albums || []) {
+      album.saved = !!album.id && savedAlbumIds.value.has(String(album.id));
+    }
+  }
+}
+
+async function loadSavedAlbumIds() {
+  try {
+    const data = await api.listSavedAlbums(store.userId);
+    savedAlbumIds.value = new Set((data.albums || []).map(a => String(a.album_id)));
+    refreshAlbumSavedState();
+  } catch { /* 收藏态失败不影响聊天主流程 */ }
+}
+
+async function ensureAlbumTracks(album) {
+  if (album.tracks?.length) return album.tracks;
+  if (!album.name) return [];
+  album.loading = true;
+  try {
+    const data = await api.artistAlbumTracks(album.artist, album.name, album.id, 100);
+    const detail = data.album || {};
+    album.id = detail.id || album.id;
+    album.name = detail.name || album.name;
+    album.artist = detail.artist || album.artist;
+    album.image = detail.image || album.image;
+    album.track_count = detail.track_count || data.tracks?.length || album.track_count;
+    album.tracks = (data.tracks || []).map(trackToCard);
+    return album.tracks;
+  } catch {
+    toast(`专辑《${album.name}》加载失败，稍后重试`);
+    return [];
+  } finally {
+    album.loading = false;
+  }
+}
+
+async function playAlbum(album) {
+  const tracks = await ensureAlbumTracks(album);
+  if (!tracks.length) {
+    toast(`没找到《${album.name}》的可播放曲目`);
+    return;
+  }
+  store.playAll(tracks);
+  toast(`播放《${album.name}》：${tracks.length} 首`);
+}
+
+async function toggleAlbumSave(album) {
+  if (album.saving) return;
+  album.saving = true;
+  try {
+    if (album.saved && album.id) {
+      await api.unsaveAlbum(store.userId, album.id);
+      album.saved = false;
+      const next = new Set(savedAlbumIds.value);
+      next.delete(String(album.id));
+      savedAlbumIds.value = next;
+      toast(`已取消收藏《${album.name}》`);
+      return;
+    }
+
+    const tracks = await ensureAlbumTracks(album);
+    if (!album.id) {
+      toast("这张专辑缺少真实 album_id，暂时不能收藏");
+      return;
+    }
+    await api.saveAlbum(store.userId, {
+      album_id: album.id,
+      name: album.name,
+      artist: album.artist || "",
+      image: album.image || "",
+      track_count: album.track_count ?? tracks.length,
+      tracks: tracks.map(cardToExternalTrack),
+    });
+    album.saved = true;
+    savedAlbumIds.value = new Set(savedAlbumIds.value).add(String(album.id));
+    toast(`已收藏《${album.name}》`);
+  } catch {
+    toast("操作失败，稍后重试");
+  } finally {
+    album.saving = false;
+  }
+}
+
 // Auto-save whenever messages change
 watch(messages, saveToStorage, { deep: true });
 
 onMounted(() => {
   loadFromStorage();
+  loadSavedAlbumIds();
   scrollDown();
 });
 
@@ -85,7 +223,7 @@ async function send(text) {
   const msg = (text ?? input.value).trim();
   if (!msg || isStreaming.value) return;
   input.value = "";
-  messages.value.push({ id: ++msgId, role: "user", text: msg, cards: [] });
+  messages.value.push({ id: ++msgId, role: "user", text: msg, cards: [], albums: [], tasteExperiment: null });
   history.push({ role: "user", content: msg });
   isStreaming.value = true;
   thinking.value = "思考中...";
@@ -94,7 +232,7 @@ async function send(text) {
   // 必须用 reactive：后续 candidates/song_card/final 事件会持续 push/splice botMsg.cards，
   // 若是普通对象，这些改动绕过响应式代理、Vue 检测不到，导致流式阶段只显示第一个
   // candidates 批次（约 5 张），final 的完整列表不刷新——只能靠刷新页面从 storage 重建。
-  const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [] });
+  const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [], albums: [], traceSummary: null, tasteExperiment: null });
   let finalText = "";
   abortController = new AbortController();
 
@@ -105,10 +243,15 @@ async function send(text) {
           thinking.value = event.content || "思考中...";
         } else if (event.type === "candidates") {
           for (const c of event.payload?.cards || []) botMsg.cards.push(c);
+          if (event.payload?.taste_experiment) botMsg.tasteExperiment = event.payload.taste_experiment;
           if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
           scrollDown();
         } else if (event.type === "song_card") {
           botMsg.cards.push(event.payload || {});
+        } else if (event.type === "album_card") {
+          botMsg.albums.push(normalizeAlbumCard(event.payload));
+          if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
+          scrollDown();
         } else if (event.type === "final") {
           finalText = event.content || "";
           const finalCards = event.payload?.cards;
@@ -116,6 +259,8 @@ async function send(text) {
             botMsg.cards.splice(0, botMsg.cards.length, ...finalCards);
             if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
           }
+          botMsg.traceSummary = event.payload?.trace_summary || null;
+          botMsg.tasteExperiment = event.payload?.taste_experiment || botMsg.tasteExperiment;
         } else if (event.type === "error") {
           finalText = "⚠️ " + (event.content || "出错了，请重试");
         }
@@ -153,7 +298,7 @@ function onKey(e) {
 </script>
 
 <template>
-  <div class="agent-chat">
+  <div class="agent-chat" :class="{ 'player-visible': store.player.visible }">
     <div ref="scroller" class="chat-scroll">
 
       <!-- ── Welcome State ── -->
@@ -195,11 +340,60 @@ function onKey(e) {
             <div class="body">
               <div class="role-label">{{ m.role === "user" ? "你" : "SonicMind" }}</div>
               <div v-if="m.text" class="text">{{ m.text }}</div>
+              <div v-if="m.tasteExperiment" class="taste-preview">
+                <div class="taste-preview-head">
+                  <span>Taste Lab</span>
+                  <strong>{{ m.tasteExperiment.status || "collecting" }}</strong>
+                </div>
+                <p>{{ m.tasteExperiment.hypothesis }}</p>
+                <div class="taste-preview-buckets">
+                  <span v-for="segment in m.tasteExperiment.segments || []" :key="segment.name">
+                    {{ segment.label || segment.name }} · {{ (segment.tracks || []).length }}
+                  </span>
+                </div>
+                <small>已保存到“实验室”，可以在那里播放整列、打反馈并生成报告。</small>
+              </div>
+              <details v-if="m.traceSummary" class="trace-summary">
+                <summary>决策摘要</summary>
+                <div class="trace-grid">
+                  <span>意图</span><strong>{{ m.traceSummary.intent }}</strong>
+                  <span>策略</span><strong>{{ m.traceSummary.strategy }}</strong>
+                  <span>工具</span><strong>{{ (m.traceSummary.tools || []).join(" / ") || "none" }}</strong>
+                  <span>来源</span><strong>{{ (m.traceSummary.sources || []).join(" / ") || "local" }}</strong>
+                  <span>卡片</span><strong>{{ m.traceSummary.final_cards }}</strong>
+                </div>
+              </details>
               <div v-if="m.cards.length" class="cards">
                 <button v-if="m.cards.length > 1" class="play-all-btn" @click="store.playAll(m.cards)">
                   ▶ 全部播放（{{ m.cards.length }}首）
                 </button>
                 <SongCard v-for="(c, j) in m.cards" :key="`${m.id}-${j}`" :card="c" @toast="toast" />
+              </div>
+              <div v-if="m.albums?.length" class="album-cards">
+                <div v-for="(album, j) in m.albums" :key="`${m.id}-album-${album.id || album.name}-${j}`" class="album-card">
+                  <div class="album-cover-wrap">
+                    <img v-if="album.image" class="album-cover" :src="album.image" alt="" loading="lazy" />
+                    <div v-else class="album-cover-ph">💿</div>
+                  </div>
+                  <div class="album-main">
+                    <div class="album-title">{{ album.name || "未知专辑" }}</div>
+                    <div class="album-meta">{{ album.artist || "未知歌手" }}<span v-if="album.track_count"> · {{ album.track_count }} 首</span></div>
+                    <div v-if="album.loading" class="album-track-status">正在按专辑顺序加载曲目...</div>
+                    <div v-if="album.tracks?.length" class="album-track-list">
+                      <span v-for="(track, idx) in album.tracks" :key="`${album.id}-${track.source_id || track.title}-${idx}`">
+                        {{ idx + 1 }}. {{ track.title }}<em v-if="track.artist"> - {{ track.artist }}</em>
+                      </span>
+                    </div>
+                  </div>
+                  <div class="album-actions">
+                    <button class="album-action primary" :disabled="album.loading" @click="playAlbum(album)">
+                      {{ album.loading ? "加载中" : "播放" }}
+                    </button>
+                    <button class="album-action" :class="{ saved: album.saved }" :disabled="album.saving || album.loading" @click="toggleAlbumSave(album)">
+                      {{ album.saved ? "已收藏" : "收藏" }}
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -257,6 +451,12 @@ function onKey(e) {
 .chat-scroll {
   flex: 1; overflow-y: auto;
   scroll-behavior: smooth;
+  padding-bottom: 8px;
+  transition: padding-bottom 0.35s var(--ease-out);
+}
+
+.agent-chat.player-visible .chat-scroll {
+  padding-bottom: calc(var(--player-h) + 18px + env(safe-area-inset-bottom, 0px));
 }
 
 /* ── Welcome ── */
@@ -390,6 +590,236 @@ function onKey(e) {
 
 .cards { margin-top: 14px; }
 
+.taste-preview {
+  margin-top: 12px;
+  width: min(100%, 620px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  padding: 12px 14px;
+}
+
+.taste-preview-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  font-weight: 800;
+}
+
+.taste-preview-head strong {
+  color: var(--accent);
+  font-size: 0.72rem;
+}
+
+.taste-preview p {
+  margin: 8px 0 10px;
+  color: var(--text-sub);
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+
+.taste-preview-buckets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.taste-preview-buckets span {
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+  color: var(--text);
+  font-size: 0.78rem;
+}
+
+.taste-preview small {
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.trace-summary {
+  margin-top: 10px;
+  width: min(100%, 520px);
+  color: var(--text-muted);
+  font-size: 0.76rem;
+}
+
+.trace-summary summary {
+  cursor: pointer;
+  color: var(--text-sub);
+  font-family: var(--font-display);
+  font-weight: 700;
+  list-style: none;
+}
+
+.trace-summary summary::-webkit-details-marker { display: none; }
+
+.trace-summary summary::before {
+  content: "+";
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--bg-card);
+  color: var(--accent);
+}
+
+.trace-summary[open] summary::before { content: "-"; }
+
+.trace-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 12px;
+  margin-top: 8px;
+  padding: 10px 12px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.trace-grid strong {
+  color: var(--text-sub);
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-cards {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.album-card {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.album-cover-wrap {
+  width: 64px;
+  height: 64px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-hover);
+  flex-shrink: 0;
+}
+
+.album-cover {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.album-cover-ph {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+
+.album-main { min-width: 0; }
+
+.album-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-meta {
+  margin-top: 3px;
+  font-size: 0.78rem;
+  color: var(--text-muted);
+}
+
+.album-track-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 8px;
+  color: var(--text-sub);
+  font-size: 0.74rem;
+  line-height: 1.3;
+  max-height: 190px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.album-track-list span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.album-track-list em {
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+.album-track-status {
+  margin-top: 8px;
+  color: var(--text-muted);
+  font-size: 0.74rem;
+}
+
+.album-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.album-action {
+  min-width: 58px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  color: var(--text-sub);
+  background: rgba(255,255,255,0.03);
+  font-size: 0.76rem;
+  font-family: var(--font-display);
+  font-weight: 700;
+  transition: all var(--transition);
+}
+
+.album-action:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-light);
+  background: var(--bg-hover);
+}
+
+.album-action.primary,
+.album-action.saved {
+  background: var(--accent-dim);
+  border-color: rgba(29,185,84,0.24);
+  color: var(--accent);
+}
+
+.album-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ── Message list transition ── */
 .msg-list-enter-active { animation: fadeInUp 0.35s var(--ease-out); }
 .msg-list-leave-active { transition: all 0.2s ease; }
@@ -422,6 +852,11 @@ function onKey(e) {
   width: 100%; margin: 0 auto;
   padding: 0 24px 24px;
   flex-shrink: 0;
+  transition: padding-bottom 0.35s var(--ease-out);
+}
+
+.agent-chat.player-visible .composer-wrap {
+  padding-bottom: calc(24px + var(--player-h) + env(safe-area-inset-bottom, 0px));
 }
 .composer {
   display: flex; align-items: flex-end; gap: 8px;
@@ -485,6 +920,12 @@ function onKey(e) {
   .quick-grid { grid-template-columns: 1fr; max-width: 100%; }
   .messages-wrap { padding: 16px 12px 8px; }
   .composer-wrap { padding: 0 12px 16px; }
+  .agent-chat.player-visible .composer-wrap {
+    padding-bottom: calc(16px + var(--player-h) + env(safe-area-inset-bottom, 0px));
+  }
   .welcome-title { font-size: 1.5rem; }
+  .album-card { grid-template-columns: 52px minmax(0, 1fr); }
+  .album-cover-wrap { width: 52px; height: 52px; }
+  .album-actions { grid-column: 1 / -1; justify-content: flex-end; }
 }
 </style>

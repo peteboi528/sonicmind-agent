@@ -3,15 +3,18 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
 from app.agent import AudioVisualAgent
 from app.config import settings
 from app.models import (
+    AlbumTracksRequest,
+    AlbumTracksResponse,
     ArtistInfoRequest,
     ArtistInfoResponse,
     BrowseRequest,
@@ -26,7 +29,12 @@ from app.models import (
     MemoryUpdateRequest,
     PlaylistRequest,
     RatingRequest,
+    SaveAlbumRequest,
     SearchRequest,
+    TasteExperimentFeedbackRequest,
+    TasteExperimentRegenerateRequest,
+    TasteExperimentReportRequest,
+    TasteExperimentRequest,
     TrendingRequest,
 )
 
@@ -39,7 +47,7 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.allowed_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -47,21 +55,58 @@ app.add_middleware(
 
 @app.middleware("http")
 async def _enforce_api_key(request, call_next):
-    """共享密钥鉴权门禁（AUTH_ENABLED=true 时生效）。
+    """API 鉴权门禁（AUTH_ENABLED=true 时生效）。
 
     默认关闭以保持本地 demo / 前端 / 测试零改动；部署多租户时开启。
     公开端点（/ /health /docs /openapi.json /redoc）始终放行，其余需带 X-API-Key。
-    注意：共享密钥只挡「未授权访问」；彻底防「伪造他人 user_id」需 per-user key→user_id 绑定（后续扩展）。
+    USER_API_KEYS 非空时，key 会绑定到 user_id，并覆盖客户端传入的 user_id。
+    未配置 USER_API_KEYS 时退回共享 API_KEY，仅做访问门禁，兼容旧部署。
     """
     if settings.auth_enabled:
         path = request.url.path.rstrip("/")
         if path not in {"", "/health", "/docs", "/openapi.json", "/redoc"}:
-            if request.headers.get("X-API-Key") != settings.api_key:
+            api_key = request.headers.get("X-API-Key")
+            bound_user_id = settings.user_id_for_api_key(api_key)
+            if settings.user_api_keys:
+                if not bound_user_id:
+                    return JSONResponse(status_code=401, content={"detail": "invalid or missing X-API-Key"})
+                request.state.auth_user_id = bound_user_id
+            elif api_key != settings.api_key:
                 return JSONResponse(status_code=401, content={"detail": "invalid or missing X-API-Key"})
     return await call_next(request)
 
 
 agent = AudioVisualAgent()
+
+
+def _effective_user_id(request: Request, provided_user_id: str | None) -> str:
+    auth_user_id = getattr(request.state, "auth_user_id", None)
+    return auth_user_id or (provided_user_id or "web_user")
+
+
+def _frontend_build_hash() -> str:
+    index = Path(__file__).resolve().parents[1] / "web" / "dist" / "index.html"
+    try:
+        text = index.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    marker = "/assets/index-"
+    if marker not in text:
+        return ""
+    suffix = text.split(marker, 1)[1]
+    return suffix.split(".", 1)[0]
+
+
+def _last_smoke_status() -> dict[str, Any]:
+    report = Path(__file__).resolve().parents[2] / "artifacts" / "long_dialogue_smoke_report.json"
+    try:
+        data = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"available": False}
+    items = data if isinstance(data, list) else data.get("checks", [])
+    total = len(items)
+    passed = sum(1 for item in items if item.get("ok"))
+    return {"available": True, "passed": passed, "total": total}
 
 # ---- 挂载 Web 前端 & Bot 路由 ----
 from app.api.web_routes import router as _web_router
@@ -89,7 +134,7 @@ def root():
 @app.get("/health")
 def health() -> dict[str, Any]:
     checks: dict[str, bool] = {}
-    details: dict[str, str] = {}
+    details: dict[str, Any] = {}
 
     try:
         agent.store.list_keys("assets")
@@ -102,6 +147,22 @@ def health() -> dict[str, Any]:
     checks["llm"] = llm_mode == "mock" or bool(settings.llm_api_key)
     details["llm_mode"] = llm_mode
     details["store_root"] = str(agent.store.root)
+    details["resource_library_path"] = str(settings.resource_library_path)
+    details["frontend_build_hash"] = _frontend_build_hash()
+    details["auth_mode"] = (
+        "per_user_key" if settings.auth_enabled and settings.user_api_keys
+        else "shared_key" if settings.auth_enabled
+        else "disabled"
+    )
+    details["allowed_origins"] = ",".join(settings.allowed_origins)
+    details["smoke"] = _last_smoke_status()
+    details["sources"] = {
+        "netease": True,
+        "bilibili": True,
+        "youtube": True,
+        "lastfm": bool(settings.lastfm_api_key),
+        "tavily": bool(settings.tavily_api_key),
+    }
 
     status = "ok" if all(checks.values()) else "degraded"
     return {"status": status, "checks": checks, "details": details}
@@ -157,8 +218,8 @@ def analyze(asset_id: str, force_refresh: bool = Query(default=False)):
 
 
 @app.delete("/assets/{asset_id}")
-def delete_asset(asset_id: str, user_id: str | None = Query(default=None)):
-    deleted = agent.delete_asset(asset_id, user_id=user_id)
+def delete_asset(asset_id: str, request: Request, user_id: str | None = Query(default=None)):
+    deleted = agent.delete_asset(asset_id, user_id=_effective_user_id(request, user_id) if user_id else None)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Unknown asset_id: {asset_id}")
     return {"deleted": True, "asset_id": asset_id}
@@ -170,13 +231,14 @@ def clear_cache(preserve_memory: bool = Query(default=True)):
 
 
 @app.post("/rate")
-def rate_asset(request: RatingRequest):
+def rate_asset(payload: RatingRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
     try:
-        memory = agent.rate_asset(request.user_id, request.asset_id, request.score)
+        memory = agent.rate_asset(uid, payload.asset_id, payload.score)
         return {
             "rated": True,
-            "asset_id": request.asset_id,
-            "score": request.score,
+            "asset_id": payload.asset_id,
+            "score": payload.score,
             "taste_updated": True,
             "top_genres": memory.taste_profile.top_genres[:5] if memory.taste_profile else [],
         }
@@ -185,19 +247,19 @@ def rate_asset(request: RatingRequest):
 
 
 @app.get("/ratings/{user_id}")
-def get_ratings(user_id: str):
-    memory = agent.memory.get_memory(user_id)
+def get_ratings(user_id: str, request: Request):
+    memory = agent.memory.get_memory(_effective_user_id(request, user_id))
     return {"ratings": [r.model_dump(mode="json") for r in memory.ratings]}
 
 
 @app.post("/recommend/daily")
-def daily_recommend(request: DailyRequest):
-    return agent.daily_recommend(request.user_id, request.time_of_day)
+def daily_recommend(payload: DailyRequest, request: Request):
+    return agent.daily_recommend(_effective_user_id(request, payload.user_id), payload.time_of_day)
 
 
 @app.get("/recommend/daily/{user_id}")
-def get_daily(user_id: str):
-    return agent.daily_recommend(user_id)
+def get_daily(user_id: str, request: Request):
+    return agent.daily_recommend(_effective_user_id(request, user_id))
 
 
 @app.get("/assets/{asset_id}/similar")
@@ -210,26 +272,32 @@ def similar_assets(asset_id: str, top_k: int = 5):
 
 
 @app.post("/search")
-def search(request: SearchRequest):
-    return agent.search(request.user_id, request.query, request.include_external, request.top_k)
+def search(payload: SearchRequest, request: Request):
+    return agent.search(_effective_user_id(request, payload.user_id), payload.query, payload.include_external, payload.top_k)
 
 
 @app.post("/listen")
-def listen(request: ListenRequest):
-    memory = agent.record_listen(request.user_id, request.asset_id, request.duration, request.completed, request.context)
+def listen(payload: ListenRequest, request: Request):
+    memory = agent.record_listen(
+        _effective_user_id(request, payload.user_id),
+        payload.asset_id,
+        payload.duration,
+        payload.completed,
+        payload.context,
+    )
     return {"memory_updated": True, "history_count": len(memory.listening_history)}
 
 
 @app.post("/chat")
-def chat(request: ChatRequest):
-    history = [{"role": m.role, "content": m.content} for m in request.history]
-    return agent.chat(request.user_id, request.message, history=history or None)
+def chat(payload: ChatRequest, request: Request):
+    history = [{"role": m.role, "content": m.content} for m in payload.history]
+    return agent.chat(_effective_user_id(request, payload.user_id), payload.message, history=history or None)
 
 
 @app.post("/agent/run")
-def agent_run(request: ChatRequest):
-    history = [{"role": m.role, "content": m.content} for m in request.history]
-    return agent.chat(request.user_id, request.message, history=history or None)
+def agent_run(payload: ChatRequest, request: Request):
+    history = [{"role": m.role, "content": m.content} for m in payload.history]
+    return agent.chat(_effective_user_id(request, payload.user_id), payload.message, history=history or None)
 
 
 _SENTINEL = object()
@@ -244,12 +312,13 @@ def _safe_next(gen):
 
 
 @app.post("/agent/stream")
-async def agent_stream(request: ChatRequest):
-    history = [{"role": m.role, "content": m.content} for m in request.history]
+async def agent_stream(payload: ChatRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    history = [{"role": m.role, "content": m.content} for m in payload.history]
 
     async def events():
         loop = asyncio.get_event_loop()
-        gen = agent.stream_chat(request.user_id, request.message, history=history or None)
+        gen = agent.stream_chat(uid, payload.message, history=history or None)
         while True:
             event = await loop.run_in_executor(None, _safe_next, gen)
             if event is _SENTINEL:
@@ -442,6 +511,16 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
             logger.debug("Last.fm top albums failed", exc_info=True)
             return []
 
+    async def _netease_albums():
+        # 网易云专辑搜索拿到真实 album_id/track_count/cover；Last.fm 的专辑没 id，
+        # 点进去还得按名字二次猜匹配（容易猜错）。网易云优先，Last.fm 仅补位。
+        try:
+            from app.sources.netease import search_netease_artist_albums
+            return await asyncio.to_thread(search_netease_artist_albums, request.artist, 6)
+        except Exception:
+            logger.debug("NetEase artist albums failed", exc_info=True)
+            return []
+
     async def _hot_tracks():
         try:
             raw_tracks = await asyncio.to_thread(agent.search_web_music, f"{request.artist} 热门歌曲", 6)
@@ -467,8 +546,8 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
             logger.debug("NetEase artist image failed", exc_info=True)
             return None
 
-    artist_data, albums, ext, netease_img = await asyncio.gather(
-        _artist_data(), _albums(), _hot_tracks(), _netease_image()
+    artist_data, lfm_albums, ext, netease_img, netease_albums_raw = await asyncio.gather(
+        _artist_data(), _albums(), _hot_tracks(), _netease_image(), _netease_albums()
     )
 
     if artist_data:
@@ -477,63 +556,237 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
         info["tags"] = artist_data.get("tags", [])
     # 头像优先网易云（可靠），Last.fm image 字段兜底
     info["image"] = netease_img or (artist_data.get("image", "") if artist_data else "")
-    info["top_albums"] = [{"name": a["name"], "image": a["image"]} for a in albums]
+
+    # 代表专辑：网易云优先（带真实 album_id，点击直达专辑详情），Last.fm 补位。
+    # 按归一化名称去重，避免两源同名专辑重复展示。
+    top_albums: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    for a in (netease_albums_raw or []):
+        name = (a.get("name") or "").strip()
+        if not name:
+            continue
+        key = name.strip().lower()
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        top_albums.append({
+            "id": a.get("id", ""),
+            "name": name,
+            "image": a.get("image", ""),
+            "artist": a.get("artist") or info["name"],
+            "track_count": a.get("track_count"),
+        })
+    for a in (lfm_albums or []):  # Last.fm: {name, image}，无 id，仅补位
+        name = (a.get("name") or "").strip()
+        if not name:
+            continue
+        key = name.strip().lower()
+        if key in seen_names:
+            continue
+        seen_names.add(key)
+        top_albums.append({
+            "id": "", "name": name, "image": a.get("image", ""),
+            "artist": info["name"], "track_count": None,
+        })
+        if len(top_albums) >= 6:
+            break
+    info["top_albums"] = top_albums[:6]
     info["top_tracks"] = ext
 
     return ArtistInfoResponse(**info)
 
 
+@app.post("/artist/album_tracks")
+async def artist_album_tracks(request: AlbumTracksRequest) -> AlbumTracksResponse:
+    """获取专辑曲目：按网易云专辑原始顺序返回完整清单。"""
+    from app.models import ArtistAlbum, ExternalTrack
+    from app.sources.netease import fetch_netease_album_tracks, search_netease_album
+
+    album_meta = None
+    album_id = (request.album_id or "").strip()
+    if not album_id:
+        album_meta = await asyncio.to_thread(search_netease_album, request.artist, request.album)
+        album_id = str((album_meta or {}).get("id") or "")
+
+    detail = await asyncio.to_thread(fetch_netease_album_tracks, album_id, request.limit) if album_id else None
+    if not detail:
+        fallback_album = ArtistAlbum(
+            id=album_id,
+            name=request.album,
+            image=(album_meta or {}).get("cover", ""),
+            artist=request.artist,
+            track_count=(album_meta or {}).get("track_count"),
+        )
+        return AlbumTracksResponse(album=fallback_album, tracks=[], summary=f"没找到《{request.album}》的专辑曲目。")
+
+    album = ArtistAlbum(
+        id=str(detail.get("id") or album_id),
+        name=detail.get("name") or request.album,
+        image=detail.get("cover") or (album_meta or {}).get("cover", ""),
+        artist=detail.get("artist") or request.artist,
+        track_count=detail.get("track_count") or len(detail.get("tracks") or []),
+    )
+    tracks = [
+        ExternalTrack(
+            external_id=t["song_id"],
+            title=t["title"],
+            artist=t.get("artist") or album.artist,
+            album=t.get("album") or album.name,
+            cover_url=t.get("cover") or album.image or None,
+            source="netease",
+            playback_url=f"https://music.163.com/song?id={t['song_id']}",
+        )
+        for t in detail.get("tracks", [])
+    ]
+    return AlbumTracksResponse(album=album, tracks=tracks, summary=f"已加载《{album.name}》{len(tracks)} 首曲目。")
+
+
+# ── 收藏专辑 ──
+
+@app.post("/album/save")
+def save_album(payload: SaveAlbumRequest, request: Request):
+    """收藏一张专辑：保存元数据 + 完整曲目，供「我的库」整张播放。"""
+    from app.models import SavedAlbum
+
+    uid = _effective_user_id(request, payload.user_id)
+    album = SavedAlbum(
+        album_id=payload.album_id, user_id=uid, name=payload.name,
+        artist=payload.artist, image=payload.image, track_count=payload.track_count,
+        tracks=payload.tracks,
+    )
+    saved = agent.save_album(uid, album)
+    return {"saved": True, "album": saved}
+
+
+@app.get("/albums/saved/{user_id}")
+def list_saved_albums(user_id: str, request: Request):
+    return {"albums": [a.model_dump(mode="json") for a in agent.list_saved_albums(_effective_user_id(request, user_id))]}
+
+
+@app.get("/album/saved/{user_id}/{album_id}")
+def album_saved_status(user_id: str, album_id: str, request: Request):
+    return {"saved": agent.is_album_saved(_effective_user_id(request, user_id), album_id)}
+
+
+@app.delete("/album/saved/{user_id}/{album_id}")
+def delete_saved_album(user_id: str, album_id: str, request: Request):
+    deleted = agent.delete_saved_album(_effective_user_id(request, user_id), album_id)
+    return {"deleted": deleted, "album_id": album_id}
+
+
 @app.get("/taste/{user_id}")
-def taste_profile(user_id: str):
-    return agent.get_taste_profile(user_id)
+def taste_profile(user_id: str, request: Request):
+    return agent.get_taste_profile(_effective_user_id(request, user_id))
+
+
+@app.post("/taste/experiment/generate")
+def generate_taste_experiment(payload: TasteExperimentRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    return agent.generate_taste_experiment(uid, payload.prompt, total=payload.total)
+
+
+@app.get("/taste/experiments/{user_id}")
+def list_taste_experiments(user_id: str, request: Request):
+    uid = _effective_user_id(request, user_id)
+    return {"experiments": [exp.model_dump(mode="json") for exp in agent.list_taste_experiments(uid)]}
+
+
+@app.get("/taste/experiment/{user_id}/{experiment_id}")
+def get_taste_experiment(user_id: str, experiment_id: str, request: Request):
+    uid = _effective_user_id(request, user_id)
+    exp = agent.get_taste_experiment(uid, experiment_id)
+    if exp is None:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    return exp
+
+
+@app.post("/taste/experiment/feedback")
+def taste_experiment_feedback(payload: TasteExperimentFeedbackRequest, request: Request):
+    payload.user_id = _effective_user_id(request, payload.user_id)
+    try:
+        return agent.record_taste_experiment_feedback(payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/taste/experiment/report")
+def taste_experiment_report(payload: TasteExperimentReportRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    try:
+        return agent.summarize_taste_experiment(uid, payload.experiment_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.delete("/taste/experiment/{user_id}/{experiment_id}")
+def delete_taste_experiment(user_id: str, experiment_id: str, request: Request):
+    deleted = agent.delete_taste_experiment(_effective_user_id(request, user_id), experiment_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Experiment not found")
+    return {"deleted": True}
+
+
+@app.post("/taste/experiment/regenerate")
+def taste_experiment_regenerate(payload: TasteExperimentRegenerateRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    try:
+        exp = agent.regenerate_taste_experiment_bucket(uid, payload.experiment_id, payload.bucket)
+        return exp.model_dump(mode="json")
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/memory/update")
-def update_memory(request: MemoryUpdateRequest):
-    memory, changed = agent.update_memory(request)
+def update_memory(payload: MemoryUpdateRequest, request: Request):
+    payload.user_id = _effective_user_id(request, payload.user_id)
+    memory, changed = agent.update_memory(payload)
     return {"memory": memory, "updated": changed}
 
 
 @app.post("/memory/feedback")
-def memory_feedback(request: FeedbackRequest):
+def memory_feedback(payload: FeedbackRequest, request: Request):
+    payload.user_id = _effective_user_id(request, payload.user_id)
     try:
-        memory = agent.record_feedback(request)
+        memory = agent.record_feedback(payload)
         return {"memory": memory, "updated": True}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/feedback/dislike")
-def dislike(request: DislikeRequest):
-    memory = agent.record_dislike(request)
+def dislike(payload: DislikeRequest, request: Request):
+    payload.user_id = _effective_user_id(request, payload.user_id)
+    memory = agent.record_dislike(payload)
     return {"updated": True, "memory": memory}
 
 
 @app.get("/memory/{user_id}")
-def get_memory(user_id: str):
-    return agent.memory.get_memory(user_id)
+def get_memory(user_id: str, request: Request):
+    return agent.memory.get_memory(_effective_user_id(request, user_id))
 
 
 # ---- 排除规则（用户偏好设置） ----
 
 @app.get("/exclusions/{user_id}")
-def list_exclusions(user_id: str):
-    return {"rules": agent.memory.list_exclusions(user_id)}
+def list_exclusions(user_id: str, request: Request):
+    return {"rules": agent.memory.list_exclusions(_effective_user_id(request, user_id))}
 
 
 @app.post("/exclusions/{user_id}")
-def add_exclusion(user_id: str, body: dict[str, str]):
+def add_exclusion(user_id: str, body: dict[str, str], request: Request):
+    uid = _effective_user_id(request, user_id)
     rule = body.get("rule", "").strip()
     if not rule:
         raise HTTPException(status_code=400, detail="rule is required")
-    added = agent.memory.add_exclusion(user_id, rule)
-    return {"added": added, "rules": agent.memory.list_exclusions(user_id)}
+    added = agent.memory.add_exclusion(uid, rule)
+    return {"added": added, "rules": agent.memory.list_exclusions(uid)}
 
 
 @app.delete("/exclusions/{user_id}/{rule:path}")
-def remove_exclusion(user_id: str, rule: str):
-    removed = agent.memory.remove_exclusion(user_id, rule)
-    return {"removed": removed, "rules": agent.memory.list_exclusions(user_id)}
+def remove_exclusion(user_id: str, rule: str, request: Request):
+    uid = _effective_user_id(request, user_id)
+    removed = agent.memory.remove_exclusion(uid, rule)
+    return {"removed": removed, "rules": agent.memory.list_exclusions(uid)}
 
 
 @app.get("/library/tracks")
@@ -542,30 +795,30 @@ def library_tracks(limit: int = Query(default=100, ge=1, le=500)):
 
 
 @app.post("/playlist/generate")
-def generate_playlist(request: PlaylistRequest):
-    playlist = agent.generate_playlist(request.user_id, request.instruction)
+def generate_playlist(payload: PlaylistRequest, request: Request):
+    playlist = agent.generate_playlist(_effective_user_id(request, payload.user_id), payload.instruction)
     return playlist
 
 
 @app.post("/journey/generate")
-def generate_journey(request: JourneyRequest):
-    return agent.generate_music_journey(request.user_id, request.instruction)
+def generate_journey(payload: JourneyRequest, request: Request):
+    return agent.generate_music_journey(_effective_user_id(request, payload.user_id), payload.instruction)
 
 
 @app.post("/playlist/auto/{user_id}")
-def auto_playlists(user_id: str):
-    playlists = agent.auto_playlists(user_id)
+def auto_playlists(user_id: str, request: Request):
+    playlists = agent.auto_playlists(_effective_user_id(request, user_id))
     return {"playlists": playlists}
 
 
 @app.get("/playlists/{user_id}")
-def list_playlists(user_id: str):
-    return {"playlists": agent.list_playlists(user_id)}
+def list_playlists(user_id: str, request: Request):
+    return {"playlists": agent.list_playlists(_effective_user_id(request, user_id))}
 
 
 @app.delete("/playlist/{user_id}/{playlist_id}")
-def delete_playlist(user_id: str, playlist_id: str):
-    deleted = agent.delete_playlist(user_id, playlist_id)
+def delete_playlist(user_id: str, playlist_id: str, request: Request):
+    deleted = agent.delete_playlist(_effective_user_id(request, user_id), playlist_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Playlist not found")
     return {"deleted": True}

@@ -82,6 +82,22 @@ export const api = {
     jsonFetch("/memory/update", { method: "POST", body: JSON.stringify({ user_id: userId, event }) }),
   getMemory: (userId) => jsonFetch(`/memory/${encodeURIComponent(userId)}`),
   getTaste: (userId) => jsonFetch(`/taste/${encodeURIComponent(userId)}`),
+  generateTasteExperiment: (userId, prompt, total = 12) =>
+    jsonFetch("/taste/experiment/generate", { method: "POST", body: JSON.stringify({ user_id: userId, prompt, total }) }),
+  listTasteExperiments: (userId) =>
+    jsonFetch(`/taste/experiments/${encodeURIComponent(userId)}`),
+  getTasteExperiment: (userId, experimentId) =>
+    jsonFetch(`/taste/experiment/${encodeURIComponent(userId)}/${encodeURIComponent(experimentId)}`),
+  tasteExperimentFeedback: (userId, experimentId, trackKey, signal, score = null) =>
+    jsonFetch("/taste/experiment/feedback", { method: "POST", body: JSON.stringify({
+      user_id: userId, experiment_id: experimentId, track_key: trackKey, signal, score,
+    }) }),
+  tasteExperimentReport: (userId, experimentId) =>
+    jsonFetch("/taste/experiment/report", { method: "POST", body: JSON.stringify({ user_id: userId, experiment_id: experimentId }) }),
+  regenerateTasteBucket: (userId, experimentId, bucket) =>
+    jsonFetch("/taste/experiment/regenerate", { method: "POST", body: JSON.stringify({ user_id: userId, experiment_id: experimentId, bucket }) }),
+  deleteTasteExperiment: (userId, experimentId) =>
+    jsonFetch(`/taste/experiment/${encodeURIComponent(userId)}/${encodeURIComponent(experimentId)}`, { method: "DELETE" }),
   getRatings: (userId) => jsonFetch(`/ratings/${encodeURIComponent(userId)}`),
   dislike: (userId, track) =>
     jsonFetch("/feedback/dislike", { method: "POST", body: JSON.stringify({
@@ -101,6 +117,11 @@ export const api = {
     jsonFetch("/api/playback/audio", { method: "POST", body: JSON.stringify({ track, user_id: userId }) }),
   playbackMv: (userId, track) =>
     jsonFetch("/api/playback/mv", { method: "POST", body: JSON.stringify({ track, user_id: userId }) }),
+  // ---- 收听行为上报（喂行为锚：听完=completed，秒跳=skip）----
+  listen: (userId, assetId, duration, completed, context = "player") =>
+    jsonFetch("/listen", { method: "POST", body: JSON.stringify({
+      user_id: userId, asset_id: assetId, duration, completed, context,
+    }) }),
 
   // ---- 发现 / 歌手 ----
   discoverBrowse: (userId, category, value, limit = 12, seed = 0) =>
@@ -109,6 +130,16 @@ export const api = {
     jsonFetch("/discover/trending", { method: "POST", body: JSON.stringify({ user_id: userId, limit }) }),
   artistInfo: (artist) =>
     jsonFetch("/artist/info", { method: "POST", body: JSON.stringify({ artist }) }),
+  artistAlbumTracks: (artist, album, albumId, limit = 100) =>
+    jsonFetch("/artist/album_tracks", { method: "POST", body: JSON.stringify({ artist, album, album_id: albumId || null, limit }) }),
+
+  // ---- 收藏专辑 ----
+  saveAlbum: (userId, album) =>
+    jsonFetch("/album/save", { method: "POST", body: JSON.stringify({ user_id: userId, ...album }) }),
+  unsaveAlbum: (userId, albumId) =>
+    jsonFetch(`/album/saved/${encodeURIComponent(userId)}/${encodeURIComponent(albumId)}`, { method: "DELETE" }),
+  listSavedAlbums: (userId) => jsonFetch(`/albums/saved/${encodeURIComponent(userId)}`),
+  isAlbumSaved: (userId, albumId) => jsonFetch(`/album/saved/${encodeURIComponent(userId)}/${encodeURIComponent(albumId)}`),
 
   // ---- 网易云认证 ----
   neteaseQrKey: () => jsonFetch("/auth/netease/qr/key"),

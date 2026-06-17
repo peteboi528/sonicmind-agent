@@ -47,6 +47,11 @@ class TestRegistryCompleteness:
         assert "web_music_search" not in tools
         assert tools == ["recommend"]
 
+    def test_artist_albums_uses_album_tool_without_song_search(self):
+        tools = INTENT_REGISTRY["artist_albums"].tools_for(use_web=True)
+        assert tools == ["artist_albums"]
+        assert "web_music_search" not in tools
+
 
 class TestValidation:
     def test_valid_intents_set(self):
@@ -88,6 +93,8 @@ class TestKeywordFallback:
         ("分析下我的品味", "taste"),
         ("导入这个网易云歌单", "import"),
         ("来个音乐旅程 热身到冲刺", "journey"),
+        ("推荐 The Weeknd 的专辑", "artist_albums"),
+        ("周杰伦有哪几张专辑", "artist_albums"),
         ("Asen 牛逼吗", "discuss"),
     ])
     def test_keyword_matches(self, query, expected):

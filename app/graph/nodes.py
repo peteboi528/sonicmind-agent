@@ -429,10 +429,40 @@ def _run_tool(
             search.external = _filter_excluded(search.external, excluded_tracks)
         results.append({"type": "search", "response": search})
         trace.append(f"[search] 本地 {len(search.local)} 首，外部 {len(search.external)} 首。")
+    elif handler == "artist_albums":
+        # 专辑推荐：直接取网易云真实专辑（带 album_id，可整张播放），不走单曲搜索
+        # （避开单曲端点限流导致的 netease-fallback 假候选）。实体优先用 LLM 抽取的
+        # entities（已解析"他"等共指），否则回退到核心检索词。
+        artist = (plan.retrieval_plan.entities[0].strip()
+                  if plan.retrieval_plan.entities and plan.retrieval_plan.entities[0].strip()
+                  else search_core)
+        albums = agent.recommend_artist_albums(user_id, artist, limit=min(plan.target_count or 6, 12))
+        results.append({"type": "artist_albums", "albums": albums})
+        trace.append(f"[artist_albums] 获取 {len(albums)} 张《{artist}》的专辑。")
+        for al in albums:
+            events.append(StreamEvent(
+                type="album_card",
+                content=al.get("name", ""),
+                payload={"album": al, "artist": artist},
+            ))
     elif handler == "taste":
         summary = agent.summarize_taste(user_id)
         results.append({"type": "taste", "summary": summary})
         trace.append("[taste] 已总结用户品味。")
+    elif handler == "taste_experiment":
+        experiment = agent.generate_taste_experiment(user_id, query, total=plan.target_count or 12)
+        results.append({"type": "taste_experiment", "experiment": experiment})
+        cards = [_taste_experiment_card(item) for segment in experiment.segments for item in segment.tracks]
+        trace.append(f"[taste_experiment] 生成 {len(cards)} 首三档品味实验候选。")
+        events.append(StreamEvent(
+            type="candidates",
+            content=f"品味实验 {len(cards)} 首",
+            payload={
+                "count": len(cards),
+                "cards": cards,
+                "taste_experiment": experiment.model_dump(mode="json"),
+            },
+        ))
     elif handler == "import_netease_playlist":
         imported = agent.import_netease_playlist(query, user_id=user_id, limit=plan.target_count or 100)
         results.append({"type": "import_netease_playlist", "result": imported})
@@ -577,6 +607,23 @@ def _track_to_excluded_item(track: Any) -> dict[str, str]:
     }
 
 
+def _taste_experiment_card(item: Any) -> dict[str, Any]:
+    track = item.track
+    return {
+        "title": track.title,
+        "artist": track.artist,
+        "source": track.source,
+        "source_id": track.source_id,
+        "genre": track.genre,
+        "mood": track.mood,
+        "score": track.score,
+        "components": item.components or track.components,
+        "reason": item.reason,
+        "bucket": item.bucket,
+        "expected_signal": item.expected_signal,
+    }
+
+
 def _merge_excluded_tracks(existing: list[dict[str, str]], new_items: list[dict[str, str]]) -> list[dict[str, str]]:
     merged: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -680,6 +727,10 @@ def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     final_payload = answer.model_dump(mode="json")
     if listed:
         final_payload["cards"] = aligned_cards
+    experiment_payload = _taste_experiment_payload(state.get("results", []))
+    if experiment_payload:
+        final_payload["taste_experiment"] = experiment_payload
+    final_payload["trace_summary"] = _trace_summary(state["plan"], state.get("results", []), trace, aligned_cards)
     return {
         **state,
         "answer": answer,
@@ -954,12 +1005,44 @@ def _completed_actions(results: list[dict[str, Any]]) -> list[str]:
         "playlist": "playlist",
         "search": "search",
         "taste": "taste",
+        "taste_experiment": "taste_experiment",
         "journey": "playlist",
         "import_netease_playlist": "import_netease_playlist",
         "video_search": "video_search",
         "web_info_search": "web_info_search",
     }
     return [mapping.get(result.get("type", ""), result.get("type", "")) for result in results]
+
+
+def _trace_summary(plan: AgentPlan, results: list[dict[str, Any]], trace: list[str], cards: list[dict[str, Any]]) -> dict[str, Any]:
+    """稳定的 Agent 摘要，供 UI 透明度面板和 smoke 报告断言使用。"""
+    tracks = _collect_tracks(results)
+    experiment_cards = 0
+    for result in results:
+        if result.get("type") == "taste_experiment":
+            exp = result.get("experiment")
+            experiment_cards = sum(len(segment.tracks) for segment in getattr(exp, "segments", []) or [])
+    return {
+        "intent": plan.intent,
+        "strategy": plan.strategy,
+        "tools": _completed_actions(results),
+        "sources": sorted({getattr(track, "source", "") for track in tracks if getattr(track, "source", "")}),
+        "used_fallback": any("fallback" in line.lower() for line in trace),
+        "guard_removed": sum(1 for line in trace if line.startswith("[guard]")),
+        "reflection": any("[reflect]" in line for line in trace),
+        "final_cards": len(cards) or experiment_cards,
+    }
+
+
+def _taste_experiment_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for result in results:
+        if result.get("type") == "taste_experiment":
+            exp = result.get("experiment")
+            if hasattr(exp, "model_dump"):
+                return exp.model_dump(mode="json")
+            if isinstance(exp, dict):
+                return exp
+    return None
 
 
 def compose_answer(
@@ -981,6 +1064,10 @@ def compose_answer(
         return _compose_video_answer(query, tracks, agent, history_text) or "这轮没有搜到视频结果。"
     if plan.intent == "artist_info":
         return _compose_artist_info_answer(query, results, agent, history_text) or "抱歉，暂时没找到相关信息。"
+    if plan.intent == "artist_albums":
+        return _compose_artist_albums_answer(query, results, agent, history_text)
+    if plan.intent == "taste_experiment":
+        return _compose_taste_experiment_answer(results)
     if plan.intent == "taste":
         return next((r["summary"] for r in results if r.get("type") == "taste"), "还没有足够品味数据。")
     if plan.intent == "journey":
@@ -1186,6 +1273,56 @@ def _compose_video_answer(
         for idx, track in enumerate(tracks[:10], start=1)
     ]
     return f"{intro}\n" + "\n".join(lines)
+
+
+def _compose_artist_albums_answer(
+    query: str,
+    results: list[dict[str, Any]],
+    agent: AudioVisualAgent | None,
+    history_text: str = "",
+) -> str:
+    """artist_albums 意图回答：列出真实专辑清单。
+
+    专辑名来自网易云回查、可追溯。用「专辑《名》」格式书写，且 collect_known_titles 已把
+    专辑名纳入白名单——两层保险确保 Answer Guard 不会把专辑名当幻觉歌名删掉。
+    """
+    albums: list[dict[str, Any]] = []
+    for r in results:
+        if r.get("type") == "artist_albums":
+            albums.extend(r.get("albums") or [])
+    if not albums:
+        return "暂时没拿到这位歌手的专辑，可能是接口限流，稍后再试一次。"
+    artist = albums[0].get("artist") or ""
+    if artist:
+        intro = f"这是 {artist} 的 {len(albums)} 张专辑，点任意一张就能整张播放："
+    else:
+        intro = f"找到 {len(albums)} 张专辑，点任意一张就能整张播放："
+    lines = []
+    for idx, a in enumerate(albums, start=1):
+        name = a.get("name", "")
+        count = a.get("track_count")
+        tail = f"（{count} 首）" if count else ""
+        lines.append(f"{idx}. 专辑《{name}》 - {a.get('artist') or artist or '未知'}{tail}")
+    return f"{intro}\n" + "\n".join(lines)
+
+
+def _compose_taste_experiment_answer(results: list[dict[str, Any]]) -> str:
+    exp = next((r.get("experiment") for r in results if r.get("type") == "taste_experiment"), None)
+    if exp is None:
+        return "这轮没有生成可追溯的品味实验候选；我不会硬凑结果。"
+    lines = [
+        f"我做了一个 Taste Lab 品味实验：{getattr(exp, 'hypothesis', '')}",
+        "三档候选已经准备好，听完、跳过、喜欢或标记太安全/太远后，就能生成实验报告：",
+    ]
+    label_map = {"safe": "安全区", "stretch": "轻微越界", "bold": "大胆探索"}
+    for segment in getattr(exp, "segments", []) or []:
+        names = "、".join(f"《{item.track.title}》" for item in segment.tracks[:4])
+        label = getattr(segment, "label", "") or label_map.get(segment.name, segment.name)
+        lines.append(f"- {label}：{len(segment.tracks)} 首。{names or '暂无候选'}")
+    result_summary = getattr(exp, "result_summary", "")
+    if result_summary:
+        lines.append(result_summary)
+    return "\n".join(lines)
 
 
 def _compose_artist_info_answer(

@@ -1,0 +1,50 @@
+[
+  {
+    "case_id": "netease_artist_search",
+    "query": "找 The Weeknd 的歌",
+    "expected_intent": "search",
+    "must_have_trace": ["search"],
+    "acceptance": "返回至少 3 个可追溯候选，source 优先为 netease；答案不应出现未在候选中的书名号歌名。"
+  },
+  {
+    "case_id": "artist_album_order",
+    "query": "推荐 Taylor Swift 的专辑",
+    "expected_intent": "artist_albums",
+    "must_have_events": ["album_card", "final"],
+    "acceptance": "点击专辑后 /artist/album_tracks 返回完整曲目，前端按接口原始顺序 store.playAll。"
+  },
+  {
+    "case_id": "video_mv_search",
+    "query": "找 NewJeans 的 MV 视频",
+    "expected_intent": "video",
+    "must_have_trace": ["video_search"],
+    "acceptance": "返回 B站或 YouTube 视频候选，final payload.cards 与答案列出的结果一致。"
+  },
+  {
+    "case_id": "artist_info_grounded",
+    "query": "介绍 NewJeans 的背景",
+    "expected_intent": "artist_info",
+    "must_have_trace": ["web_info_search"],
+    "acceptance": "回答包含参考来源链接；不编造无法从搜索结果支持的具体销量、奖项或日期。"
+  },
+  {
+    "case_id": "netease_playlist_import_then_recommend",
+    "query": "帮我导入网易云歌单 playlist?id=123，然后挑几首适合跑步的",
+    "expected_intent": "import",
+    "must_have_trace": ["import_netease_playlist"],
+    "acceptance": "能识别复合/导入意图；导入失败时要说明原因，不用未核实曲目硬凑推荐。"
+  },
+  {
+    "case_id": "long_dialogue_continuation",
+    "query_sequence": ["推荐几首适合深夜写代码的歌", "再来几首，不要上一批", "分析我的音乐品味"],
+    "expected_intents": ["recommend", "recommend", "taste"],
+    "acceptance": "第二轮不重复第一轮展示曲目；第三轮不被前两轮场景污染，应进入 taste。"
+  },
+  {
+    "case_id": "taste_experiment_boundary",
+    "query": "推荐点不一样的，做个品味实验，但不要太吵",
+    "expected_intent": "taste_experiment",
+    "must_have_trace": ["taste_experiment"],
+    "acceptance": "final payload 包含 safe/stretch/bold 三档实验对象；bold 仍必须遵守 dislike/exclusion 和“不要太吵”约束，不能为了探索违反用户边界。"
+  }
+]

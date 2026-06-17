@@ -31,6 +31,7 @@ class Settings:
         self.store_root: str = os.getenv("STORE_ROOT", "data/store")
         self.media_root: str = os.getenv("MEDIA_ROOT", "data/media")
         self.resource_library_path: str = os.getenv("RESOURCE_LIBRARY_PATH", "data/resource_library.sqlite")
+        self.allowed_origins: list[str] = _csv_env("ALLOWED_ORIGINS", "*")
         self.daily_rec_count: int = int(os.getenv("DAILY_REC_COUNT", "25"))
         self.enable_online_enrich: bool = os.getenv("ENABLE_ONLINE_ENRICH", "false").lower() == "true"
         # Phase 3：embedding 检索。默认 auto：装了 sentence-transformers 自动启用，否则回退 TF cosine + 同义词 boost。
@@ -69,15 +70,40 @@ class Settings:
 
         # ---- API 鉴权（多租户/部署用）----
         # auth_enabled=false（默认）：本地 demo 不校验，前端/测试无需带 key。
-        # auth_enabled=true：除公开端点（/health /docs 等）外，所有请求需带 X-API-Key == api_key。
-        # 注意：共享密钥只挡「未授权访问」；要彻底防「已授权客户端伪造他人 user_id」，
-        # 需把 user_id 从 per-user key 派生（后续扩展）。
+        # auth_enabled=true：
+        # - USER_API_KEYS 非空：X-API-Key 解析为 user_id，服务端覆盖客户端传入的 user_id。
+        # - USER_API_KEYS 为空：退回共享 API_KEY，只做访问门禁，兼容旧部署。
         self.auth_enabled: bool = os.getenv("AUTH_ENABLED", "false").lower() == "true"
         self.api_key: str = os.getenv("API_KEY", "")
+        self.user_api_keys: dict[str, str] = _parse_user_api_keys(os.getenv("USER_API_KEYS", ""))
+
+    def user_id_for_api_key(self, api_key: str | None) -> str | None:
+        """Return the bound user_id for a per-user API key, or None for shared-key auth."""
+        if not api_key:
+            return None
+        return self.user_api_keys.get(api_key)
 
     @property
     def mock_mode(self) -> bool:
         return not self.llm_api_key
+
+
+def _csv_env(name: str, default: str) -> list[str]:
+    raw = os.getenv(name, default)
+    values = [item.strip() for item in raw.split(",") if item.strip()]
+    return values or [default]
+
+
+def _parse_user_api_keys(raw: str) -> dict[str, str]:
+    """Parse USER_API_KEYS as "user_id:key,user2:key2" into {key: user_id}."""
+    mapping: dict[str, str] = {}
+    for item in raw.split(","):
+        if ":" not in item:
+            continue
+        user_id, key = (part.strip() for part in item.split(":", 1))
+        if user_id and key:
+            mapping[key] = user_id
+    return mapping
 
 
 settings = Settings()

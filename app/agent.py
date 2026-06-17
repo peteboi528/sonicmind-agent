@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from app.compound import is_compound_task
@@ -27,11 +27,18 @@ from app.models import (
     Playlist,
     RagEvidence,
     RecommendedTrack,
+    SavedAlbum,
     SearchResponse,
     Segment,
     SimilarAssetResult,
     SimilarSegmentResult,
+    TasteExperiment,
+    TasteExperimentFeedbackRequest,
+    TasteExperimentReport,
+    TasteExperimentSegment,
+    TasteExperimentTrack,
     TasteProfile,
+    TrackRef,
     UserMemory,
     utc_now_iso,
 )
@@ -519,6 +526,12 @@ class AudioVisualAgent:
         }
         if not preserve_memory:
             cleared["memory"] = self.store.clear_collection("memory")
+        # 专辑详情是纯性能缓存（非用户数据），主动清缓存时一并清掉，确保下次点击重新取最新。
+        try:
+            from app.sources.netease import clear_album_detail_cache
+            cleared["album_detail"] = clear_album_detail_cache()
+        except Exception:
+            logger.debug("clear_album_detail_cache failed", exc_info=True)
         return cleared
 
     # --- 推荐功能 ---
@@ -1295,6 +1308,32 @@ class AudioVisualAgent:
     def delete_playlist(self, user_id: str, playlist_id: str) -> bool:
         return self.store.delete_key("playlists", f"{user_id}_{playlist_id}")
 
+    # ── 收藏专辑（与歌单同构：collection=saved_albums，key=f"{user_id}_{album_id}"） ──
+
+    def save_album(self, user_id: str, album: SavedAlbum) -> SavedAlbum:
+        self.store.write_model("saved_albums", f"{user_id}_{album.album_id}", album)
+        return album
+
+    def list_saved_albums(self, user_id: str) -> list[SavedAlbum]:
+        albums: list[SavedAlbum] = []
+        for key in self.store.list_keys("saved_albums"):
+            if not key.startswith(f"{user_id}_"):
+                continue
+            try:
+                a = self.store.read_model("saved_albums", key, SavedAlbum)
+            except Exception:
+                logger.warning("Skipping unreadable saved album %s (stale schema?)", key, exc_info=True)
+                continue
+            if a:
+                albums.append(a)
+        return albums
+
+    def delete_saved_album(self, user_id: str, album_id: str) -> bool:
+        return self.store.delete_key("saved_albums", f"{user_id}_{album_id}")
+
+    def is_album_saved(self, user_id: str, album_id: str) -> bool:
+        return self.store.read_model("saved_albums", f"{user_id}_{album_id}", SavedAlbum) is not None
+
     def _playlist_candidates(
         self,
         instruction: str,
@@ -1478,6 +1517,595 @@ class AudioVisualAgent:
             parts.append(f"偏好的艺人有 {artist_text}，")
         parts.append(f"显式表达过的偏好包括 {pref_text}。")
         return "".join(parts)
+
+    def recommend_artist_albums(self, user_id: str, artist: str, limit: int = 6) -> list[dict[str, Any]]:
+        """推荐某歌手的真实专辑清单：走网易云专辑搜索（type=10，与单曲搜索不同端点），
+        返回带真实 album_id 的专辑，前端可整张播放。
+
+        关键：专辑端点不与单曲搜索共享限流，且 search_netease_artist_albums 有进程缓存——
+        单曲搜索被限流掉到 netease-fallback 假候选时，专辑端点通常仍可用，故「推荐专辑」
+        既更贴合用户意图，又比单曲推荐更稳。失败返回空列表（不造假）。
+        """
+        artist = (artist or "").strip()
+        if not artist:
+            return []
+        try:
+            return netease_source.search_netease_artist_albums(artist, limit)
+        except Exception:
+            logger.debug("recommend_artist_albums failed for %s", artist, exc_info=True)
+            return []
+
+    def generate_taste_experiment(self, user_id: str, prompt: str, total: int = 12) -> TasteExperiment:
+        """生成 safe/stretch/bold 三档品味实验。
+
+        MVP 不造歌名：候选来自现有推荐/搜索，再用 rerank components 分桶。
+        """
+        total = max(3, min(total or 12, 30))
+        per_bucket = max(1, total // 3)
+        memory = self.memory.get_memory(user_id)
+        hypothesis = self._taste_experiment_hypothesis(memory)
+        seeds = self._taste_experiment_search_seeds(memory, prompt)
+        candidates = self._collect_taste_candidates(user_id, seeds, total)
+        candidates = self._filter_taste_experiment_candidates(user_id, candidates, memory.exclusion_rules)
+        buckets = self._bucket_taste_experiment_candidates(candidates, per_bucket)
+        segments = [
+            TasteExperimentSegment(
+                name="safe",
+                label="安全区",
+                description="我确认你大概率会喜欢，用来验证稳定偏好。",
+                tracks=[
+                    self._taste_experiment_track(track, "safe", components, reason, score)
+                    for track, components, reason, score in buckets["safe"]
+                ],
+            ),
+            TasteExperimentSegment(
+                name="stretch",
+                label="轻微越界",
+                description="和你的画像相邻，但在风格、语言或能量上稍微越界。",
+                tracks=[
+                    self._taste_experiment_track(track, "stretch", components, reason, score)
+                    for track, components, reason, score in buckets["stretch"]
+                ],
+            ),
+            TasteExperimentSegment(
+                name="bold",
+                label="大胆探索",
+                description="明显探索边界，但仍避开你明确排除和不喜欢的内容。",
+                tracks=[
+                    self._taste_experiment_track(track, "bold", components, reason, score)
+                    for track, components, reason, score in buckets["bold"]
+                ],
+            ),
+        ]
+        actual_total = sum(len(segment.tracks) for segment in segments)
+        shortfall = "" if actual_total >= total else f"候选不足，本次先生成 {actual_total}/{total} 首。"
+        experiment = TasteExperiment(
+            experiment_id=self._new_taste_experiment_id(user_id, prompt),
+            user_id=user_id,
+            prompt=prompt,
+            hypothesis=hypothesis,
+            segments=segments,
+            result_summary=shortfall,
+        )
+        self._save_taste_experiment(experiment)
+        return experiment
+
+    def _collect_taste_candidates(
+        self,
+        user_id: str,
+        seeds: list[str],
+        total: int,
+    ) -> list[tuple[Any, dict[str, float], str, float]]:
+        """汇总推荐 + 多种子搜索的候选（未过滤），供 generate/regenerate 复用。"""
+        candidates: list[tuple[Any, dict[str, float], str, float]] = []
+        if seeds:
+            try:
+                rec = self.recommend_for_query(user_id, seeds[0], top_k=max(total * 3, 18))
+                for item in rec.tracks:
+                    candidates.append((item.asset, item.components or {}, item.reason, item.score))
+            except Exception:
+                logger.debug("taste_experiment recommend failed for %s", seeds[0], exc_info=True)
+        for search_goal in seeds[:16]:
+            try:
+                tracks = self.search_web_music(search_goal, top_k=6, relevance_query=search_goal)
+            except Exception:
+                logger.debug("taste_experiment seed search failed for %s", search_goal, exc_info=True)
+                continue
+            ranked = self._rerank_tracks(user_id, search_goal, tracks, top_k=len(tracks))
+            for track, breakdown in ranked:
+                candidates.append((track, breakdown.components, breakdown.reason, breakdown.score))
+        return candidates
+
+    def regenerate_taste_experiment_bucket(self, user_id: str, experiment_id: str, bucket: str) -> TasteExperiment:
+        """按上一轮反馈重做某一档（safe/stretch/bold）。
+
+        取该档意图的种子重新搜候选，按 familiarity 取对应切片替换该 segment，
+        并避开当前实验其它档已有的曲。这是"反馈驱动下一轮"的入口：报告判定 bold 太远
+        → 用户点重做 bold → 换一批探索梯度更合适的候选。
+        """
+        if bucket not in {"safe", "stretch", "bold"}:
+            raise ValueError(f"unknown bucket: {bucket}")
+        with self.store.lock("taste_experiments", user_id):
+            experiments = self.store.read_models("taste_experiments", user_id, TasteExperiment)
+            exp = next((e for e in experiments if e.experiment_id == experiment_id), None)
+            if exp is None:
+                raise ValueError("Experiment not found")
+            memory = self.memory.get_memory(user_id)
+            segment = next((s for s in exp.segments if s.name == bucket), None)
+            existing = sum(len(s.tracks) for s in exp.segments)
+            per_bucket = len(segment.tracks) if segment and segment.tracks else max(1, (existing // 3) or 1)
+
+            seeds = self._taste_experiment_seeds_for_bucket(memory, exp.prompt, bucket)
+            candidates = self._collect_taste_candidates(user_id, seeds, per_bucket * 6)
+            candidates = self._filter_taste_experiment_candidates(user_id, candidates, memory.exclusion_rules)
+            # 避开其它档已有的曲，重做不撞车
+            other_keys = {
+                self._taste_experiment_track_key(item)
+                for seg in exp.segments if seg.name != bucket
+                for item in seg.tracks
+            }
+            candidates = [c for c in candidates if self._candidate_key(c) not in other_keys]
+            ranked = sorted(candidates, key=self._taste_familiarity, reverse=True)
+            band = self._slice_for_bucket(ranked, bucket, per_bucket)
+            new_tracks = [
+                self._taste_experiment_track(track, bucket, components, reason, score)
+                for track, components, reason, score in band
+            ]
+            # 档内按 key 再去一次重
+            seen: set[str] = set()
+            deduped: list[TasteExperimentTrack] = []
+            for it in new_tracks:
+                k = self._taste_experiment_track_key(it)
+                if k in seen:
+                    continue
+                seen.add(k)
+                deduped.append(it)
+            if segment is not None:
+                segment.tracks = deduped
+            exp.updated_at = utc_now_iso()
+            self.store.write_models("taste_experiments", user_id, experiments[-20:])
+            return exp
+
+    def _taste_experiment_seeds_for_bucket(self, memory: UserMemory, prompt: str, bucket: str) -> list[str]:
+        """按档位意图取搜索种子：safe=主打风格/歌手，stretch=相邻衍生，bold=跨风格探索。"""
+        taste = memory.taste_profile or TasteProfile()
+        genres = [g for g, _ in taste.top_genres[:3] if g]
+        artists = [a for a, _ in taste.top_artists[:6] if a]
+        if bucket == "safe":
+            seeds: list[str] = [f"{a} {genres[0]}" for a in artists[:6] if genres]
+            if genres:
+                seeds.append(" ".join(genres[:3]))
+            return self._dedupe_seeds(seeds) or ["热门 推荐"]
+        if bucket == "stretch":
+            seeds = []
+            if genres:
+                seeds.append(" ".join([genres[0], "相邻", "新风格"]))
+            seeds += ["neo soul", "另类 R&B", "独立流行", "律动 R&B", "氛围 说唱"]
+            return self._dedupe_seeds(seeds)
+        # bold：跨风格、世界音乐、实验性
+        return self._dedupe_seeds([
+            "探索 新风格", "小众 世界音乐", "实验 电子", "融合 爵士", "独立 民谣", "另类 摇滚",
+        ])
+
+    @staticmethod
+    def _dedupe_seeds(seeds: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for s in seeds:
+            s = s.strip()
+            if s and s.lower() not in seen:
+                seen.add(s.lower())
+                out.append(s)
+        return out
+
+    def list_taste_experiments(self, user_id: str) -> list[TasteExperiment]:
+        return self.store.read_models("taste_experiments", user_id, TasteExperiment)
+
+    def get_taste_experiment(self, user_id: str, experiment_id: str) -> TasteExperiment | None:
+        return next((exp for exp in self.list_taste_experiments(user_id) if exp.experiment_id == experiment_id), None)
+
+    def delete_taste_experiment(self, user_id: str, experiment_id: str) -> bool:
+        with self.store.lock("taste_experiments", user_id):
+            experiments = self.store.read_models("taste_experiments", user_id, TasteExperiment)
+            remaining = [exp for exp in experiments if exp.experiment_id != experiment_id]
+            if len(remaining) == len(experiments):
+                return False
+            self.store.write_models("taste_experiments", user_id, remaining)
+            return True
+
+    def record_taste_experiment_feedback(self, request: TasteExperimentFeedbackRequest) -> TasteExperiment:
+        with self.store.lock("taste_experiments", request.user_id):
+            experiments = self.store.read_models("taste_experiments", request.user_id, TasteExperiment)
+            for exp in experiments:
+                if exp.experiment_id != request.experiment_id:
+                    continue
+                item = self._find_taste_experiment_track(exp, request.track_key)
+                if item is None:
+                    raise ValueError("Track not found in experiment")
+                feedback = item.feedback
+                current = getattr(feedback, request.signal)
+                setattr(feedback, request.signal, current + 1)
+                feedback.last_signal = request.signal
+                if request.signal == "rated" and request.score is not None:
+                    feedback.scores.append(float(request.score))
+                self._apply_taste_experiment_ts_feedback(item, request.signal, request.score)
+                self._record_taste_experiment_listen(request.user_id, item, request.signal, request.score)
+                if self._taste_experiment_feedback_count(exp) >= 6 and exp.status == "collecting":
+                    exp.status = "ready"
+                exp.updated_at = utc_now_iso()
+                self.store.write_models("taste_experiments", request.user_id, experiments[-20:])
+                return exp
+        raise ValueError("Experiment not found")
+
+    def summarize_taste_experiment(self, user_id: str, experiment_id: str) -> TasteExperimentReport:
+        with self.store.lock("taste_experiments", user_id):
+            experiments = self.store.read_models("taste_experiments", user_id, TasteExperiment)
+            for exp in experiments:
+                if exp.experiment_id != experiment_id:
+                    continue
+                stats = self._taste_experiment_bucket_stats(exp)
+                feedback_total = int(sum(bucket.get("feedback_count", 0) for bucket in stats.values()))
+                if feedback_total < 6:
+                    summary = f"目前只有 {feedback_total} 条实验反馈，再听/跳过几首后报告会更可靠。"
+                    hypothesis_result = "继续收集"
+                    next_strategy = "先保持三档结构，优先补足 stretch 和 bold 的反馈。"
+                else:
+                    best_bucket = max(stats, key=lambda name: (stats[name].get("liked_rate", 0), stats[name].get("completed_rate", 0)))
+                    too_far = stats.get("bold", {}).get("too_far", 0)
+                    summary = f"已收集 {feedback_total} 条反馈，{self._bucket_label(best_bucket)} 的正反馈最强。"
+                    hypothesis_result = (
+                        "大胆探索边界偏远，需要收窄。"
+                        if too_far >= 2 else
+                        f"假设部分成立：{self._bucket_label(best_bucket)} 当前最能解释你的反应。"
+                    )
+                    next_strategy = (
+                        "下一轮降低 bold 能量跨度，多做相邻风格实验。"
+                        if too_far >= 2 else
+                        "下一轮保留 safe 锚点，把 stretch 的比例提高一点。"
+                    )
+                report = TasteExperimentReport(
+                    summary=summary,
+                    bucket_stats=stats,
+                    hypothesis_result=hypothesis_result,
+                    next_recommendation_strategy=next_strategy,
+                )
+                exp.report = report
+                exp.result_summary = summary
+                exp.status = "reported" if feedback_total >= 6 else exp.status
+                exp.updated_at = utc_now_iso()
+                self.store.write_models("taste_experiments", user_id, experiments[-20:])
+                return report
+        raise ValueError("Experiment not found")
+
+    def _save_taste_experiment(self, experiment: TasteExperiment) -> None:
+        with self.store.lock("taste_experiments", experiment.user_id):
+            experiments = self.store.read_models("taste_experiments", experiment.user_id, TasteExperiment)
+            experiments = [exp for exp in experiments if exp.experiment_id != experiment.experiment_id]
+            experiments.append(experiment)
+            self.store.write_models("taste_experiments", experiment.user_id, experiments[-20:])
+
+    @staticmethod
+    def _new_taste_experiment_id(user_id: str, prompt: str) -> str:
+        raw = f"{user_id}|{prompt}|{datetime.now(UTC).isoformat()}".encode("utf-8")
+        return "taste_" + hashlib.sha1(raw).hexdigest()[:12]
+
+    def _taste_experiment_hypothesis(self, memory: UserMemory) -> str:
+        taste = memory.taste_profile or TasteProfile()
+        genres = "、".join(name for name, _ in taste.top_genres[:2]) or "你最近反复命中的风格"
+        moods = "、".join(name for name, _ in taste.top_moods[:2]) or "稳定情绪锚点"
+        return f"我猜你会稳定接受 {genres}/{moods}，但探索边界可能藏在相邻风格和不同能量密度里。"
+
+    def _taste_experiment_search_seeds(self, memory: UserMemory, prompt: str) -> list[str]:
+        """把“做个品味实验”这类功能句改写成音乐平台能搜到的候选种子。"""
+        taste = memory.taste_profile or TasteProfile()
+        genres = [name for name, _ in taste.top_genres[:3] if name]
+        moods = [name for name, _ in taste.top_moods[:3] if name]
+        artists = [name for name, _ in taste.top_artists[:5] if name]
+        prompt = prompt or ""
+        seeds: list[str] = []
+        for artist in artists[:6]:
+            primary_genre = genres[1] if len(genres) > 1 else (genres[0] if genres else "")
+            if primary_genre:
+                seeds.append(f"{artist} {primary_genre}")
+            if moods:
+                seeds.append(f"{artist} {moods[0]}")
+        if genres:
+            seeds.append(" ".join([*genres[:2], "新风格"]))
+            seeds.append(" ".join([genres[0], "小众", "相邻风格"]))
+        if moods:
+            seeds.append(" ".join([moods[0], "氛围", "新歌"]))
+        if any(token in prompt for token in ["不一样", "听腻", "新风格", "探索", "实验"]):
+            seeds.extend(["探索 新风格", "小众 R&B", "另类 R&B", "neo soul", "氛围 说唱", "新灵魂"])
+        seeds.extend(["独立流行", "律动 R&B", "另类流行", "chill R&B"])
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for seed in seeds:
+            seed = seed.strip()
+            if seed and seed.lower() not in seen:
+                seen.add(seed.lower())
+                uniq.append(seed)
+        return uniq or ["探索 新风格"]
+
+    def _filter_taste_experiment_candidates(
+        self,
+        user_id: str,
+        candidates: list[tuple[Any, dict[str, float], str, float]],
+        exclusion_rules: list[str],
+    ) -> list[tuple[Any, dict[str, float], str, float]]:
+        seen: set[str] = set()
+        artist_counts: dict[str, int] = {}
+        filtered: list[tuple[Any, dict[str, float], str, float]] = []
+        rules = [rule.lower().strip() for rule in exclusion_rules if rule.strip()]
+        for track, components, reason, score in candidates:
+            if self.library.is_disliked(user_id, track):
+                continue
+            if not self._is_taste_experiment_quality_track(track):
+                continue
+            searchable = " ".join([
+                getattr(track, "title", "") or "",
+                getattr(track, "artist", "") or "",
+                " ".join(getattr(track, "genre", []) or []),
+                " ".join(getattr(track, "mood", []) or []),
+            ]).lower()
+            if any(rule and rule in searchable for rule in rules):
+                continue
+            title = (getattr(track, "title", "") or "").strip().lower()
+            artist = (getattr(track, "artist", "") or "").strip().lower()
+            title_artist_key = f"title:{title}:{artist}"
+            base_title = re.sub(r"\s*[\[(（].*?[\])）]", "", title).strip()
+            base_title_artist_key = f"title:{base_title}:{artist}"
+            external_id = getattr(track, "external_id", "") or getattr(track, "source_id", "") or ""
+            external_key = f"external:{external_id}" if external_id else ""
+            if title_artist_key in seen or base_title_artist_key in seen or (external_key and external_key in seen):
+                continue
+            primary_artist = re.split(r"[、,/&]| feat\\.? | ft\\.? ", artist, maxsplit=1)[0].strip() or artist
+            if primary_artist and artist_counts.get(primary_artist, 0) >= 4:
+                continue
+            seen.add(title_artist_key)
+            seen.add(base_title_artist_key)
+            if external_key:
+                seen.add(external_key)
+            if primary_artist:
+                artist_counts[primary_artist] = artist_counts.get(primary_artist, 0) + 1
+            filtered.append((track, components or {}, reason, float(score or 0.0)))
+        return filtered
+
+    @staticmethod
+    def _is_taste_experiment_quality_track(track: Any) -> bool:
+        """Taste Lab 候选质量门槛：挡掉明显不像正式歌曲的搜索噪声。"""
+        title = (getattr(track, "title", "") or "").strip()
+        artist = (getattr(track, "artist", "") or "").strip()
+        if not title or not artist:
+            return False
+        title_lower = title.lower()
+        lowered = f"{title} {artist}".lower()
+        noise_tokens = (
+            "type beat", "free beat", " beat ", "instrumental", "伴奏", "demo",
+            "prod.", "bpm", "ai", "人工智能", "完整版", "无损", "纯音乐",
+            "歌词版", "动态歌词", "翻自", "cover", "remix",
+        )
+        if any(token in title_lower for token in noise_tokens):
+            return False
+        if title.startswith("#") or title.count("#") >= 1:
+            return False
+        if re.search(r"[\[(（][^\])）]*(r&b|说唱|trap|chill|beat|流行|另类)[^\])）]*[\])）]", title_lower):
+            return False
+        if artist.lower() in {"type beat", "unknown", "佚名", "群星"}:
+            return False
+        compact = re.sub(r"[\s\\-_/()（）'’\"“”·.。！!？?&]+", "", title.lower())
+        compact_base = re.sub(r"\d+$", "", compact)
+        generic_titles = {
+            "r&b", "另类r&b", "小众r&b", "氛围说唱", "律动r&b", "neosoulbeat",
+            "rb", "另类rb", "小众rb", "律动rb",
+            "neosoul", "说唱", "新灵魂", "另类流行", "独立流行",
+            "伤感", "律动", "激昂", "浪漫", "放松", "暗黑", "治愈", "流行",
+        }
+        if compact in generic_titles or compact_base in generic_titles:
+            return False
+        genre_words = ("r&b", "说唱", "trap", "chill", "氛围", "情绪", "另类", "流行", "soul")
+        if len(title) > 38 and sum(1 for word in genre_words if word in lowered) >= 3:
+            return False
+        return True
+
+    def _bucket_taste_experiment_candidates(
+        self,
+        candidates: list[tuple[Any, dict[str, float], str, float]],
+        per_bucket: int,
+    ) -> dict[str, list[tuple[Any, dict[str, float], str, float]]]:
+        """按 familiarity 排名切片成 safe/stretch/bold 三等分。
+
+        旧实现用 personalize/behavior 的绝对阈值分桶，但行为锚长期为 0、个性化在在线
+        候选上常偏低，导致三档全部塌向 bold。改为按 familiarity=0.6 口味 + 0.3 语义 +
+        0.1 行为 的相对排名切片：最像口味→safe，中间→stretch，最不像→bold，保证三档
+        均衡且探索梯度真实存在。
+        """
+        buckets: dict[str, list[tuple[Any, dict[str, float], str, float]]] = {"safe": [], "stretch": [], "bold": []}
+        if not candidates:
+            return buckets
+        ranked = sorted(candidates, key=self._taste_familiarity, reverse=True)
+        buckets["safe"] = self._slice_for_bucket(ranked, "safe", per_bucket)
+        buckets["stretch"] = self._slice_for_bucket(ranked, "stretch", per_bucket)
+        buckets["bold"] = self._slice_for_bucket(ranked, "bold", per_bucket)
+        return buckets
+
+    @staticmethod
+    def _taste_familiarity(item: tuple[Any, dict[str, float], str, float]) -> float:
+        """单候选的「熟悉度」：口味契合为主，语义为辅，行为微调（行为只对听过的歌有信号）。"""
+        _, components, _, _ = item
+        per = components.get("personalize", 0.0)
+        sem = components.get("semantic", 0.0)
+        beh = components.get("behavior", 0.0)
+        return per * 0.6 + sem * 0.3 + beh * 0.1
+
+    @staticmethod
+    def _slice_for_bucket(
+        ranked: list[tuple[Any, dict[str, float], str, float]],
+        bucket: str,
+        per_bucket: int,
+    ) -> list[tuple[Any, dict[str, float], str, float]]:
+        if bucket == "safe":
+            return ranked[0:per_bucket]
+        if bucket == "stretch":
+            return ranked[per_bucket:2 * per_bucket]
+        return ranked[2 * per_bucket:3 * per_bucket]
+
+    @staticmethod
+    def _candidate_key(item: tuple[Any, dict[str, float], str, float]) -> str:
+        track, _, _, _ = item
+        source = getattr(track, "source", "netease") or "netease"
+        external_id = getattr(track, "external_id", "") or getattr(track, "source_id", "") or ""
+        if external_id:
+            return f"{source}:{external_id}"
+        title = (getattr(track, "title", "") or "").strip().lower()
+        artist = (getattr(track, "artist", "") or "").strip().lower()
+        return f"title:{title}:{artist}"
+
+    @staticmethod
+    def _taste_experiment_track(
+        track: Any,
+        bucket: str,
+        components: dict[str, float],
+        reason: str,
+        score: float,
+    ) -> TasteExperimentTrack:
+        source = getattr(track, "source", "local") or "local"
+        source_id = getattr(track, "external_id", "") or getattr(track, "asset_id", "") or ""
+        ref = TrackRef(
+            title=getattr(track, "title", "") or "",
+            artist=getattr(track, "artist", "") or "",
+            source=source,
+            source_id=source_id,
+            genre=getattr(track, "genre", []) or [],
+            mood=getattr(track, "mood", []) or [],
+            score=score,
+            components=components or {},
+        )
+        expected = {
+            "safe": "如果你听完或收藏，说明稳定画像可信。",
+            "stretch": "如果你喜欢，说明相邻风格可以扩大。",
+            "bold": "如果你没跳过，说明探索边界比画像更宽。",
+        }[bucket]
+        return TasteExperimentTrack(
+            track=ref,
+            bucket=bucket,  # type: ignore[arg-type]
+            reason=reason or f"{bucket} bucket candidate",
+            expected_signal=expected,
+            components=components or {},
+        )
+
+    @staticmethod
+    def _taste_experiment_track_key(item: TasteExperimentTrack) -> str:
+        source_id = item.track.source_id.strip()
+        if source_id:
+            return f"{item.track.source}:{source_id}"
+        return f"title:{item.track.title.lower()}:{item.track.artist.lower()}"
+
+    def _find_taste_experiment_track(self, experiment: TasteExperiment, track_key: str) -> TasteExperimentTrack | None:
+        for segment in experiment.segments:
+            for item in segment.tracks:
+                if self._taste_experiment_track_key(item) == track_key:
+                    return item
+        return None
+
+    def _apply_taste_experiment_ts_feedback(self, item: TasteExperimentTrack, signal: str, score: float | None) -> None:
+        if not item.track.source_id:
+            return
+        positive = signal in {"completed", "liked", "saved"} or (signal == "rated" and (score or 0) >= 7)
+        negative = signal in {"skipped", "disliked"} or (signal == "rated" and (score or 10) <= 4)
+        if not positive and not negative:
+            return
+        track = ExternalTrack(
+            external_id=item.track.source_id,
+            title=item.track.title,
+            artist=item.track.artist or "",
+            genre=item.track.genre,
+            mood=item.track.mood,
+            source=item.track.source,
+        )
+        self.library.update_ts_feedback(track, positive=positive, weight=1.0 if positive else 0.6)
+
+    def _record_taste_experiment_listen(
+        self,
+        user_id: str,
+        item: TasteExperimentTrack,
+        signal: str,
+        score: float | None,
+    ) -> None:
+        """把品味实验反馈也写进 listening_history，让行为锚在下一轮实验/推荐里拿到信号。
+
+        key 用 source_id（网易云在线 id），与候选 _track_id 同命名空间，行为锚才能命中。
+        completed/liked/saved 视为听完(+1)；skipped/disliked/too_far/too_safe 视为秒跳(-1)；
+        rated 按分数极性，中性不记。这打通了"实验反馈→行为锚→下一轮排序"的闭环。
+        """
+        source_id = (item.track.source_id or "").strip()
+        if not source_id:
+            return  # 无在线 id 的曲无法与候选对齐，不记
+        if signal in {"completed", "liked", "saved"}:
+            completed, duration = True, 180
+        elif signal in {"skipped", "disliked", "too_far", "too_safe"}:
+            completed, duration = False, 0
+        elif signal == "rated":
+            if (score or 0) >= 7:
+                completed, duration = True, 180
+            elif (score or 10) <= 4:
+                completed, duration = False, 0
+            else:
+                return  # 中性评分不记
+        else:
+            return
+        try:
+            self.memory.record_listen(user_id, source_id, duration, completed, context=f"taste_lab:{signal}")
+        except Exception:
+            logger.debug("taste experiment listen record failed", exc_info=True)
+
+    @staticmethod
+    def _taste_experiment_feedback_count(experiment: TasteExperiment) -> int:
+        total = 0
+        for segment in experiment.segments:
+            for item in segment.tracks:
+                fb = item.feedback
+                total += fb.completed + fb.skipped + fb.liked + fb.disliked + fb.saved + fb.rated + fb.too_safe + fb.too_far
+        return total
+
+    def _taste_experiment_bucket_stats(self, experiment: TasteExperiment) -> dict[str, dict[str, float | int]]:
+        stats: dict[str, dict[str, float | int]] = {}
+        for segment in experiment.segments:
+            total_tracks = len(segment.tracks)
+            completed = skipped = liked = disliked = saved = too_safe = too_far = rated = 0
+            scores: list[float] = []
+            for item in segment.tracks:
+                fb = item.feedback
+                completed += fb.completed
+                skipped += fb.skipped
+                liked += fb.liked
+                disliked += fb.disliked
+                saved += fb.saved
+                too_safe += fb.too_safe
+                too_far += fb.too_far
+                rated += fb.rated
+                scores.extend(fb.scores)
+            feedback_count = completed + skipped + liked + disliked + saved + too_safe + too_far + rated
+            denom = max(feedback_count, 1)
+            stats[segment.name] = {
+                "tracks": total_tracks,
+                "feedback_count": feedback_count,
+                "completed": completed,
+                "skipped": skipped,
+                "liked": liked,
+                "disliked": disliked,
+                "saved": saved,
+                "too_safe": too_safe,
+                "too_far": too_far,
+                "completed_rate": round(completed / denom, 3),
+                "skip_rate": round(skipped / denom, 3),
+                "liked_rate": round((liked + saved) / denom, 3),
+                "avg_score": round(sum(scores) / len(scores), 2) if scores else 0.0,
+            }
+        return stats
+
+    @staticmethod
+    def _bucket_label(bucket: str) -> str:
+        return {"safe": "安全区", "stretch": "轻微越界", "bold": "大胆探索"}.get(bucket, bucket)
 
     def recommend_for_query(self, user_id: str, goal: str, top_k: int = 5, *, excluded_tracks: list[dict[str, str]] | None = None) -> DailyRecommendation:
         memory = self.memory.get_memory(user_id)

@@ -955,17 +955,41 @@ def _legacy_compose(
 
 
 def _collect_track_candidates(results: list[dict[str, Any]]) -> list[Any]:
-    tracks: list[Any] = []
+    """按权威结果优先级收集候选，供 ReAct fallback 的 grounded answer 使用。"""
+    buckets: dict[str, list[Any]] = {
+        "daily_recommend": [], "playlist": [], "search": [],
+        "import_netease_playlist": [], "web_music_search": [],
+    }
     for result in results:
         result_type = result.get("type")
         if result_type == "search":
             response = result["response"]
-            tracks.extend(response.external)
-            tracks.extend(response.local)
+            buckets["search"].extend(response.external)
+            buckets["search"].extend(response.local)
         elif result_type == "web_music_search":
-            tracks.extend(result["tracks"])
+            buckets["web_music_search"].extend(result["tracks"])
         elif result_type == "daily_recommend":
-            tracks.extend(item.asset for item in result["recommendation"].tracks)
+            buckets["daily_recommend"].extend(item.asset for item in result["recommendation"].tracks)
+        elif result_type == "playlist":
+            buckets["playlist"].extend(result["playlist"].tracks)
+        elif result_type == "import_netease_playlist":
+            buckets["import_netease_playlist"].extend(result["result"].get("tracks", []))
+
+    tracks: list[Any] = []
+    seen: set[tuple[str, str, str]] = set()
+    for result_type in (
+        "daily_recommend", "playlist", "search", "import_netease_playlist", "web_music_search",
+    ):
+        for track in buckets[result_type]:
+            key = (
+                (getattr(track, "title", "") or "").lower(),
+                getattr(track, "source", "") or "",
+                getattr(track, "external_id", "") or getattr(track, "asset_id", "") or "",
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            tracks.append(track)
     return tracks
 
 

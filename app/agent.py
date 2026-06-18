@@ -646,7 +646,15 @@ class AudioVisualAgent:
             ],
         )
 
-    def search_web_music(self, query: str, top_k: int = 5, relevance_query: str = "", include_video_sources: bool = False, offset: int = 0) -> list[ExternalTrack]:
+    def search_web_music(
+        self,
+        query: str,
+        top_k: int = 5,
+        relevance_query: str = "",
+        include_video_sources: bool = False,
+        offset: int = 0,
+        variants: list[str] | None = None,
+    ) -> list[ExternalTrack]:
         """Agent tool wrapper for explicit online search.
 
         The default product flow remains offline-first. This method is only
@@ -662,7 +670,34 @@ class AudioVisualAgent:
                 只返回网易云歌曲。用户明确要 MV/视频时才传 True。
             offset: 网易云搜索翻页偏移。延续指令去重时传"已展示数"，
                 跳过已给用户看过的那批最热结果，取更深位次的新歌。
+            variants: query_plan 生成的同义/纠错查询。多路召回后统一去重、过滤。
         """
+        query_list = _merge_search_queries(query, variants)
+        if len(query_list) > 1:
+            from app.concurrency import run_parallel
+
+            tasks = [
+                (
+                    f"search_variant:{idx}:{q}",
+                    lambda q=q, idx=idx: self.search_web_music(
+                        q,
+                        top_k=max(top_k, 3),
+                        relevance_query=relevance_query or query,
+                        include_video_sources=include_video_sources,
+                        offset=offset if idx == 0 else 0,
+                        variants=None,
+                    ),
+                )
+                for idx, q in enumerate(query_list)
+            ]
+            merged: list[ExternalTrack] = []
+            for batch in run_parallel(tasks, timeout=8.0, default=[]):
+                merged.extend(batch or [])
+            selected = _dedupe_tracks(merged)[:top_k]
+            for track in selected:
+                self.library.upsert_external(track)
+            return selected
+
         tracks: list[ExternalTrack] = []
 
         # 网易云为主候选源：用多结果搜索拿真实歌曲（之前只取 1 首，导致大量缺口
@@ -726,6 +761,14 @@ class AudioVisualAgent:
 
         # mock 只作为联网不足时的降级候选，必须带 fallback 标记。
         if len(tracks) < top_k:
+            tracks.extend(self._dense_library_fallback(
+                query=relevance_query or query,
+                existing=tracks,
+                limit=top_k - len(tracks),
+            ))
+
+        # mock 只作为联网不足时的降级候选，必须带 fallback 标记。
+        if len(tracks) < top_k:
             for candidate in self.source.search(query, limit=top_k - len(tracks)):
                 fallback = candidate.model_copy(update={"source": f"{candidate.source}-fallback"})
                 if _valid_external_track(fallback, rel_q):
@@ -743,6 +786,39 @@ class AudioVisualAgent:
         for track in selected:
             self.library.upsert_external(track)
         return selected
+
+    def _dense_library_fallback(self, query: str, existing: list[ExternalTrack], limit: int = 5) -> list[ExternalTrack]:
+        if limit <= 0:
+            return []
+        try:
+            existing_keys = {_track_key(track) for track in existing}
+            hits = self.library.semantic_search(
+                query,
+                limit=max(limit * 2, limit),
+                min_score=settings.dense_recall_min_score,
+            )
+            out: list[ExternalTrack] = []
+            for item in hits:
+                track = ExternalTrack(
+                    external_id=item.source_id or f"library:{item.title}:{item.artist}",
+                    title=item.title,
+                    artist=item.artist,
+                    genre=item.genre,
+                    mood=item.mood,
+                    playback_url=item.playback_url,
+                    source=item.source,
+                    candidate_kind="track",
+                )
+                if _track_key(track) in existing_keys:
+                    continue
+                out.append(track)
+                existing_keys.add(_track_key(track))
+                if len(out) >= limit:
+                    break
+            return out
+        except Exception:
+            logger.debug("dense library fallback failed for query=%s", query, exc_info=True)
+            return []
 
     def search_videos(self, query: str, top_k: int = 5) -> list[ExternalTrack]:
         """搜索 MV/现场/演唱会视频，B站优先、YouTube 补位。不走网易云。
@@ -1039,20 +1115,68 @@ class AudioVisualAgent:
         return self.library.list_tracks(limit)
 
     def generate_music_journey(self, user_id: str, instruction: str) -> dict[str, Any]:
+        from app.concurrency import run_parallel
+        from app.search.netease_playlist import search_and_extract
+
         phases = _journey_phases(instruction)
         out = {"user_id": user_id, "instruction": instruction, "phases": []}
-        for phase in phases:
-            query = f"{instruction} {phase['query']}"
-            candidates = [
-                track for track in self.search_web_music(query, top_k=8)
-                if not self.library.is_disliked(user_id, track)
-            ]
-            self.library.record_exposure(candidates[:3])
+        per_phase = 4
+
+        # 阶段互相独立，并行从高可信真人歌单召回。不能把完整旅程句子直接作为歌名
+        # 搜索条件，否则“清晨/深夜/旅程”等场景词会让所有正式歌曲被相关性过滤掉。
+        tasks = [
+            (
+                f"journey:{phase['name']}",
+                lambda phase=phase: search_and_extract(
+                    phase["query"], max_playlists=3, tracks_per_playlist=per_phase * 3,
+                ),
+            )
+            for phase in phases
+        ]
+        batches = run_parallel(tasks, timeout=15.0, default=[])
+        seen: set[str] = set()
+        local_fallback = [
+            track for track in self.list_assets()
+            if _is_recommendation_quality_track(track)
+            and not self.library.is_disliked(user_id, track)
+        ]
+
+        for phase, batch in zip(phases, batches, strict=False):
+            candidates: list[Asset | ExternalTrack] = []
+            for track in [*(batch or []), *local_fallback]:
+                key = _track_key(track)
+                if key in seen or self.library.is_disliked(user_id, track):
+                    continue
+                if not _is_recommendation_quality_track(track):
+                    continue
+                seen.add(key)
+                candidates.append(track)
+                if len(candidates) >= per_phase:
+                    break
+            self.library.record_exposure(candidates)
+            serialized_tracks: list[dict[str, Any]] = []
+            for track in candidates:
+                if isinstance(track, ExternalTrack):
+                    serialized_tracks.append(track.model_dump(mode="json"))
+                else:
+                    serialized_tracks.append(ExternalTrack(
+                        external_id=track.external_id or track.asset_id,
+                        title=track.title,
+                        artist=track.artist or "未知",
+                        album=track.album,
+                        genre=track.genre,
+                        mood=track.mood,
+                        tempo_bpm=track.tempo_bpm,
+                        energy_level=track.energy_level,
+                        cover_url=track.cover_url,
+                        playback_url=track.source_url,
+                        source="local",
+                    ).model_dump(mode="json"))
             out["phases"].append({
                 "name": phase["name"],
                 "goal": phase["goal"],
                 "transition": phase["transition"],
-                "tracks": [track.model_dump(mode="json") for track in candidates[:3]],
+                "tracks": serialized_tracks,
             })
         return out
 
@@ -1246,7 +1370,16 @@ class AudioVisualAgent:
             else:
                 continue
         tracks = _dedupe_tracks(tracks)
-        tracks = _fill_tracks(tracks, candidates, target_count)
+        allow_variants = _query_requests_variant_content(instruction)
+        tracks = [
+            track for track in tracks
+            if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+        ]
+        clean_candidates = [
+            track for track in candidates
+            if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+        ]
+        tracks = _fill_tracks(tracks, clean_candidates, target_count)
 
         playlist = Playlist(
             playlist_id=hashlib.sha1(f"{user_id}-{instruction}".encode()).hexdigest()[:8],
@@ -1344,31 +1477,64 @@ class AudioVisualAgent:
         search_terms = _playlist_search_terms(instruction)
         # 从 instruction 中提取核心搜索词，用于相关性过滤（不含扩展的风格词）
         relevance_core = _extract_search_query(instruction) or instruction
+        allow_variants = _query_requests_variant_content(instruction)
+        clean_seed_tracks = [
+            track for track in seed_tracks
+            if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+        ]
         external: list[ExternalTrack] = []
+
+        # 场景词不是歌名。先从高可信真人歌单抽曲目，避免“跑步/节奏”直接搜歌时
+        # Type Beat、伴奏和关键词标题反而获得最高相关性。
+        if _is_scenario_playlist_instruction(instruction):
+            try:
+                from app.search.netease_playlist import search_and_extract
+
+                curated = search_and_extract(
+                    _curated_playlist_query(instruction),
+                    max_playlists=3,
+                    tracks_per_playlist=max(target_count, 12),
+                )
+                external.extend(
+                    track for track in curated
+                    if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+                )
+            except Exception:
+                logger.debug("curated playlist recall failed for %s", instruction, exc_info=True)
+
         for online_query in _playlist_online_queries(search_terms):
-            if len(_dedupe_tracks([*seed_tracks, *external])) >= target_count:
+            if len(_dedupe_tracks([*clean_seed_tracks, *external])) >= target_count:
                 break
             # 关键修复：用核心词做相关性过滤，扩展词只用于引导搜索API
-            external.extend(self.search_web_music(
+            batch = self.search_web_music(
                 online_query, top_k=min(max(target_count, 8), 25),
                 relevance_query=relevance_core,
-            ))
-
-        if len(_dedupe_tracks([*seed_tracks, *external])) < target_count:
+            )
             external.extend(
-                self.source.get_recommendations(
+                track for track in batch
+                if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+            )
+
+        if len(_dedupe_tracks([*clean_seed_tracks, *external])) < target_count:
+            source_tracks = self.source.get_recommendations(
                     seed_genres=["流行", "民谣", "R&B", "说唱", "电子"],
                     seed_moods=["放松", "治愈", "浪漫", "伤感"],
                     limit=max(target_count * 2, 40),
                 )
+            external.extend(
+                track for track in source_tracks
+                if _is_recommendation_quality_track(track, allow_variants=allow_variants)
             )
 
         library_ranked = sorted(
-            library,
+            [
+                track for track in library
+                if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+            ],
             key=lambda asset: _playlist_match_score(asset, search_terms),
             reverse=True,
         )
-        ordered: list[Asset | ExternalTrack] = [*seed_tracks, *external, *library_ranked]
+        ordered: list[Asset | ExternalTrack] = [*clean_seed_tracks, *external, *library_ranked]
         return _dedupe_tracks(ordered)
 
     def _fallback_playlist(
@@ -1395,7 +1561,16 @@ class AudioVisualAgent:
                 key=lambda asset: (asset.energy_level or 0.0, asset.updated_at),
                 reverse=True,
             )
-        tracks = _fill_tracks(matched, candidates or [], target_count)
+        allow_variants = _query_requests_variant_content(instruction)
+        matched = [
+            track for track in matched
+            if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+        ]
+        clean_candidates = [
+            track for track in (candidates or [])
+            if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+        ]
+        tracks = _fill_tracks(matched, clean_candidates, target_count)
         playlist = Playlist(
             playlist_id=hashlib.sha1(f"{user_id}-{instruction}".encode()).hexdigest()[:8],
             user_id=user_id,
@@ -1873,39 +2048,7 @@ class AudioVisualAgent:
     @staticmethod
     def _is_taste_experiment_quality_track(track: Any) -> bool:
         """Taste Lab 候选质量门槛：挡掉明显不像正式歌曲的搜索噪声。"""
-        title = (getattr(track, "title", "") or "").strip()
-        artist = (getattr(track, "artist", "") or "").strip()
-        if not title or not artist:
-            return False
-        title_lower = title.lower()
-        lowered = f"{title} {artist}".lower()
-        noise_tokens = (
-            "type beat", "free beat", " beat ", "instrumental", "伴奏", "demo",
-            "prod.", "bpm", "ai", "人工智能", "完整版", "无损", "纯音乐",
-            "歌词版", "动态歌词", "翻自", "cover", "remix",
-        )
-        if any(token in title_lower for token in noise_tokens):
-            return False
-        if title.startswith("#") or title.count("#") >= 1:
-            return False
-        if re.search(r"[\[(（][^\])）]*(r&b|说唱|trap|chill|beat|流行|另类)[^\])）]*[\])）]", title_lower):
-            return False
-        if artist.lower() in {"type beat", "unknown", "佚名", "群星"}:
-            return False
-        compact = re.sub(r"[\s\\-_/()（）'’\"“”·.。！!？?&]+", "", title.lower())
-        compact_base = re.sub(r"\d+$", "", compact)
-        generic_titles = {
-            "r&b", "另类r&b", "小众r&b", "氛围说唱", "律动r&b", "neosoulbeat",
-            "rb", "另类rb", "小众rb", "律动rb",
-            "neosoul", "说唱", "新灵魂", "另类流行", "独立流行",
-            "伤感", "律动", "激昂", "浪漫", "放松", "暗黑", "治愈", "流行",
-        }
-        if compact in generic_titles or compact_base in generic_titles:
-            return False
-        genre_words = ("r&b", "说唱", "trap", "chill", "氛围", "情绪", "另类", "流行", "soul")
-        if len(title) > 38 and sum(1 for word in genre_words if word in lowered) >= 3:
-            return False
-        return True
+        return _is_recommendation_quality_track(track)
 
     def _bucket_taste_experiment_candidates(
         self,
@@ -2107,7 +2250,15 @@ class AudioVisualAgent:
     def _bucket_label(bucket: str) -> str:
         return {"safe": "安全区", "stretch": "轻微越界", "bold": "大胆探索"}.get(bucket, bucket)
 
-    def recommend_for_query(self, user_id: str, goal: str, top_k: int = 5, *, excluded_tracks: list[dict[str, str]] | None = None) -> DailyRecommendation:
+    def recommend_for_query(
+        self,
+        user_id: str,
+        goal: str,
+        top_k: int = 5,
+        *,
+        excluded_tracks: list[dict[str, str]] | None = None,
+        search_variants: list[str] | None = None,
+    ) -> DailyRecommendation:
         memory = self.memory.get_memory(user_id)
         memory_query = self.memory.weighted_query(memory)
         search_goal = _extract_search_query(goal)
@@ -2130,7 +2281,7 @@ class AudioVisualAgent:
             rec_offset = len(excluded_tracks) if excluded_tracks else 0
             batch = self.search_web_music(
                 search_goal, top_k=max(top_k * 2, top_k),
-                relevance_query=search_goal, offset=rec_offset,
+                relevance_query=search_goal, offset=rec_offset, variants=search_variants,
             )
             all_candidates.extend(batch)
         else:
@@ -2174,7 +2325,11 @@ class AudioVisualAgent:
         # 去重 + 过滤
         verified = [
             track for track in _dedupe_tracks(all_candidates)
-            if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track)
+            if _is_verified_online_track(track)
+            and not self.library.is_disliked(user_id, track)
+            and _is_recommendation_quality_track(
+                track, allow_variants=_query_requests_variant_content(goal)
+            )
         ]
 
         # 过滤上一轮已展示的曲目（延续指令去重）
@@ -2187,6 +2342,7 @@ class AudioVisualAgent:
             fb_offset = len(excluded_tracks or []) + len(verified)
             fallback_batch = self.search_web_music(
                 search_goal, top_k=max(top_k * 2, top_k), offset=fb_offset,
+                variants=search_variants,
             )
             for track in fallback_batch:
                 if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track):
@@ -2318,11 +2474,13 @@ class AudioVisualAgent:
         # P2-H：协同过滤第四锚——跨用户共现。冷启动（无共现/无近期收听）自动关闭，
         # 由 rerank 权重重分配让回三锚。
         cf_scores, cf_ok = self._collaborative_scores(user_id, tracks, memory)
+        ts_scores = self.library.sample_ts_scores(tracks) if settings.enable_explore else None
         return rerank_candidates(
             query, tracks, taste,
             behavior_scores=behavior, scenarios=scenarios, top_k=top_k,
             lang_pref=lang_pref, exclusion_rules=exclusion_rules,
             collaborative_scores=cf_scores, collaborative_ok=cf_ok,
+            ts_scores=ts_scores,
         )
 
     def _collaborative_scores(self, user_id: str, tracks: list[Any], memory: Any) -> tuple[list[float] | None, bool]:
@@ -2513,6 +2671,98 @@ def _playlist_search_terms(instruction: str) -> str:
     return " ".join(terms)
 
 
+_SCENARIO_PLAYLIST_SIGNALS = {
+    "跑步", "运动", "健身", "workout", "running", "通勤", "开车", "学习", "专注",
+    "工作", "睡眠", "助眠", "派对", "聚会", "散步", "旅行", "约会", "泡澡",
+}
+
+
+def _is_scenario_playlist_instruction(instruction: str) -> bool:
+    lowered = instruction.lower()
+    return any(signal in lowered for signal in _SCENARIO_PLAYLIST_SIGNALS)
+
+
+def _curated_playlist_query(instruction: str) -> str:
+    """把场景需求改写为歌单检索词，而不是容易被 SEO 操纵的单曲检索词。"""
+    lowered = instruction.lower()
+    if any(token in lowered for token in ("跑步", "运动", "健身", "running", "workout")):
+        return "跑步 动感 节奏"
+    if any(token in lowered for token in ("学习", "专注", "工作")):
+        return "学习 专注 工作 纯音乐"
+    if any(token in lowered for token in ("睡眠", "助眠", "泡澡")):
+        return "睡眠 放松 舒缓"
+    if any(token in lowered for token in ("开车", "通勤")):
+        return "开车 通勤 节奏"
+    if any(token in lowered for token in ("派对", "聚会")):
+        return "派对 高能 热门"
+    return _extract_search_query(instruction) or instruction
+
+
+def _query_requests_variant_content(query: str) -> bool:
+    """用户明确点名版本类内容时，不应用推荐质量门禁误伤。"""
+    lowered = (query or "").lower()
+    return any(token in lowered for token in (
+        "type beat", "free beat", "伴奏", "instrumental", "demo", "翻唱", "cover",
+        "remix", "纯音乐", "beat版", "beat 版",
+    ))
+
+
+def _is_recommendation_quality_track(track: Any, *, allow_variants: bool = False) -> bool:
+    """推荐候选质量门禁；显式搜索版本内容时由 allow_variants 放行。
+
+    这里判断的是“是否适合主动推荐”，不是歌曲是否客观存在。网易云真实 song_id
+    只能证明它存在，不能证明它是正式发行、适合进入个性化歌单。
+    """
+    title = (getattr(track, "title", "") or "").strip()
+    artist = (getattr(track, "artist", "") or "").strip()
+    if not title or not artist:
+        return False
+    if allow_variants:
+        return True
+
+    lowered_title = title.lower()
+    lowered_artist = artist.lower()
+    compact_title = re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", lowered_title)
+    compact_artist = re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", lowered_artist)
+
+    noise_patterns = (
+        r"\btype\s*beat\b", r"\bfree\s*beat\b", r"\binstrumental\b",
+        r"\bbpm\s*\d+\b", r"\bprod\.?(?:\s|$)", r"\bdemo\b",
+        r"\bai\s*(?:翻唱|cover|歌曲|音乐)",
+    )
+    if any(re.search(pattern, lowered_title) for pattern in noise_patterns):
+        return False
+    if any(token in lowered_title for token in (
+        "伴奏", "翻自", "动态歌词", "歌词版", "无损音质", "完整版试听",
+        "步频", "卡点",
+    )):
+        return False
+    if "#" in title or title.startswith(("【free】", "[free]", "（free）", "(free)")):
+        return False
+
+    generic_names = {
+        "热门歌曲", "热门音乐", "流行音乐", "独立流行", "另类流行", "新灵魂",
+        "更新灵魂", "氛围说唱", "律动rnb", "律动rb", "另类rnb", "另类rb",
+        "小众rnb", "小众rb", "neosoulbeat", "neosoul", "纯音乐", "伴奏",
+        "typebeat", "unknown", "佚名", "群星",
+    }
+    if compact_title in generic_names or compact_artist in generic_names:
+        return False
+    if compact_title == compact_artist:
+        return False
+
+    genre_words = (
+        "r&b", "rnb", "soul", "说唱", "嘻哈", "trap", "chill", "beat",
+        "另类", "流行", "爵士", "电子", "梦核", "雷鬼",
+    )
+    descriptor_count = sum(1 for word in genre_words if word in lowered_title)
+    if descriptor_count >= 3:
+        return False
+    if len(title) > 38 and descriptor_count >= 2:
+        return False
+    return True
+
+
 def _playlist_online_queries(search_terms: str) -> list[str]:
     queries = [search_terms]
     lowered = search_terms.lower()
@@ -2537,6 +2787,12 @@ def _playlist_online_queries(search_terms: str) -> list[str]:
 
 def _journey_phases(instruction: str) -> list[dict[str, str]]:
     lowered = instruction.lower()
+    if "清晨" in instruction and "深夜" in instruction:
+        return [
+            {"name": "清晨", "goal": "温和唤醒", "query": "清晨 轻快 流行", "transition": "从轻盈、明亮的旋律开始一天。"},
+            {"name": "午后", "goal": "保持活力", "query": "午后 律动 R&B", "transition": "逐步增加律动和能量，承接白天的节奏。"},
+            {"name": "深夜", "goal": "放松收束", "query": "深夜 R&B 放松", "transition": "降低能量和密度，让一天安静落幕。"},
+        ]
     if any(token in lowered or token in instruction for token in ["跑步", "运动", "running", "workout"]):
         return [
             {"name": "热身", "goal": "轻快进入状态", "query": "热身 轻快 节奏", "transition": "从低强度节奏进入身体状态。"},
@@ -2720,6 +2976,39 @@ _QUERY_NOISE = {"的", "了", "在", "是", "我", "你", "他", "她", "它", "
                 "or", "it", "s", "t", "m"}
 
 
+def _normalize_match_text(text: str) -> str:
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", text or "").lower()
+    normalized = normalized.replace("r&b", "rnb").replace("r and b", "rnb").replace("hip-hop", "hiphop")
+    return re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", normalized)
+
+
+def _fuzzy_ratio(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    try:
+        from rapidfuzz import fuzz
+
+        return float(fuzz.partial_ratio(a, b))
+    except Exception:
+        from difflib import SequenceMatcher
+
+        return SequenceMatcher(None, a, b).ratio() * 100.0
+
+
+def _match_token(token: str, text: str, *, fuzzy: bool = False) -> bool:
+    token_norm = _normalize_match_text(token)
+    text_norm = _normalize_match_text(text)
+    if not token_norm:
+        return True
+    if token_norm in text_norm:
+        return True
+    if fuzzy and len(token_norm) >= 3:
+        return _fuzzy_ratio(token_norm, text_norm) >= settings.fuzzy_threshold
+    return False
+
+
 def _query_matches_track(query: str, track: ExternalTrack) -> bool:
     """搜索相关性过滤：基于 entity 锚点的宽松匹配。
 
@@ -2741,7 +3030,7 @@ def _query_matches_track(query: str, track: ExternalTrack) -> bool:
         result = []
         for seg in raw:
             # 把连续 ASCII 字符和连续 CJK 字符分开
-            sub_tokens = re.findall(r"[A-Za-z0-9]+|[一-鿿㐀-䶿豈-﫿]+", seg)
+            sub_tokens = re.findall(r"[A-Za-z]+&[A-Za-z]+|[A-Za-z0-9]+|[一-鿿㐀-䶿豈-﫿]+", seg)
             result.extend(sub_tokens if sub_tokens else [seg])
         return result
 
@@ -2750,21 +3039,26 @@ def _query_matches_track(query: str, track: ExternalTrack) -> bool:
     if not tokens:
         return True  # 纯噪声查询不过滤
 
-    searchable = f"{(track.title or '')} {(track.artist or '')}".lower()
+    searchable = f"{(track.title or '')} {(track.artist or '')}"
+    searchable_parts = [track.title or "", track.artist or "", searchable]
 
     # 分离 entity 类 token（英文专有名词）和泛化类 token（CJK + 短英文）
     entity_tokens: list[str] = []  # 英文 >2 字符，可能是歌手名/乐队名
     general_tokens: list[str] = []  # CJK token 或短英文
     for token in tokens:
         lowered = token.lower()
-        is_ascii = bool(re.fullmatch(r"[A-Za-z0-9]+", token))
+        is_ascii = bool(re.fullmatch(r"[A-Za-z0-9&]+", token))
         if is_ascii and len(token) > 2:
             entity_tokens.append(lowered)
         else:
             general_tokens.append(token)
 
     # 检查 entity 类 token 是否命中
-    entity_hit = any(e in searchable for e in entity_tokens)
+    entity_hit = any(
+        _match_token(e, part, fuzzy=True)
+        for e in entity_tokens
+        for part in searchable_parts
+    )
 
     # 如果有 entity 命中 → 放行（entity 是歌手名锚点，歌曲标题不含歌手名是正常的）
     if entity_hit:
@@ -2776,7 +3070,8 @@ def _query_matches_track(query: str, track: ExternalTrack) -> bool:
         return False
 
     for token in general_tokens:
-        if token.lower() not in searchable:
+        token_is_ascii = bool(re.fullmatch(r"[A-Za-z0-9&]+", token))
+        if not any(_match_token(token, part, fuzzy=token_is_ascii) for part in searchable_parts):
             return False
     return True
 
@@ -2824,6 +3119,22 @@ def _dedupe_tracks(tracks: list[Asset | ExternalTrack]) -> list[Asset | External
         seen.add(key)
         unique.append(track)
     return unique
+
+
+def _merge_search_queries(query: str, variants: list[str] | None = None) -> list[str]:
+    """主查询 + query_plan 变体合并去重，限制总变体数避免无界外部请求。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in [query, *(variants or [])]:
+        value = (item or "").strip()
+        key = value.lower()
+        if not value or key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+        if len(out) >= settings.max_search_variants + 1:
+            break
+    return out
 
 
 def _filter_excluded_tracks(

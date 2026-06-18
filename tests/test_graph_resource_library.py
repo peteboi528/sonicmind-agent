@@ -52,13 +52,72 @@ def test_dislike_filters_online_recommendations(tmp_path):
     assert agent.memory.get_memory("u1").dislikes
 
 
-def test_journey_has_three_phases(tmp_path):
+def test_journey_has_three_phases(tmp_path, monkeypatch):
+    from app.search import netease_playlist
+
+    def fake_extract(query, max_playlists=3, tracks_per_playlist=12):
+        from app.models import ExternalTrack
+
+        prefix = query.split()[0]
+        return [
+            ExternalTrack(
+                external_id=f"{prefix}-{i}", title=f"{prefix} Track {i}",
+                artist="Verified Artist", source="netease",
+            )
+            for i in range(1, 6)
+        ]
+
+    monkeypatch.setattr(netease_playlist, "search_and_extract", fake_extract)
     agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
 
-    journey = agent.generate_music_journey("u1", "跑步热身冲刺放松")
+    journey = agent.generate_music_journey("u1", "做一个清晨到深夜的音乐旅程")
 
     assert len(journey["phases"]) == 3
-    assert all("tracks" in phase for phase in journey["phases"])
+    assert [phase["name"] for phase in journey["phases"]] == ["清晨", "午后", "深夜"]
+    assert all(len(phase["tracks"]) == 4 for phase in journey["phases"])
+    assert len({t["external_id"] for p in journey["phases"] for t in p["tracks"]}) == 12
+
+
+def test_journey_stream_emits_track_cards(monkeypatch):
+    from app.api import main as main_module
+
+    def fake_journey(user_id, instruction):
+        return {
+            "user_id": user_id,
+            "instruction": instruction,
+            "phases": [
+                {
+                    "name": name,
+                    "goal": goal,
+                    "transition": transition,
+                    "tracks": [{
+                        "external_id": f"journey-{index}",
+                        "title": f"Journey Track {index}",
+                        "artist": "Journey Artist",
+                        "source": "netease",
+                    }],
+                }
+                for index, (name, goal, transition) in enumerate([
+                    ("清晨", "温和唤醒", "开始一天"),
+                    ("午后", "保持活力", "增加律动"),
+                    ("深夜", "放松收束", "安静落幕"),
+                ], start=1)
+            ],
+        }
+
+    monkeypatch.setattr(main_module.agent, "generate_music_journey", fake_journey)
+    client = TestClient(app)
+    with client.stream("POST", "/agent/stream", json={
+        "user_id": "journey-stream-user",
+        "message": "做一个清晨到深夜的音乐旅程",
+    }) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert '"type": "candidates"' in body
+    assert '"journey_phase": "清晨"' in body
+    assert '"final_cards": 3' in body
+    assert '"tools": ["journey"]' in body
 
 
 def test_stream_endpoint_emits_sse_events():

@@ -48,7 +48,14 @@ class Settings:
         self.mmr_lambda: float = float(os.getenv("MMR_LAMBDA", "0.7"))
         # Thompson Sampling 探索：尾部候选中用于探索的比例。
         self.exploration_ratio: float = float(os.getenv("EXPLORATION_RATIO", "0.2"))
+        self.enable_explore: bool = os.getenv("ENABLE_EXPLORE", "true").lower() == "true"
+        self.explore_ratio: float = float(os.getenv("EXPLORE_RATIO", str(self.exploration_ratio)))
+        self.tri_anchor_w_explore: float = float(os.getenv("TRI_ANCHOR_W_EXPLORE", "0.15"))
+        self.fuzzy_threshold: int = int(os.getenv("FUZZY_THRESHOLD", "82"))
+        self.max_search_variants: int = int(os.getenv("MAX_SEARCH_VARIANTS", "4"))
+        self.dense_recall_min_score: float = float(os.getenv("DENSE_RECALL_MIN_SCORE", "0.55"))
         self.enable_rerank: bool = os.getenv("ENABLE_RERANK", "true").lower() == "true"
+        self.enable_parallel_tools: bool = os.getenv("ENABLE_PARALLEL_TOOLS", "true").lower() == "true"
         # Deep/Agentic 模式：复合多步任务走真迭代 ReAct（一级分支，非降级兜底）。
         # 仅真实 LLM（非 mock）下生效；mock 模式仍走图，保持测试/demo 稳定。
         self.enable_deep_mode: bool = os.getenv("ENABLE_DEEP_MODE", "true").lower() == "true"

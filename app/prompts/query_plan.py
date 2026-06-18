@@ -46,6 +46,13 @@ QUERY_PLAN_SYSTEM = f"""\
 ## language：语言偏好
 用户明确表达语言倾向时填（"不要中文"→"en"，"要中文的"→"zh"，"日语歌"→"ja"，"韩语"→"ko"），没表达就留空字符串。
 
+## search_variants：召回变体
+可选数组，用于补充 search_query 的同义词、跨语言词、常见拼写修正，不超过 4 个。
+- 例如用户写 "Emenem" 时，search_query 可保留原意，search_variants 加 ["Eminem"]。
+- 例如 "R&B" 可加 ["rnb soul"]，"说唱" 可加 ["rap hip hop"]。
+- chat/taste/import 等不检索的意图留空数组。
+- 不要把无关热词塞进 variants；每个变体都必须仍服务于本轮输入。
+
 ## 确定性路由规则（LLM 必须遵守）
 1. 纯情绪/氛围描述（无实体）→ intent=recommend, use_web=true, use_vector=true
    例："心情不好""来点放松的""深夜一个人""chill 一下"
@@ -79,53 +86,53 @@ QUERY_PLAN_SYSTEM = f"""\
 ## few-shot 示例
 
 用户：给我推荐几首适合跑步的歌
-{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"跑步 动感 节奏","language":"","target_count":null,"reasoning":"按场景推荐，需语义+联网"}}
+{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"跑步 动感 节奏","search_variants":["running workout"],"language":"","target_count":null,"reasoning":"按场景推荐，需语义+联网"}}
 
 用户：找一些 Beyond 的歌
-{{"intent":"search","entities":["Beyond"],"use_local":true,"use_vector":false,"use_web":true,"search_query":"Beyond","language":"","target_count":null,"reasoning":"搜歌手，实体匹配+联网"}}
+{{"intent":"search","entities":["Beyond"],"use_local":true,"use_vector":false,"use_web":true,"search_query":"Beyond","search_variants":[],"language":"","target_count":null,"reasoning":"搜歌手，实体匹配+联网"}}
 
 用户：帮我做 20 首 chill 歌单
-{{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"chill 放松 轻松","language":"","target_count":20,"reasoning":"生成歌单，20首候选"}}
+{{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"chill 放松 轻松","search_variants":["chill relaxing"],"language":"","target_count":20,"reasoning":"生成歌单，20首候选"}}
 
 用户：分析下我的音乐品味
-{{"intent":"taste","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","language":"","target_count":null,"reasoning":"只读记忆画像"}}
+{{"intent":"taste","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","search_variants":[],"language":"","target_count":null,"reasoning":"只读记忆画像"}}
 
 用户：推荐点不一样的，做个品味实验
-{{"intent":"taste_experiment","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"探索 新风格 相邻风格","language":"","target_count":null,"reasoning":"生成三档品味实验"}}
+{{"intent":"taste_experiment","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"探索 新风格 相邻风格","search_variants":["new style adjacent genre"],"language":"","target_count":null,"reasoning":"生成三档品味实验"}}
 
 用户：你好
-{{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","language":"","target_count":null,"reasoning":"普通寒暄"}}
+{{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","search_variants":[],"language":"","target_count":null,"reasoning":"普通寒暄"}}
 
 用户：asen牛逼吗
-{{"intent":"discuss","entities":["Asen"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"Asen","language":"","target_count":null,"reasoning":"讨论歌手，联网搜曲目"}}
+{{"intent":"discuss","entities":["Asen"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"Asen","search_variants":[],"language":"","target_count":null,"reasoning":"讨论歌手，联网搜曲目"}}
 
 【最近对话】
 user: 推荐几首适合深夜的歌
 assistant: 为你推荐了 7 首深夜歌曲
 【本轮输入】
 不要中文歌曲
-{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"深夜 英文歌 欧美 安静","language":"en","target_count":null,"reasoning":"延续深夜场景，转英文正向查询"}}
+{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"深夜 英文歌 欧美 安静","search_variants":["late night chill English songs"],"language":"en","target_count":null,"reasoning":"延续深夜场景，转英文正向查询"}}
 
 【最近对话】
 user: 推荐几首适合学习的音乐
 assistant: 推荐了几首学习音乐
 【本轮输入】
 太吵了，要安静点的
-{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"学习 安静 轻音乐 纯音乐","language":"","target_count":null,"reasoning":"延续学习场景，转安静正向查询"}}
+{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"学习 安静 轻音乐 纯音乐","search_variants":["focus study ambient"],"language":"","target_count":null,"reasoning":"延续学习场景，转安静正向查询"}}
 
 用户：来个 20 首的运动歌单
-{{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"运动 动感 节奏","language":"","target_count":20,"reasoning":"运动歌单，20首"}}
+{{"intent":"playlist","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"运动 动感 节奏","search_variants":["workout running"],"language":"","target_count":20,"reasoning":"运动歌单，20首"}}
 
 用户：我想听 keshi 的歌
-{{"intent":"recommend","entities":["keshi"],"use_local":true,"use_vector":false,"use_web":true,"search_query":"keshi","language":"","target_count":null,"reasoning":"歌手推荐，实体+联网"}}
+{{"intent":"recommend","entities":["keshi"],"use_local":true,"use_vector":false,"use_web":true,"search_query":"keshi","search_variants":[],"language":"","target_count":null,"reasoning":"歌手推荐，实体+联网"}}
 
 用户：帮我找 The Weeknd 的 MV
-{{"intent":"video","entities":["The Weeknd"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"The Weeknd MV","language":"","target_count":null,"reasoning":"找MV，搜视频平台"}}
+{{"intent":"video","entities":["The Weeknd"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"The Weeknd MV","search_variants":["The Weeknd music video"],"language":"","target_count":null,"reasoning":"找MV，搜视频平台"}}
 
 用户：介绍一下 NewJeans 这个团体
-{{"intent":"artist_info","entities":["NewJeans"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"NewJeans","language":"","target_count":null,"reasoning":"了解歌手背景，用搜索引擎"}}
+{{"intent":"artist_info","entities":["NewJeans"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"NewJeans","search_variants":[],"language":"","target_count":null,"reasoning":"了解歌手背景，用搜索引擎"}}
 
-只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, search_query, language, target_count, reasoning。
+只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, search_query, search_variants, language, target_count, reasoning。
 """
 
 
@@ -135,7 +142,7 @@ QUERY_PLAN_REPAIR_SYSTEM = """\
 你会收到一段上游模型产出的原始内容，它本来应该是一个 JSON 规划对象，但格式或字段可能有误。
 你的任务只有一个：修复成合法 JSON，并严格符合下面字段：
 
-intent, entities, use_local, use_vector, use_web, search_query, language, target_count, reasoning
+intent, entities, use_local, use_vector, use_web, search_query, search_variants, language, target_count, reasoning
 
 要求：
 1. 只输出一个 JSON 对象，不要解释。
@@ -146,6 +153,7 @@ intent, entities, use_local, use_vector, use_web, search_query, language, target
    - use_vector: false
    - use_web: false
    - search_query: ""
+   - search_variants: []
    - language: ""
    - target_count: null
    - reasoning: ""

@@ -4,7 +4,12 @@
 """
 from __future__ import annotations
 
-from app.agent import _classify_candidate_kind, _valid_external_track
+from app.agent import (
+    _classify_candidate_kind,
+    _is_recommendation_quality_track,
+    _query_requests_variant_content,
+    _valid_external_track,
+)
 from app.models import ExternalTrack
 
 
@@ -110,3 +115,60 @@ class TestValidExternalTrackFiltersCompilation:
             artist="The Weeknd", source="youtube", candidate_kind="official_mv",
         )
         assert _valid_external_track(track, "The Weeknd") is True
+
+    def test_typo_artist_fuzzy_match_kept(self):
+        track = ExternalTrack(
+            external_id="n2", title="Lose Yourself",
+            artist="Eminem", source="netease", candidate_kind="track",
+        )
+        assert _valid_external_track(track, "Emenem") is True
+
+    def test_rnb_normalization_kept(self):
+        track = ExternalTrack(
+            external_id="n3", title="Late Night RnB",
+            artist="SZA", source="netease", candidate_kind="track",
+        )
+        assert _valid_external_track(track, "R&B") is True
+
+    def test_unrelated_entity_rejected(self):
+        track = ExternalTrack(
+            external_id="n4", title="Lose Yourself",
+            artist="Eminem", source="netease", candidate_kind="track",
+        )
+        assert _valid_external_track(track, "Taylor Swift") is False
+
+
+class TestRecommendationQualityGate:
+    def test_filters_keyword_spam_and_production_assets(self):
+        noisy = [
+            ("跑步音乐 180步频（033）动感节奏 卡点", "音符糖"),
+            ('（FREE）“Only You” R&B+Drake+Trapsoul - Type beat', "ZN Kill This Vibe"),
+            ("青春的狂欢（伴奏）", "律动R&B"),
+            ("Neo Soul Beat", "Chill5"),
+            ("#梦核 #新风格探索 #trap", "SAAC"),
+            ("热门歌曲", "热门歌曲"),
+        ]
+        for index, (title, artist) in enumerate(noisy):
+            track = ExternalTrack(
+                external_id=str(index), title=title, artist=artist, source="netease"
+            )
+            assert _is_recommendation_quality_track(track) is False, title
+
+    def test_keeps_normal_official_tracks(self):
+        for index, (title, artist) in enumerate([
+            ("Blinding Lights", "The Weeknd"),
+            ("搬家", "张震岳"),
+            ("Firework", "Katy Perry"),
+            ("Butter (Hotter Remix)", "BTS"),
+        ]):
+            track = ExternalTrack(
+                external_id=str(index), title=title, artist=artist, source="netease"
+            )
+            assert _is_recommendation_quality_track(track) is True, title
+
+    def test_explicit_type_beat_request_can_bypass_gate(self):
+        track = ExternalTrack(
+            external_id="beat-1", title="Drake Type Beat", artist="Producer", source="netease"
+        )
+        assert _query_requests_variant_content("给我一些 Drake Type Beat") is True
+        assert _is_recommendation_quality_track(track, allow_variants=True) is True

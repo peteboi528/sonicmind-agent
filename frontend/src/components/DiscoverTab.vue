@@ -553,7 +553,13 @@ onMounted(() => {
             <div v-for="chart in trending" :key="chart.name" class="chart-group">
               <div class="chart-header">
                 <span class="chart-icon">{{ chart.icon }}</span>
-                <span class="chart-name">{{ chart.name }}</span>
+                <span class="chart-title-wrap">
+                  <span class="chart-name">{{ chart.name }}</span>
+                  <span class="chart-meta">
+                    {{ chart.source === 'netease' ? '网易云榜单' : 'Last.fm' }}
+                    <template v-if="chart.updated_at"> · {{ new Date(chart.updated_at).toLocaleDateString('zh-CN') }}更新</template>
+                  </span>
+                </span>
                 <button v-if="chart.tracks.length > 1" class="play-all-btn chart-play-all" @click="store.playAll(chart.tracks.map(toCard))">
                   ▶ 播放
                 </button>
@@ -915,10 +921,20 @@ onMounted(() => {
   margin-bottom: 12px;
 }
 .chart-icon { font-size: 1.1rem; }
+.chart-title-wrap {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
 .chart-name {
   font-family: var(--font-display);
   font-size: 0.95rem; font-weight: 700;
-  flex: 1;
+}
+.chart-meta {
+  color: var(--text-muted);
+  font-size: 0.7rem;
 }
 .chart-play-all {
   padding: 5px 14px; font-size: 0.78rem;

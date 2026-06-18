@@ -257,6 +257,7 @@ class RetrievalPlan(BaseModel):
     # 改写成可直接喂搜索 API 的正向 query（否定尽量转正向，如"不要中文"→"英文 欧美"）。
     # 为空时检索层降级回 _extract_search_query 关键词切词路径（mock/无 key 不破）。
     search_query: str = ""
+    search_variants: list[str] = Field(default_factory=list)
     language_filter: str = ""      # 语言偏好 zh/en/ja/ko/...，非空时对候选做安全后过滤
 
 
@@ -289,6 +290,7 @@ class QueryPlanPayload(BaseModel):
     use_vector: bool = False
     use_web: bool = True
     search_query: str = ""
+    search_variants: list[str] = Field(default_factory=list)
     language: str = ""
     target_count: int | None = None
     reasoning: str = ""
@@ -316,6 +318,15 @@ class QueryPlanPayload(BaseModel):
     @classmethod
     def _coerce_text(cls, v: object) -> str:
         return str(v or "").strip()
+
+    @field_validator("search_variants", mode="before")
+    @classmethod
+    def _coerce_search_variants(cls, v: object) -> list[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("search_variants must be a list")
+        return [str(item).strip() for item in v if str(item).strip()]
 
     @field_validator("target_count", mode="before")
     @classmethod

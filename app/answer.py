@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.models import AgentGoal, TrackRef
+from app.models import AgentGoal, ExternalTrack, TrackRef
 
 # ── 回复模板（集中管理，Graph 与 ReAct fallback 共用） ──────────────────
 RESPONSE_TEMPLATES = {
@@ -115,6 +115,15 @@ def collect_tracks(results: list[dict[str, Any]]) -> list[Any]:
                     other_online.append(track)
         elif t == "import_netease_playlist":
             verified_online.extend(result["result"].get("tracks", []))
+        elif t == "journey":
+            for phase in (result.get("journey") or {}).get("phases", []):
+                for track in phase.get("tracks", []):
+                    try:
+                        verified_online.append(
+                            track if isinstance(track, ExternalTrack) else ExternalTrack.model_validate(track)
+                        )
+                    except (TypeError, ValueError):
+                        continue
     # verified 在线优先，其他在线其次，本地兜底
     merged = [*verified_online, *other_online, *local]
     return dedupe_tracks(merged)

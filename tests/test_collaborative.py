@@ -76,8 +76,9 @@ def test_recent_listened_ids_recent_first_deduped():
 
 def test_weights_redistribute_without_cf():
     # CF 不可用时，三锚权重和仍为 1，CF 权重为 0
-    w_sem, w_per, w_beh, w_col = _normalized_weights(True, True, collaborative_ok=False)
+    w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(True, True, collaborative_ok=False)
     assert w_col == 0.0
+    assert w_exp == 0.0
     assert abs(w_sem + w_per + w_beh - 1.0) < 1e-9
 
 

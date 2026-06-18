@@ -132,6 +132,34 @@ class ResourceLibrary:
             ).fetchall()
         return [self._row_to_track(row) for row in rows]
 
+    def semantic_search(self, query: str, limit: int = 5, pool_size: int = 300, min_score: float = 0.55) -> list[ResourceTrack]:
+        """Dense fallback recall over verified resource-library tracks.
+
+        This is intentionally opportunistic: if embeddings are unavailable or
+        encoding fails, return [] and let callers keep their existing flow.
+        """
+        query = (query or "").strip()
+        if not query:
+            return []
+        from app.retrieval import embeddings
+
+        if not embeddings.embeddings_available():
+            return []
+        candidates = [track for track in self.list_tracks(pool_size) if track.verified]
+        if not candidates:
+            return []
+        texts = [_resource_track_text(track) for track in candidates]
+        scores = embeddings.semantic_scores(query, texts)
+        if scores is None:
+            return []
+        ranked = [
+            (score, track)
+            for score, track in zip(scores, candidates, strict=False)
+            if score >= min_score
+        ]
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        return [track for _, track in ranked[:limit]]
+
     def record_exposure(self, tracks: list[ExternalTrack | Asset]) -> None:
         with self._connect() as conn:
             for track in tracks:
@@ -263,3 +291,12 @@ class ResourceLibrary:
             last_seen=row["last_seen"],
             exposure_count=row["exposure_count"],
         )
+
+
+def _resource_track_text(track: ResourceTrack) -> str:
+    return " ".join([
+        track.title or "",
+        track.artist or "",
+        " ".join(track.genre or []),
+        " ".join(track.mood or []),
+    ]).strip()

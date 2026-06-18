@@ -5,7 +5,8 @@
 """
 
 import app.retrieval.embeddings as emb
-from app.models import Segment
+from app.library import ResourceLibrary
+from app.models import ResourceTrack, Segment
 from app.retrieval.vector_store import HybridRetriever
 
 
@@ -71,3 +72,40 @@ def test_encode_returns_none_when_unavailable(monkeypatch):
     monkeypatch.setattr(emb, "_model", None)
     monkeypatch.setattr(emb, "_load_attempted", True)
     assert emb.encode(["任意文本"]) is None
+
+
+def test_pyproject_declares_embeddings_extra():
+    import tomllib
+    from pathlib import Path
+
+    data = tomllib.loads(Path("pyproject.toml").read_text())
+    deps = data["project"]["optional-dependencies"]["embeddings"]
+    assert any(dep.startswith("sentence-transformers") for dep in deps)
+
+
+def test_resource_library_semantic_search_uses_dense(tmp_path, monkeypatch):
+    lib = ResourceLibrary(tmp_path / "lib.sqlite")
+    lib.upsert_track(ResourceTrack(
+        title="Piano Night",
+        artist="A",
+        source="netease",
+        source_id="1",
+        genre=["古典"],
+        mood=["安静"],
+        verified=True,
+    ))
+    lib.upsert_track(ResourceTrack(
+        title="Drum Fire",
+        artist="B",
+        source="netease",
+        source_id="2",
+        genre=["摇滚"],
+        mood=["激昂"],
+        verified=True,
+    ))
+    monkeypatch.setattr(emb, "embeddings_available", lambda: True)
+    monkeypatch.setattr(emb, "semantic_scores", lambda query, texts: [0.91 if "Piano" in text else 0.2 for text in texts])
+
+    hits = lib.semantic_search("安静钢琴", limit=2, min_score=0.55)
+
+    assert [track.title for track in hits] == ["Piano Night"]

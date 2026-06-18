@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
+from app.concurrency import run_parallel
+from app.config import settings
 from app.graph.decompose import SubTask, decompose_compound, decompose_compound_with_meta, summarize_subtasks
 from app.graph.nodes import (
     evaluate,
@@ -54,13 +56,12 @@ class AgentGraphRunner:
         answers: list[AgentAnswer] = []
         compound_trace = [f"[compound_plan] {summarize_subtasks(subtasks)}"]
 
-        for index, task in enumerate(subtasks, start=1):
-            task_query = _hydrate_subtask_query(task, scratchpad)
-            state = self._invoke_state(user_id, asset_id, task_query, history=history, top_k=top_k)
+        for index, task, task_query, state in _run_compound_subtasks(
+            self, subtasks, scratchpad, user_id, asset_id, history, top_k
+        ):
             answer = state["answer"]
             states.append(state)
             answers.append(answer)
-            _update_scratchpad(scratchpad, task, state, index, len(subtasks))
             compound_trace.append(f"[compound_step] {index}/{len(subtasks)} {task.intent}: {task_query}")
             compound_trace.extend(f"[subtask {index}] {line}" for line in answer.agent_trace)
 
@@ -139,8 +140,6 @@ class AgentGraphRunner:
                 if route_after_execute(state) == "web_fallback":
                     for event in advance(web_fallback):
                         yield event
-                for event in advance(evaluate):
-                    yield event
                 for event in advance(reflect):
                     yield event
                 if route_after_reflect(state) != "refine":
@@ -192,15 +191,100 @@ def build_agent_graph(agent: AudioVisualAgent) -> AgentGraphRunner:
     return AgentGraphRunner(agent)
 
 
+def _run_compound_subtasks(
+    runner: AgentGraphRunner,
+    subtasks: list[SubTask],
+    scratchpad: dict[str, Any],
+    user_id: str,
+    asset_id: str | None,
+    history: list[dict[str, Any]] | None,
+    top_k: int,
+) -> list[tuple[int, SubTask, str, AgentState]]:
+    if not settings.enable_parallel_tools or len(subtasks) <= 1:
+        completed: list[tuple[int, SubTask, str, AgentState]] = []
+        for index, task in enumerate(subtasks, start=1):
+            item = _run_one_compound_subtask(runner, index, task, scratchpad, user_id, asset_id, history, top_k)
+            completed.append(item)
+            _update_scratchpad(scratchpad, task, item[3], index, len(subtasks))
+        return completed
+
+    completed: list[tuple[int, SubTask, str, AgentState]] = []
+    batch: list[tuple[int, SubTask, str]] = []
+
+    def flush_batch() -> None:
+        nonlocal batch
+        if not batch:
+            return
+        tasks = [
+            (
+                f"compound:{index}:{task.intent}",
+                lambda index=index, task=task, task_query=task_query: _invoke_compound_subtask_state(
+                    runner, index, task, task_query, user_id, asset_id, history, top_k
+                ),
+            )
+            for index, task, task_query in batch
+        ]
+        default = None
+        batch_results = []
+        for result in run_parallel(tasks, timeout=30.0, default=default):
+            if result is not None:
+                batch_results.append(result)
+        batch_results.sort(key=lambda item: item[0])
+        for item in batch_results:
+            completed.append(item)
+        for index, task, _task_query, state in batch_results:
+            _update_scratchpad(scratchpad, task, state, index, len(subtasks))
+        batch = []
+
+    for index, task in enumerate(subtasks, start=1):
+        if task.depends_on_prev:
+            flush_batch()
+            item = _run_one_compound_subtask(runner, index, task, scratchpad, user_id, asset_id, history, top_k)
+            completed.append(item)
+            _update_scratchpad(scratchpad, task, item[3], index, len(subtasks))
+        else:
+            batch.append((index, task, _hydrate_subtask_query(task, scratchpad)))
+    flush_batch()
+    completed.sort(key=lambda item: item[0])
+    return completed
+
+
+def _run_one_compound_subtask(
+    runner: AgentGraphRunner,
+    index: int,
+    task: SubTask,
+    scratchpad: dict[str, Any],
+    user_id: str,
+    asset_id: str | None,
+    history: list[dict[str, Any]] | None,
+    top_k: int,
+) -> tuple[int, SubTask, str, AgentState]:
+    task_query = _hydrate_subtask_query(task, scratchpad)
+    return _invoke_compound_subtask_state(runner, index, task, task_query, user_id, asset_id, history, top_k)
+
+
+def _invoke_compound_subtask_state(
+    runner: AgentGraphRunner,
+    index: int,
+    task: SubTask,
+    task_query: str,
+    user_id: str,
+    asset_id: str | None,
+    history: list[dict[str, Any]] | None,
+    top_k: int,
+) -> tuple[int, SubTask, str, AgentState]:
+    state = runner._invoke_state(user_id, asset_id, task_query, history=history, top_k=top_k)
+    return index, task, task_query, state
+
+
 def _fallback_invoke(agent: AudioVisualAgent, state: AgentState) -> AgentState:
-    """无 langgraph 时的等价执行：复刻条件路由（execute → [web_fallback] → evaluate → finalize）。"""
+    """无 langgraph 时的等价执行：复刻条件路由（execute → [web_fallback] → reflect → finalize）。"""
     state = load_context(agent, state)
     state = plan_intent(agent, state)
     while True:
         state = execute_tools(agent, state)
         if route_after_execute(state) == "web_fallback":
             state = web_fallback(agent, state)
-        state = evaluate(agent, state)
         state = reflect(agent, state)
         if route_after_reflect(state) != "refine":
             break
@@ -219,7 +303,6 @@ def _try_build_langgraph(agent: AudioVisualAgent):
     graph.add_node("plan_intent", lambda state: plan_intent(agent, state))
     graph.add_node("execute_tools", lambda state: execute_tools(agent, state))
     graph.add_node("web_fallback", lambda state: web_fallback(agent, state))
-    graph.add_node("evaluate", lambda state: evaluate(agent, state))
     graph.add_node("reflect", lambda state: reflect(agent, state))
     graph.add_node("finalize", lambda state: finalize(agent, state))
     graph.set_entry_point("load_context")
@@ -228,10 +311,9 @@ def _try_build_langgraph(agent: AudioVisualAgent):
     graph.add_conditional_edges(
         "execute_tools",
         lambda state: route_after_execute(state),
-        {"web_fallback": "web_fallback", "evaluate": "evaluate"},
+        {"web_fallback": "web_fallback", "reflect": "reflect"},
     )
-    graph.add_edge("web_fallback", "evaluate")
-    graph.add_edge("evaluate", "reflect")
+    graph.add_edge("web_fallback", "reflect")
     graph.add_conditional_edges(
         "reflect",
         lambda state: route_after_reflect(state),

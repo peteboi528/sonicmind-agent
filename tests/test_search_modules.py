@@ -6,7 +6,46 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-from app.models import ExternalTrack
+from app.models import ExternalTrack, ResourceTrack
+
+
+def test_merge_search_queries_dedupes_and_caps(monkeypatch):
+    from app.agent import _merge_search_queries
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "max_search_variants", 2, raising=False)
+    assert _merge_search_queries("Eminem", ["eminem", "rap", "hip hop"]) == ["Eminem", "rap", "hip hop"]
+
+
+def test_agent_dense_library_fallback_returns_verified_tracks(monkeypatch):
+    from app.agent import AudioVisualAgent
+    from app.config import settings
+
+    agent = AudioVisualAgent.__new__(AudioVisualAgent)
+    monkeypatch.setattr(settings, "dense_recall_min_score", 0.5, raising=False)
+
+    class FakeLibrary:
+        def semantic_search(self, *a, **k):
+            return [
+                ResourceTrack(
+                    title="Semantic Hit",
+                    artist="Verifier",
+                    source="netease",
+                    source_id="sem-1",
+                    genre=["爵士"],
+                    mood=["深夜"],
+                    verified=True,
+                )
+            ]
+
+    agent.library = FakeLibrary()
+
+    out = agent._dense_library_fallback("late night jazz", existing=[], limit=1)
+
+    assert len(out) == 1
+    assert out[0].title == "Semantic Hit"
+    assert out[0].external_id == "sem-1"
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # verifier.py
@@ -272,6 +311,32 @@ class TestSearchAndExtract:
         from app.search.netease_playlist import search_and_extract
 
         assert search_and_extract("test") == []
+
+    @patch("app.search.netease_playlist.get_playlist_tracks")
+    @patch("app.search.netease_playlist.search_netease_playlists")
+    def test_prefers_official_curated_playlist(self, mock_search, mock_tracks):
+        mock_search.return_value = [
+            {
+                "id": 1, "name": "SEO 跑步歌单", "track_count": 50,
+                "play_count": 999999, "creator_name": "关键词音乐", "creator_verified": False,
+            },
+            {
+                "id": 2, "name": "夏日跑步", "track_count": 50,
+                "play_count": 200000, "creator_name": "云音乐官方歌单", "creator_verified": True,
+            },
+        ]
+        mock_tracks.side_effect = lambda playlist_id, limit: [ExternalTrack(
+            external_id=str(playlist_id),
+            title="Firework" if playlist_id == 2 else "跑步 BPM 180 Type Beat",
+            artist="Katy Perry" if playlist_id == 2 else "Beat Maker",
+            source="netease",
+        )]
+        from app.search.netease_playlist import search_and_extract
+
+        result = search_and_extract("跑步 动感 节奏", max_playlists=1)
+
+        assert [track.title for track in result] == ["Firework"]
+        mock_tracks.assert_called_once_with(2, limit=15)
 
 
 # ═══════════════════════════════════════════════════════════════════════

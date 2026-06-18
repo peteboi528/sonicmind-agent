@@ -9,10 +9,11 @@ from pathlib import Path
 import pytest
 
 from app.library import ResourceLibrary
-from app.models import ExternalTrack, TasteProfile
+from app.models import ExternalTrack, RankingBreakdown, TasteProfile
 from app.recommend.rerank import (
     PreferenceProfile,
     _normalized_weights,
+    bandit_select,
     mmr_rerank,
     rerank_candidates,
     tri_anchor_rerank,
@@ -29,25 +30,35 @@ def _track(title, genre, mood, source="netease", ext_id=None):
 # ---- 四锚归一化（默认 CF 不可用，退回三锚） ----
 
 def test_tri_anchor_weights_sum_to_one():
-    w_sem, w_per, w_beh, w_col = _normalized_weights(semantic_ok=True, behavior_ok=True)
-    assert abs(w_sem + w_per + w_beh + w_col - 1.0) < 1e-9
+    w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(semantic_ok=True, behavior_ok=True)
+    assert abs(w_sem + w_per + w_beh + w_col + w_exp - 1.0) < 1e-9
     assert w_col == 0.0  # 默认 collaborative_ok=False，CF 权重不分配
+    assert w_exp == 0.0  # 默认 explore_ok=False，探索锚不分配
 
 
 def test_missing_anchors_reweighted():
     # 无语义模型 + 无行为数据 + 无 CF → 全部权重落到个性化锚
-    w_sem, w_per, w_beh, w_col = _normalized_weights(semantic_ok=False, behavior_ok=False)
-    assert w_sem == 0.0 and w_beh == 0.0 and w_col == 0.0
+    w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(semantic_ok=False, behavior_ok=False)
+    assert w_sem == 0.0 and w_beh == 0.0 and w_col == 0.0 and w_exp == 0.0
     assert abs(w_per - 1.0) < 1e-9
 
 
 def test_collaborative_anchor_takes_share_when_enabled():
     # 四锚全可用时，CF 锚分到非零权重，四者归一化和为 1
-    w_sem, w_per, w_beh, w_col = _normalized_weights(
+    w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(
         semantic_ok=True, behavior_ok=True, collaborative_ok=True
     )
     assert w_col > 0.0
-    assert abs(w_sem + w_per + w_beh + w_col - 1.0) < 1e-9
+    assert w_exp == 0.0
+    assert abs(w_sem + w_per + w_beh + w_col + w_exp - 1.0) < 1e-9
+
+
+def test_explore_anchor_takes_share_when_enabled():
+    w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(
+        semantic_ok=True, behavior_ok=True, collaborative_ok=True, explore_ok=True
+    )
+    assert w_exp > 0.0
+    assert abs(w_sem + w_per + w_beh + w_col + w_exp - 1.0) < 1e-9
 
 
 def test_personalize_anchor_prefers_matching_tags():
@@ -66,6 +77,21 @@ def test_breakdown_has_components():
     ranked = tri_anchor_rerank("x", [_track("S", ["R&B"], ["放松"])], PreferenceProfile.from_taste(taste))
     comp = ranked[0][1].components
     assert {"semantic", "personalize", "behavior", "w_semantic"} <= set(comp)
+
+
+def test_explore_components_added_when_ts_scores_exist():
+    taste = TasteProfile(top_genres=[("R&B", 1.0)], top_moods=[("放松", 1.0)])
+    tracks = [_track("S", ["R&B"], ["放松"], ext_id="s1")]
+    ts_key = "netease|s1|s|a"
+    ranked = tri_anchor_rerank(
+        "chill",
+        tracks,
+        PreferenceProfile.from_taste(taste),
+        ts_scores={ts_key: 0.92},
+    )
+    comp = ranked[0][1].components
+    assert comp["explore"] == 0.92
+    assert comp["w_explore"] > 0.0
 
 
 # ---- 锚复活回归（旧 bug：语义/行为在生产恒为 0，三锚退化成单锚）----
@@ -148,6 +174,43 @@ def test_rerank_candidates_respects_top_k():
     tracks = [_track(f"S{i}", ["R&B"], ["放松"], ext_id=f"id{i}") for i in range(6)]
     out = rerank_candidates("chill", tracks, taste, top_k=3)
     assert len(out) == 3
+
+
+def test_bandit_select_reserves_explore_slot():
+    taste = TasteProfile(top_genres=[("R&B", 1.0)], top_moods=[("放松", 1.0)])
+    tracks = [
+        _track("Safe1", ["R&B"], ["放松"], ext_id="safe1"),
+        _track("Safe2", ["R&B"], ["放松"], ext_id="safe2"),
+        _track("Explorer", ["电子"], ["梦幻"], ext_id="explore"),
+    ]
+    ts_scores = {
+        "netease|safe1|safe1|a": 0.1,
+        "netease|safe2|safe2|a": 0.1,
+        "netease|explore|explorer|a": 0.99,
+    }
+    scored = tri_anchor_rerank("chill", tracks, PreferenceProfile.from_taste(taste), ts_scores=ts_scores)
+    selected = bandit_select(scored, top_k=2, explore_ratio=0.5)
+    assert "Explorer" in [track.title for track, _ in selected]
+
+
+def test_bandit_select_ratio():
+    scored = []
+    for i in range(10):
+        is_explorer = i >= 7
+        track = _track(f"T{i}", ["R&B" if not is_explorer else "电子"], ["放松"], ext_id=f"id{i}")
+        scored.append((
+            track,
+            RankingBreakdown(
+                title=track.title,
+                source=track.source,
+                score=round(1.0 - i * 0.05, 4),
+                reason="test",
+                components={"explore": 0.99 if is_explorer else 0.01},
+            ),
+        ))
+    selected = bandit_select(scored, top_k=10, explore_ratio=0.3)
+    titles = [track.title for track, _ in selected]
+    assert {"T7", "T8", "T9"} <= set(titles)
 
 
 # ---- Thompson Sampling ----

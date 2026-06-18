@@ -1,12 +1,14 @@
 """复合任务检测 + compound graph 调度测试。"""
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from app.agent import AudioVisualAgent
 from app.compound import is_compound_task
 from app.config import settings
-from app.graph.builder import _compose_compound_answer, _hydrate_subtask_query
+from app.graph.builder import _compose_compound_answer, _hydrate_subtask_query, _run_compound_subtasks
 from app.graph.decompose import SubTask, decompose_compound
 from app.models import AgentAnswer, StreamEvent
 from app.storage import JsonStore
@@ -174,6 +176,52 @@ def test_hydrate_subtask_query_uses_explicit_scratchpad_summary():
     assert "上一步任务" in hydrated
     assert "上一步摘要" in hydrated
     assert "适合跑步的歌" in hydrated
+
+
+def test_compound_independent_subtasks_run_parallel(agent, monkeypatch):
+    if agent.graph is None:
+        pytest.skip("graph 不可用")
+    monkeypatch.setattr(settings, "enable_parallel_tools", True, raising=False)
+
+    def fake_invoke(_user_id, _asset_id, query, history=None, top_k=5):
+        time.sleep(0.1)
+        return {"answer": _ans(query, [query]), "events": []}
+
+    monkeypatch.setattr(agent.graph, "_invoke_state", fake_invoke)
+    subtasks = [
+        SubTask(intent="recommend", query="推荐跑步歌"),
+        SubTask(intent="taste", query="分析我的品味"),
+    ]
+
+    start = time.monotonic()
+    out = _run_compound_subtasks(agent.graph, subtasks, {}, "u", None, None, 5)
+    elapsed = time.monotonic() - start
+
+    assert [item[2] for item in out] == ["推荐跑步歌", "分析我的品味"]
+    assert elapsed < 0.18
+
+
+def test_compound_dependent_subtask_waits_for_scratchpad(agent, monkeypatch):
+    if agent.graph is None:
+        pytest.skip("graph 不可用")
+    monkeypatch.setattr(settings, "enable_parallel_tools", True, raising=False)
+    seen_queries: list[str] = []
+
+    def fake_invoke(_user_id, _asset_id, query, history=None, top_k=5):
+        seen_queries.append(query)
+        return {"answer": _ans("已经找到 5 首适合跑步的真实候选。", [query]), "events": []}
+
+    monkeypatch.setattr(agent.graph, "_invoke_state", fake_invoke)
+    subtasks = [
+        SubTask(intent="recommend", query="推荐跑步歌"),
+        SubTask(intent="playlist", query="基于上一步做歌单", depends_on_prev=True),
+    ]
+
+    _run_compound_subtasks(agent.graph, subtasks, {}, "u", None, None, 5)
+
+    assert len(seen_queries) == 2
+    assert "上一步任务" in seen_queries[1]
+    assert "推荐跑步歌" in seen_queries[1]
 
 
 def test_compound_answer_prefers_llm_synthesis(agent):

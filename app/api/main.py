@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -418,41 +419,59 @@ def discover_browse(request: BrowseRequest):
 
 @app.post("/discover/trending")
 def discover_trending(request: TrendingRequest):
-    """热门趋势：官方榜单（网易云热歌榜/飙升榜/欧美榜 + Last.fm 全球榜）分组返回。"""
-    from app.search.netease_playlist import get_playlist_tracks
+    """热门趋势：网易云榜单与 Last.fm 全球榜，附真实来源和更新时间。"""
+    from app.search.netease_playlist import get_playlist_detail
     from app.sources.lastfm_client import LastfmClient
 
     per_chart = min(request.limit, 8)
 
     # 网易云官方榜单 ID
     _NETEASE_CHARTS = [
-        {"name": "网易云热歌榜", "id": 3779629, "icon": "🔥"},
-        {"name": "网易云飙升榜", "id": 19723756, "icon": "📈"},
-        {"name": "美国 Billboard", "id": 11641012, "icon": "🇺🇸"},
-        {"name": "UK 排行榜", "id": 60198, "icon": "🇬🇧"},
-        {"name": "Beatport 电子榜", "id": 3812895, "icon": "🎛️"},
+        {"name": "网易云热歌榜", "id": 3778678, "expected": "热歌榜", "icon": "🔥"},
+        {"name": "网易云飙升榜", "id": 19723756, "expected": "飙升榜", "icon": "📈"},
+        {"name": "美国 Billboard", "id": 60198, "expected": "美国Billboard榜", "icon": "🇺🇸"},
+        {"name": "UK 排行榜", "id": 180106, "expected": "UK排行榜周榜", "icon": "🇬🇧"},
+        {"name": "Beatport 电子榜", "id": 3812895, "expected": "Beatport全球电子舞曲榜", "icon": "🎛️"},
     ]
 
     charts: list[dict] = []
 
-    # 1) 网易云官方榜单
-    for chart_def in _NETEASE_CHARTS:
+    def _load_netease_chart(chart_def: dict[str, Any]) -> dict[str, Any] | None:
         try:
-            raw = get_playlist_tracks(chart_def["id"], limit=per_chart)
-            if raw:
-                charts.append({
+            detail = get_playlist_detail(chart_def["id"], limit=per_chart)
+            if detail and detail["tracks"]:
+                actual_name = detail["name"].replace(" ", "")
+                expected_name = chart_def["expected"].replace(" ", "")
+                if actual_name != expected_name:
+                    logger.warning(
+                        "Trending chart id=%s expected %r but received %r; skipping mismatched data",
+                        chart_def["id"], chart_def["expected"], detail["name"],
+                    )
+                    return None
+                return {
                     "name": chart_def["name"],
                     "icon": chart_def["icon"],
+                    "chart_id": str(chart_def["id"]),
+                    "source": "netease",
+                    "source_name": detail["name"],
+                    "updated_at": detail["updated_at"],
                     "tracks": [{
                         "title": t.title, "artist": t.artist,
                         "source": t.source or "netease",
                         "source_id": t.external_id or "",
                         "cover_url": t.cover_url,
                         "playback_url": t.playback_url,
-                    } for t in raw],
-                })
+                    } for t in detail["tracks"]],
+                }
         except Exception:
             logger.debug("Trending chart %s failed", chart_def["name"], exc_info=True)
+        return None
+
+    # 1) 各榜单彼此独立，并行获取，避免一个慢源拖住整个发现页。
+    with ThreadPoolExecutor(max_workers=len(_NETEASE_CHARTS)) as executor:
+        for chart in executor.map(_load_netease_chart, _NETEASE_CHARTS):
+            if chart:
+                charts.append(chart)
 
     # 2) Last.fm 全球榜
     if settings.lastfm_api_key:
@@ -463,6 +482,10 @@ def discover_trending(request: TrendingRequest):
                 charts.append({
                     "name": "Last.fm 全球榜",
                     "icon": "🌐",
+                    "chart_id": "lastfm-global",
+                    "source": "lastfm",
+                    "source_name": "Last.fm Global Top Tracks",
+                    "updated_at": None,
                     "tracks": [{
                         "title": t["title"], "artist": t.get("artist", ""),
                         "source": "lastfm", "source_id": "",

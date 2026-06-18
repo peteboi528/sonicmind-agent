@@ -214,10 +214,11 @@ class MockLLM:
         query_for_rewrite = prompt if _needs_history_for_mock_rewrite(current_query) else current_query
         entities = _mock_entities(current_query, intent)
         search_query, language = self._mock_search_query(query_for_rewrite, intent, entities)
+        search_variants = _mock_search_variants(current_query, search_query, intent, entities)
         return _json.dumps({
             "intent": intent, "entities": entities, "use_local": use_local,
             "use_vector": use_vector, "use_web": use_web,
-            "search_query": search_query, "language": language,
+            "search_query": search_query, "search_variants": search_variants, "language": language,
             "target_count": target,
             "reasoning": f"mock：{intent} 意图",
         }, ensure_ascii=False)
@@ -266,12 +267,13 @@ class MockLLM:
             repaired.setdefault("use_vector", False)
             repaired.setdefault("use_web", False)
             repaired.setdefault("search_query", "")
+            repaired.setdefault("search_variants", [])
             repaired.setdefault("language", "")
             repaired.setdefault("target_count", None)
             repaired.setdefault("reasoning", "")
             repaired["intent"] = repaired.get("intent") or "chat"
             return _json.dumps(repaired, ensure_ascii=False)
-        return '{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","language":"","target_count":null,"reasoning":"repair fallback"}'
+        return '{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","search_variants":[],"language":"","target_count":null,"reasoning":"repair fallback"}'
 
     @staticmethod
     def _mock_search_query(prompt: str, intent: str, entities: list[str] | None = None) -> tuple[str, str]:
@@ -340,6 +342,48 @@ def _infer_count(text: str) -> int | None:
     if not match:
         return None
     return max(1, min(int(match.group(1)), 100))
+
+
+def _mock_search_variants(query: str, search_query: str, intent: str, entities: list[str] | None = None) -> list[str]:
+    if intent in {"chat", "taste", "import"}:
+        return []
+    variants: list[str] = []
+    lowered = f"{query} {search_query}".lower()
+    typo_map = {
+        "emenem": "Eminem",
+        "taylor swift": "Taylor Swift pop country",
+        "newjeans": "NewJeans K-pop",
+    }
+    synonym_map = {
+        "说唱": "rap hip hop",
+        "嘻哈": "hip hop rap",
+        "r&b": "rnb soul",
+        "rnb": "R&B soul",
+        "爵士": "jazz",
+        "放松": "chill relaxing",
+        "深夜": "late night chill",
+        "跑步": "running workout",
+        "学习": "focus study",
+        "梦核": "dream pop dreamy",
+    }
+    for key, value in {**typo_map, **synonym_map}.items():
+        if key in lowered:
+            variants.append(value)
+    if entities:
+        for entity in entities[:2]:
+            if intent == "video":
+                variants.append(f"{entity} MV")
+            elif intent == "artist_albums":
+                variants.append(f"{entity} album")
+    seen = {search_query.strip().lower()} if search_query.strip() else set()
+    out: list[str] = []
+    for item in variants:
+        value = item.strip()
+        key = value.lower()
+        if value and key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out[:4]
 
 
 def _extract_current_query(prompt: str) -> str:

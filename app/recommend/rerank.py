@@ -25,6 +25,10 @@ from app.models import Asset, RankingBreakdown, TasteProfile
 # 4 维个性化 Jaccard 权重（对齐 SoulTuner Graph Affinity 四维）。
 DIM_WEIGHTS = {"genre": 0.30, "mood": 0.30, "scenario": 0.25, "theme": 0.15}
 
+# dense 语义分对比归一化的最小区间阈值：batch 内 max-min 小于此值时视为高度同质，
+# 不做对比拉伸（避免把一批都相关的候选里最低那个误压到 0）。
+_CONTRASTIVE_MIN_SPREAD = 0.05
+
 
 @dataclass
 class PreferenceProfile:
@@ -178,6 +182,23 @@ def _track_id(track: Any) -> str:
     return getattr(track, "external_id", "") or getattr(track, "title", "")
 
 
+def _contrastive_normalize(scores: list[float]) -> list[float]:
+    """dense 余弦在多语言模型下被压进高位窄区间（中文短语对任意 query 都 0.7+），
+    绝对值失真：无关垃圾也能拿 0.77，被 MMR 多样性抬到相关候选之前。
+
+    解法：减去 batch 均值做对比基线，负差截断到 0——低于平均相关度的候选（真正的
+    离群垃圾）语义分归零，高于均值的保留其相对差值。不除以 spread（不强行拉满
+    [0,1]），保留差异的绝对量级，避免把「都相关、仅 query 语言偏置」的微小差放大成
+    一边倒，从而盖过语言/口味加权。区间过窄（候选高度同质）时不动，原样返回。
+    """
+    if len(scores) < 2:
+        return scores
+    if max(scores) - min(scores) < _CONTRASTIVE_MIN_SPREAD:
+        return scores  # 高度同质，保留原始绝对分
+    mean = sum(scores) / len(scores)
+    return [max(0.0, s - mean) for s in scores]
+
+
 def _semantic_anchor(query: str, tracks: list[Any]) -> tuple[list[float], bool]:
     """返回 (每个候选的语义分[0,1], 是否可用)。
 
@@ -192,7 +213,7 @@ def _semantic_anchor(query: str, tracks: list[Any]) -> tuple[list[float], bool]:
     except Exception:
         dense = None
     if dense is not None:
-        return dense, True
+        return _contrastive_normalize(dense), True
     # TF 回退 + 同义词 boost：无 sentence-transformers 时仍作为有效弱锚参与精排。
     # 旧实现返回 available=False，导致 _normalized_weights 把语义权重清零、重分配给
     # 个性化锚——正确的语义匹配（如 query「说唱」命中 Eminem）被整体丢弃，三锚退化成单锚。
@@ -234,21 +255,27 @@ def _behavior_anchor(tracks: list[Any], behavior_scores: dict[str, float] | None
     return out, any_hit
 
 
-def _normalized_weights(semantic_ok: bool, behavior_ok: bool, collaborative_ok: bool = False) -> tuple[float, float, float, float]:
-    """四锚权重归一化 + 缺项重分配（对齐 SoulTuner 缺声学锚时的降级）。
+def _normalized_weights(
+    semantic_ok: bool,
+    behavior_ok: bool,
+    collaborative_ok: bool = False,
+    explore_ok: bool = False,
+) -> tuple[float, float, float, float, float]:
+    """多锚权重归一化 + 缺项重分配（对齐 SoulTuner 缺声学锚时的降级）。
 
-    返回 (w_semantic, w_personalize, w_behavior, w_collaborative)。
-    某锚不可用（无语义模型/无行为数据/无 CF 共现）时其权重置 0，
-    其余锚归一化吸收——缺 CF 时退回三锚行为完全一致。
+    返回 (w_semantic, w_personalize, w_behavior, w_collaborative, w_explore)。
+    某锚不可用（无语义模型/无行为数据/无 CF 共现/无 TS 探索分）时其权重置 0，
+    其余锚归一化吸收——缺 CF/TS 时退回旧精排行为。
     """
     w_sem = settings.tri_anchor_w_semantic if semantic_ok else 0.0
     w_beh = settings.tri_anchor_w_behavior if behavior_ok else 0.0
     w_col = settings.tri_anchor_w_collaborative if collaborative_ok else 0.0
+    w_exp = settings.tri_anchor_w_explore if explore_ok else 0.0
     w_per = settings.tri_anchor_w_personal
-    total = w_sem + w_beh + w_col + w_per
+    total = w_sem + w_beh + w_col + w_exp + w_per
     if total <= 0:
-        return 0.0, 1.0, 0.0, 0.0  # 全缺时只靠个性化
-    return w_sem / total, w_per / total, w_beh / total, w_col / total
+        return 0.0, 1.0, 0.0, 0.0, 0.0  # 全缺时只靠个性化
+    return w_sem / total, w_per / total, w_beh / total, w_col / total, w_exp / total
 
 
 def _language_multiplier(track: Any, lang_pref: dict[str, float] | None) -> float:
@@ -272,6 +299,7 @@ def tri_anchor_rerank(
     lang_pref: dict[str, float] | None = None,
     collaborative_scores: list[float] | None = None,
     collaborative_ok: bool = False,
+    ts_scores: dict[str, float] | None = None,
 ) -> list[tuple[Any, RankingBreakdown]]:
     """四锚归一化精排（语义/个性化/行为 + 可选协同）。返回按 final_score 降序的 (track, breakdown)。
 
@@ -279,6 +307,7 @@ def tri_anchor_rerank(
     （英文歌多则多推英文，但中文仍保留），实现用户"按曲库语言偏好推荐"的需求。
     collaborative_scores：可选 CF 第四锚（已归一到 [0,1]，与 tracks 等长）。
     collaborative_ok=False 时该锚权重重分配给其余锚，行为与三锚一致。
+    ts_scores：可选 Thompson Sampling 探索分（ResourceLibrary.sample_ts_scores）。
     """
     if not tracks:
         return []
@@ -287,12 +316,14 @@ def tri_anchor_rerank(
     behavior, behavior_ok = _behavior_anchor(tracks, behavior_scores)
     collab = collaborative_scores if (collaborative_ok and collaborative_scores and len(collaborative_scores) == len(tracks)) else None
     collab_ok = collab is not None
-    w_sem, w_per, w_beh, w_col = _normalized_weights(semantic_ok, behavior_ok, collab_ok)
+    explore_ok = bool(settings.enable_explore and ts_scores)
+    w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(semantic_ok, behavior_ok, collab_ok, explore_ok)
 
     scored: list[tuple[Any, RankingBreakdown]] = []
     for i, track in enumerate(tracks):
         cf_i = collab[i] if collab is not None else 0.0
-        base = w_sem * semantic[i] + w_per * personalize[i] + w_beh * behavior[i] + w_col * cf_i
+        exp_i = _ts_score_for_track(ts_scores, track) if explore_ok else 0.0
+        base = w_sem * semantic[i] + w_per * personalize[i] + w_beh * behavior[i] + w_col * cf_i + w_exp * exp_i
         lang_mult = _language_multiplier(track, lang_pref)
         # 乘性加权在 base>0 时倾斜同语言候选；额外加一个很小的加性语言先验，
         # 让 base≈0（冷启动/泛查询无任何锚信号）时语言偏好仍能打破平局，
@@ -311,11 +342,14 @@ def tri_anchor_rerank(
         if collab_ok:
             components["collaborative"] = round(cf_i, 4)
             components["w_collaborative"] = round(w_col, 3)
+        if explore_ok:
+            components["explore"] = round(exp_i, 4)
+            components["w_explore"] = round(w_exp, 3)
         breakdown = RankingBreakdown(
             title=getattr(track, "title", ""),
             source=getattr(track, "source", "local"),
             score=round(final, 4),
-            reason=_reason(semantic[i], personalize[i], behavior[i], w_sem, w_per, w_beh, cf_i, w_col),
+            reason=_reason(semantic[i], personalize[i], behavior[i], w_sem, w_per, w_beh, cf_i, w_col, exp_i, w_exp),
             components=components,
         )
         scored.append((track, breakdown))
@@ -323,7 +357,36 @@ def tri_anchor_rerank(
     return scored
 
 
-def _reason(sem: float, per: float, beh: float, w_sem: float, w_per: float, w_beh: float, cf: float = 0.0, w_col: float = 0.0) -> str:
+def _ts_score_for_track(ts_scores: dict[str, float] | None, track: Any) -> float:
+    if not ts_scores:
+        return 0.0
+    source = getattr(track, "source", "") or "local"
+    source_id = getattr(track, "source_id", None) or getattr(track, "external_id", None) or getattr(track, "asset_id", "") or ""
+    title = (getattr(track, "title", "") or "").strip().lower()
+    artist = (getattr(track, "artist", "") or "").strip().lower()
+    keys = [
+        f"{source}|{source_id}|{title}|{artist}",
+        getattr(track, "external_id", "") or getattr(track, "asset_id", ""),
+        getattr(track, "title", ""),
+    ]
+    for key in keys:
+        if key in ts_scores:
+            return max(0.0, min(1.0, float(ts_scores[key])))
+    return 0.0
+
+
+def _reason(
+    sem: float,
+    per: float,
+    beh: float,
+    w_sem: float,
+    w_per: float,
+    w_beh: float,
+    cf: float = 0.0,
+    w_col: float = 0.0,
+    exp: float = 0.0,
+    w_exp: float = 0.0,
+) -> str:
     contributions = {
         "语义匹配": w_sem * sem,
         "口味契合": w_per * per,
@@ -331,9 +394,12 @@ def _reason(sem: float, per: float, beh: float, w_sem: float, w_per: float, w_be
     }
     if w_col > 0:
         contributions["协同推荐"] = w_col * cf
+    if w_exp > 0:
+        contributions["探索潜力"] = w_exp * exp
     top = max(contributions, key=contributions.get)
     tail = f"/协同{cf:.2f}" if w_col > 0 else ""
-    return f"{top}主导（语义{sem:.2f}/口味{per:.2f}/行为{beh:.2f}{tail}）"
+    explore_tail = f"/探索{exp:.2f}" if w_exp > 0 else ""
+    return f"{top}主导（语义{sem:.2f}/口味{per:.2f}/行为{beh:.2f}{tail}{explore_tail}）"
 
 
 def mmr_rerank(
@@ -367,9 +433,52 @@ def mmr_rerank(
     return selected
 
 
+def bandit_select(
+    scored: list[tuple[Any, RankingBreakdown]],
+    top_k: int,
+    explore_ratio: float | None = None,
+) -> list[tuple[Any, RankingBreakdown]]:
+    """Exploit + explore 混合选择：多数位置给综合分，少数位置给 TS 探索潜力。
+
+    这一步发生在候选已通过真实来源验证和排除规则之后，因此 explore 不是造歌，
+    而是在可信候选里主动留出探索槽。
+    """
+    if not scored or top_k <= 0:
+        return []
+    ratio = settings.explore_ratio if explore_ratio is None else explore_ratio
+    ratio = max(0.0, min(1.0, ratio))
+    if ratio <= 0:
+        return mmr_rerank(scored, top_k=top_k)
+    explore_n = int(round(top_k * ratio))
+    if top_k > 1 and explore_n <= 0:
+        explore_n = 1
+    explore_n = min(explore_n, top_k, len(scored))
+    exploit_n = max(0, min(top_k - explore_n, len(scored)))
+
+    selected = mmr_rerank(scored, top_k=exploit_n) if exploit_n else []
+    selected_ids = {_track_identity(t) for t, _ in selected}
+    remaining = [(t, bd) for t, bd in scored if _track_identity(t) not in selected_ids]
+    remaining.sort(key=lambda item: (item[1].components.get("explore", 0.0), item[1].score), reverse=True)
+    for item in remaining:
+        if len(selected) >= top_k:
+            break
+        selected.append(item)
+        selected_ids.add(_track_identity(item[0]))
+    return selected[:top_k]
+
+
 def _all_tags(track: Any) -> set[str]:
     tags = _track_tags(track)
     return tags["genre"] | tags["mood"] | tags["scenario"] | tags["theme"]
+
+
+def _track_identity(track: Any) -> tuple[str, str, str, str]:
+    return (
+        getattr(track, "source", "") or "local",
+        getattr(track, "source_id", None) or getattr(track, "external_id", None) or getattr(track, "asset_id", "") or "",
+        (getattr(track, "title", "") or "").strip().lower(),
+        (getattr(track, "artist", "") or "").strip().lower(),
+    )
 
 
 def rerank_candidates(
@@ -384,12 +493,14 @@ def rerank_candidates(
     exclusion_rules: list[str] | None = None,
     collaborative_scores: list[float] | None = None,
     collaborative_ok: bool = False,
+    ts_scores: dict[str, float] | None = None,
 ) -> list[tuple[Any, RankingBreakdown]]:
     """精排管线入口：排除过滤 → 四锚精排 → MMR 多样性重排 → 取 top_k。
 
     exclusion_rules：用户排除规则（如"抖音热歌"），候选匹配则丢弃。
     lang_pref：曲库语言分布，传入时按分布对候选做温和语言加权。
     collaborative_scores/collaborative_ok：可选 CF 第四锚（须与过滤后 tracks 对齐）。
+    ts_scores：可选 TS 探索锚，开启 ENABLE_EXPLORE 时用于留出探索槽。
     """
     # 排除过滤：先于精排，命中排除规则的候选直接丢弃
     if exclusion_rules:
@@ -403,7 +514,10 @@ def rerank_candidates(
     scored = tri_anchor_rerank(
         query, tracks, profile, behavior_scores, lang_pref=lang_pref,
         collaborative_scores=collaborative_scores, collaborative_ok=collaborative_ok,
+        ts_scores=ts_scores,
     )
     if apply_mmr:
+        if settings.enable_explore and ts_scores:
+            return bandit_select(scored, top_k=top_k)
         return mmr_rerank(scored, top_k=top_k)
     return scored[:top_k]

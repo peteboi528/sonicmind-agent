@@ -145,6 +145,47 @@ def test_artist_album_tracks_returns_full_ordered_album(monkeypatch):
     assert [t["title"] for t in data["tracks"][:3]] == ["Track 1", "Track 2", "Track 3"]
 
 
+def test_discover_trending_uses_current_billboard_chart(monkeypatch):
+    """Billboard 不能再读取停更的“美国热门歌曲”歌单 11641012。"""
+    from app.models import ExternalTrack
+    from app.search import netease_playlist
+
+    requested_ids = []
+
+    def fake_detail(playlist_id, limit=8):
+        requested_ids.append(playlist_id)
+        names = {
+            3778678: "热歌榜",
+            19723756: "飙升榜",
+            60198: "美国Billboard榜",
+            180106: "UK排行榜周榜",
+            3812895: "Beatport全球电子舞曲榜",
+        }
+        return {
+            "id": str(playlist_id),
+            "name": names[playlist_id],
+            "updated_at": "2026-06-18T00:00:00+00:00",
+            "track_count": 1,
+            "tracks": [ExternalTrack(
+                external_id=str(playlist_id), title="Current Track", artist="Artist", source="netease"
+            )],
+        }
+
+    monkeypatch.setattr(netease_playlist, "get_playlist_detail", fake_detail)
+    monkeypatch.setattr("app.api.main.settings.lastfm_api_key", "")
+
+    response = TestClient(app).post("/discover/trending", json={"user_id": "api-user", "limit": 8})
+
+    assert response.status_code == 200
+    charts = response.json()["charts"]
+    billboard = next(chart for chart in charts if chart["name"] == "美国 Billboard")
+    assert billboard["chart_id"] == "60198"
+    assert billboard["source_name"] == "美国Billboard榜"
+    assert billboard["updated_at"] == "2026-06-18T00:00:00+00:00"
+    assert 11641012 not in requested_ids
+    assert 60198 in requested_ids
+
+
 def test_artist_album_tracks_not_found_returns_empty(monkeypatch):
     """找不到专辑时不能回退到乱序搜索结果：返回 200 + 空 tracks + 可读 summary。"""
     from app.sources import netease as ns

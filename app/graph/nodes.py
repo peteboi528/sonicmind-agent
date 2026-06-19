@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     memory = agent.memory.get_memory(state["user_id"])
     goal = agent.memory.get_active_goal(state["user_id"])
-    memory_query = agent.memory.weighted_query(memory)
+    memory_query = agent.memory.weighted_query(memory, include_artists=False)
     dialogue = agent.memory.get_dialogue_state(state["user_id"])
 
     recall_lines: list[str] = []
@@ -100,6 +100,9 @@ def plan_intent(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     history_text = context.get("history_text", "")
     plan, prompt_versions, runtime_metrics = plan_with_llm_with_meta(agent, query, history_text)
     plan = plan or build_agent_plan(query)
+    # 明确的旅程信号由确定性意图兜底，不能被 LLM 偶发误判成普通学习推荐。
+    if match_intent_by_keywords(query) == "journey" and plan.intent != "journey":
+        plan = build_agent_plan(query)
     plan, inherited = _apply_dialogue_continuation(plan, query, context.get("dialogue_state"))
     # 安全网：LLM 可能把介绍/百科类问题误判为 discuss，检查关键词自动升级
     plan = _upgrade_artist_info(plan, query)
@@ -339,9 +342,11 @@ def _tool_depends_on_prior_results(tool: str, prior_tools: list[str] | None = No
     handler = get_handler(tool)
     if handler == "playlist":
         return True
-    # “导入后推荐”必须等导入完成，使推荐层能读到刚写入的曲库和更新后的品味画像。
+    # 推荐消费前置 web 候选并做来源平衡；若并行执行，12 秒批次超时可能静默丢掉
+    # 较慢的 recommend，只剩一个空的 web_music_search 结果。
     return handler == "recommend" and any(
-        get_handler(previous) == "import_netease_playlist" for previous in (prior_tools or [])
+        get_handler(previous) in {"web_music_search", "import_netease_playlist"}
+        for previous in (prior_tools or [])
     )
 
 
@@ -526,12 +531,14 @@ def _run_tool(
     elif handler == "recommend":
         # 延续指令（"多来几首"）本身不含实体，但 plan 从上一轮继承了实体；
         # 拼进 query 让 recommend_for_query 走精确搜索而非情绪/场景路由（否则搜空）。
+        seed_tracks = _collect_tracks(results)
         rec = agent.recommend_for_query(
             user_id,
             _query_with_entities(query, plan),
             top_k=top_k,
             excluded_tracks=excluded_tracks,
             search_variants=getattr(plan.retrieval_plan, "search_variants", []) or [],
+            seed_tracks=seed_tracks,
         )
         results.append({"type": "daily_recommend", "recommendation": rec})
         trace.append(f"[recommend] 生成 {len(rec.tracks)} 首推荐。")
@@ -724,7 +731,14 @@ def _reflect_impl(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         )
         plan._excluded_tracks = excluded
         remaining = len(_collect_tracks(results))
-        if plan.target_count and remaining < plan.target_count and state.get("_refine_count", 0) < 1:
+        # 候选补量回环默认关闭（ENABLE_REFLECT_REFINE）：它会重新跑 execute_tools + reflect，
+        # 引入第 4/5 次串行往返（含联网搜索）。不足时由 _compose_intro 如实说明 shortfall。
+        if (
+            settings.enable_reflect_refine
+            and plan.target_count
+            and remaining < plan.target_count
+            and state.get("_refine_count", 0) < 1
+        ):
             need_refine = True
         labels = "、".join(_track_label(tracks[i]) for i in drop_indices if i < len(tracks))[:120]
         note = f"[reflect] LLM 核对剔除 {len(drop_indices)} 首违反约束候选：{labels}"
@@ -897,6 +911,20 @@ def _finalize_impl(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         agent=agent, memory_query=memory_query, history_text=history_text,
         user_id=state["user_id"],
     )
+    answer, final_payload, trace = _finalize_tail(agent, state, answer_text)
+    return {
+        **state,
+        "answer": answer,
+        "trace": trace,
+        "events": [*state.get("events", []), StreamEvent(type="final", content=answer.answer, payload=final_payload)],
+    }
+
+
+def _finalize_tail(agent: AudioVisualAgent, state: AgentState, answer_text: str) -> tuple[AgentAnswer, dict[str, Any], list[str]]:
+    """answer_text 已知后的收尾：guard / 记忆自学习 / 目标推进 / 持久化 / 构建 AgentAnswer + final_payload。
+
+    流式与非流式共用，副作用只跑一次。
+    """
     known = collect_known_titles(state.get("results", []))
     answer_text, removed = guard_answer(answer_text, known)
     memory_updated = agent.memory.auto_learn_from_turn(state["user_id"], state["query"], state.get("results", []))
@@ -934,12 +962,39 @@ def _finalize_impl(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     if experiment_payload:
         final_payload["taste_experiment"] = experiment_payload
     final_payload["trace_summary"] = _trace_summary(state["plan"], state.get("results", []), trace, aligned_cards)
-    return {
-        **state,
-        "answer": answer,
-        "trace": trace,
-        "events": [*state.get("events", []), StreamEvent(type="final", content=answer_text, payload=final_payload)],
-    }
+    return answer, final_payload, trace
+
+
+def finalize_stream(agent: AudioVisualAgent, state: AgentState):
+    """流式 finalize：逐 token 吐答案（token 事件），最后吐 final（权威）。
+
+    供 builder.stream 增量驱动——让用户在答案生成时就能看到正文，不必干等整段算完。
+    收尾副作用（记忆自学习/目标推进/对话态持久化）在 _finalize_tail 内执行，只跑一次。
+    异常时降级到 _finalize_fallback，仍吐一个 final 事件保证前端能收尾。
+    """
+    try:
+        memory_query = (state.get("context") or {}).get("memory_query", "")
+        history_text = (state.get("context") or {}).get("history_text", "")
+        parts: list[str] = []
+        for delta in compose_answer_stream(
+            state["query"], state.get("results", []), state["plan"],
+            agent=agent, memory_query=memory_query, history_text=history_text,
+            user_id=state["user_id"],
+        ):
+            if not delta:
+                continue
+            parts.append(delta)
+            yield StreamEvent(type="token", content=delta)
+        answer_text = "".join(parts)
+        answer, final_payload, _trace = _finalize_tail(agent, state, answer_text)
+        yield StreamEvent(type="final", content=answer.answer, payload=final_payload)
+    except Exception as exc:  # noqa: BLE001
+        fb_state = _finalize_fallback(state, exc)
+        for ev in fb_state.get("events", []):
+            if ev.type == "final":
+                yield ev
+                return
+        yield StreamEvent(type="final", content="这轮处理出错了，请重试。", payload={})
 
 
 def _finalize_fallback(state: AgentState, exc: Exception) -> AgentState:
@@ -1019,7 +1074,10 @@ def _select_listed_tracks(results: list[dict[str, Any]], plan: AgentPlan) -> lis
         tracks = [*(response.external if response else []), *(response.local if response else [])]
         return (tracks or _collect_tracks(results))[: plan.target_count or 12]
     if plan.intent == "journey":
-        return _collect_tracks(results)[: plan.target_count or 12]
+        tracks = _collect_tracks(results)
+        # 旅程的阶段数决定自然长度。未显式指定首数时必须保留全部阶段，不能套用
+        # 普通推荐的 12 张默认上限，否则 final 事件会把流式阶段的完整卡片截掉。
+        return tracks[:plan.target_count] if plan.target_count else tracks
     if plan.intent == "import":
         return _collect_tracks(results)[: plan.target_count or 12]
     if plan.intent == "video":
@@ -1422,25 +1480,120 @@ def compose_answer(
     return intro + "\n" + "\n".join(lines)
 
 
-def _compose_intro(
+def compose_answer_stream(
+    query: str,
+    results: list[dict[str, Any]],
+    plan: AgentPlan,
+    agent: AudioVisualAgent | None = None,
+    memory_query: str = "",
+    history_text: str = "",
+    user_id: str = "",
+):
+    """compose_answer 的流式同构：逐块 yield 答案文本。
+
+    LLM 生成的部分（chat/discuss/artist_info/intro）用 generate_stream 真流式，首字几百毫秒即达；
+    确定性部分（曲目/视频/专辑清单）作为单个块 yield。
+    流式不做逐 token 校验——权威文本由 finalize 的 guard_answer + final 事件兜底，
+    前端收到 final 后用权威文本替换流式预览。
+    """
+    llm = select_llm(agent, "default") if agent is not None else None
+
+    def stream_llm(prompt: str, fallback: str = "", temp: float = settings.dialog_temperature):
+        """流式产出 LLM 文本；无 LLM 或失败时 yield fallback。"""
+        if llm is None:
+            if fallback:
+                yield fallback
+            return
+        got = False
+        try:
+            for piece in llm.generate_stream(prompt, temperature=temp):
+                if piece:
+                    got = True
+                    yield piece
+        except Exception:
+            logger.debug("compose_answer_stream: LLM 流式失败，回退兜底", exc_info=True)
+        if not got and fallback:
+            yield fallback
+
+    intent = plan.intent
+
+    if intent == "chat":
+        yield from stream_llm(_chat_prompt(query, agent, history_text, user_id),
+                              fallback="你好，我在。有什么音乐上的事可以帮你?")
+        return
+
+    if intent == "discuss":
+        tracks = _collect_tracks(results)
+        prompt, refuse = _discussion_prompt(query, tracks, history_text)
+        if prompt is None:
+            yield refuse
+            return
+        yield from stream_llm(prompt, fallback=refuse)
+        return
+
+    if intent == "video":
+        tracks = _collect_tracks(results)
+        if not tracks:
+            yield "这轮没有搜到视频结果。"
+            return
+        prompt, fallback = _video_intro_prompt(query, tracks, history_text)
+        yield from stream_llm(prompt, fallback=fallback)
+        yield "\n"
+        for line in _video_list_lines(tracks):
+            yield line + "\n"
+        return
+
+    if intent == "artist_info":
+        prompt, fallback, source_urls = _artist_info_prompt(query, results, history_text)
+        if prompt is None:
+            yield "抱歉，暂时没找到相关信息。"
+            return
+        yield from stream_llm(prompt, fallback=fallback)
+        if source_urls:
+            yield "\n\n📎 参考来源：\n" + "\n".join(f"- {url}" for url in source_urls[:3])
+        return
+
+    # 纯确定性意图（含 playlist：其引言 LLM 调用在非流式 compose_answer 内完成）：
+    # 整段产出为一个块，复用已测试的 compose_answer。
+    if intent in {"artist_albums", "taste_experiment", "taste", "journey", "playlist"}:
+        yield compose_answer(query, results, plan, agent, memory_query, history_text, user_id)
+        return
+
+    # recommend/search/import：引言（流式）+ 曲目清单（确定性）
+    tracks = _select_listed_tracks(results, plan) or _collect_tracks(results)
+    if not tracks:
+        yield "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。"
+        return
+    if plan.target_count:
+        tracks = tracks[: plan.target_count]
+    shortfall = bool(plan.target_count and len(tracks) < plan.target_count)
+    prompt, _full_fallback = _intro_prompt(query, tracks, plan, memory_query, shortfall, history_text)
+    # 引言兜底只用前半句；shortfall 说明单独作为一个块接在引言后，避免与 LLM 引言或兜底重复。
+    yield from stream_llm(prompt, fallback=f"我按在线优先策略整理了 {len(tracks)} 个可追溯候选：")
+    if shortfall:
+        yield f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
+    yield "\n"
+    for idx, track in enumerate(tracks[: plan.target_count or 12], start=1):
+        yield f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}（{getattr(track, 'source', 'local')}）\n"
+
+
+def _intro_prompt(
     query: str,
     tracks: list[Any],
     plan: AgentPlan,
-    agent: AudioVisualAgent | None,
     memory_query: str,
     shortfall: bool,
     history_text: str = "",
-) -> str:
-    """生成推荐引言。LLM 可用时结合记忆+对话历史个性化，否则用确定性模板。"""
+) -> tuple[str, str]:
+    """构造推荐引言的 prompt + 确定性兜底文本（供非流式 _compose_intro 与流式共用）。"""
     fallback = f"我按在线优先策略整理了 {len(tracks)} 个可追溯候选："
     if shortfall:
         fallback += f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
-
-    llm = select_llm(agent, "strong") if agent is not None else None
-    if llm is None:
-        return fallback
-
     titles_preview = "、".join(getattr(t, "title", "") for t in tracks[:5])
+    artists_preview = "、".join(dict.fromkeys(
+        (getattr(t, "artist", "") or "").strip() for t in tracks[:8]
+        if (getattr(t, "artist", "") or "").strip()
+    ))
     mem_hint = f"用户偏好：{memory_query[:150]}" if memory_query else "暂无明确偏好记录"
     history_hint = ""
     if history_text:
@@ -1451,11 +1604,31 @@ def _compose_intro(
         f"{history_hint}"
         f"用户请求：{query}\n"
         f"我已找到 {len(tracks)} 首真实候选，前几首：{titles_preview}\n"
+        f"候选中实际出现的艺人：{artists_preview or '无明确艺人'}\n"
         f"{mem_hint}\n\n"
         "请写一句自然、有温度的推荐开场白（80字内），体现你理解了用户的需求、偏好和对话上下文。"
         "如果用户之前聊过相关话题，体现连贯性。"
+        "记忆只作为弱背景，当前任务约束优先。除非用户本轮明确点名某艺人，且该艺人确实出现在候选中，"
+        "否则不得声称会加入、延续或重点推荐该艺人的歌曲。"
         "不要列歌名，不要编造任何歌曲，不要用书名号。只输出这一句话。"
     )
+    return prompt, fallback
+
+
+def _compose_intro(
+    query: str,
+    tracks: list[Any],
+    plan: AgentPlan,
+    agent: AudioVisualAgent | None,
+    memory_query: str,
+    shortfall: bool,
+    history_text: str = "",
+) -> str:
+    """生成推荐引言。LLM 可用时结合记忆+对话历史个性化，否则用确定性模板。"""
+    prompt, fallback = _intro_prompt(query, tracks, plan, memory_query, shortfall, history_text)
+    llm = select_llm(agent, "strong") if agent is not None else None
+    if llm is None:
+        return fallback
     try:
         text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
@@ -1468,11 +1641,8 @@ def _compose_intro(
     return text
 
 
-def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_text: str = "", user_id: str = "") -> str | None:
-    """让 LLM 自然回复寒暄/闲聊，注入用户画像作为事实锚。"""
-    llm = select_llm(agent, "strong") if agent is not None else None
-    if llm is None:
-        return None
+def _chat_prompt(query: str, agent: AudioVisualAgent | None, history_text: str = "", user_id: str = "") -> str:
+    """构造 chat 回复的 prompt（注入用户画像作为事实锚，供流式/非流式共用）。"""
     history_hint = ""
     if history_text:
         recent_lines = history_text.strip().split("\n")[-6:]
@@ -1486,7 +1656,7 @@ def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_t
                 taste_hint = f"用户音乐偏好：{taste[:150]}\n"
         except Exception:
             pass
-    prompt = (
+    return (
         f"{history_hint}"
         f"{taste_hint}"
         f"用户说：{query}\n\n"
@@ -1496,6 +1666,14 @@ def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_t
         "不要每次用同一句话，语气要自然口语化。50-100字。\n"
         "不要编造排名、发行时间、销量等你不确定的具体数据。"
     )
+
+
+def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_text: str = "", user_id: str = "") -> str | None:
+    """让 LLM 自然回复寒暄/闲聊，注入用户画像作为事实锚。"""
+    llm = select_llm(agent, "strong") if agent is not None else None
+    if llm is None:
+        return None
+    prompt = _chat_prompt(query, agent, history_text, user_id)
     try:
         text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
@@ -1505,33 +1683,21 @@ def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_t
     return text
 
 
-def _compose_discussion(
+def _discussion_prompt(
     query: str,
     tracks: list[Any],
-    agent: AudioVisualAgent | None,
     history_text: str = "",
-) -> str | None:
-    """让 LLM 基于搜到的真实曲目讨论音乐话题。
-
-    关键反幻觉策略（对齐 SoulTuner + 比它更严格）：
-    - 没有搜到真实数据 → 直接拒绝回答，不编造
-    - 搜到了 → LLM 只能基于真实曲目回答，不确定的说不知道
-    - 限制 100 字（SoulTuner 的 general_chat 也是 100 字）
-    """
-    llm = select_llm(agent, "strong") if agent is not None else None
-    if llm is None:
-        return None
-    track_hint = ""
-    if tracks:
-        items = []
-        for t in tracks[:10]:
-            title = getattr(t, "title", "")
-            artist = getattr(t, "artist", "") or ""
-            items.append(f"《{title}》{artist}")
-        track_hint = f"已搜到的真实曲目（网易云验证过）：{'、'.join(items)}\n"
-    else:
-        # 没有搜到真实数据 → 拒绝编造
-        return "我暂时没找到关于这个话题的可靠音乐数据，不想编，怕误导你。你可以试试换个关键词再问我。"
+) -> tuple[str | None, str]:
+    """构造讨论回复的 prompt。无真实曲目时返回 (None, 拒绝模板)——反幻觉：拒绝编造。"""
+    refuse = "我暂时没找到关于这个话题的可靠音乐数据，不想编，怕误导你。你可以试试换个关键词再问我。"
+    if not tracks:
+        return None, refuse
+    items = []
+    for t in tracks[:10]:
+        title = getattr(t, "title", "")
+        artist = getattr(t, "artist", "") or ""
+        items.append(f"《{title}》{artist}")
+    track_hint = f"已搜到的真实曲目（网易云验证过）：{'、'.join(items)}\n"
     history_hint = ""
     if history_text:
         recent_lines = history_text.strip().split("\n")[-6:]
@@ -1550,6 +1716,28 @@ def _compose_discussion(
         "6. 100字以内\n"
         "7. 可以挑几首真实曲目推荐并说明理由"
     )
+    return prompt, refuse
+
+
+def _compose_discussion(
+    query: str,
+    tracks: list[Any],
+    agent: AudioVisualAgent | None,
+    history_text: str = "",
+) -> str | None:
+    """让 LLM 基于搜到的真实曲目讨论音乐话题。
+
+    关键反幻觉策略（对齐 SoulTuner + 比它更严格）：
+    - 没有搜到真实数据 → 直接拒绝回答，不编造
+    - 搜到了 → LLM 只能基于真实曲目回答，不确定的说不知道
+    - 限制 100 字（SoulTuner 的 general_chat 也是 100 字）
+    """
+    llm = select_llm(agent, "strong") if agent is not None else None
+    if llm is None:
+        return None
+    prompt, refuse = _discussion_prompt(query, tracks, history_text)
+    if prompt is None:
+        return refuse
     try:
         text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
@@ -1557,6 +1745,33 @@ def _compose_discussion(
     if not text or len(text) > 300:
         return None
     return text
+
+
+def _video_intro_prompt(query: str, tracks: list[Any], history_text: str = "") -> tuple[str, str]:
+    """构造视频推荐开场白的 prompt + 兜底文本（供流式/非流式共用）。"""
+    fallback = "我帮你搜到了这些视频："
+    titles_preview = "、".join(getattr(t, "title", "") for t in tracks[:5])
+    history_hint = ""
+    if history_text:
+        recent_lines = history_text.strip().split("\n")[-4:]
+        history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
+    prompt = (
+        f"{history_hint}"
+        f"用户请求：{query}\n"
+        f"我已找到 {len(tracks)} 个真实视频，前几个：{titles_preview}\n\n"
+        "请写一句自然、有温度的视频推荐开场白（60字内），体现你理解了用户要看MV/现场/演唱会的需求。"
+        "不要列视频名，不要编造信息，不要用书名号。只输出这一句话。"
+    )
+    return prompt, fallback
+
+
+def _video_list_lines(tracks: list[Any]) -> list[str]:
+    """视频清单（确定性拼接，流式/非流式共用）。"""
+    return [
+        f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}"
+        f"（{getattr(track, 'source', 'local')}）"
+        for idx, track in enumerate(tracks[:10], start=1)
+    ]
 
 
 def _compose_video_answer(
@@ -1568,22 +1783,9 @@ def _compose_video_answer(
     """video 意图专用回答：视频推荐开场白 + 视频列表。"""
     if not tracks:
         return None
-    # 构建 LLM 开场白
-    intro = "我帮你搜到了这些视频："
+    prompt, intro = _video_intro_prompt(query, tracks, history_text)
     llm = select_llm(agent, "strong") if agent is not None else None
     if llm is not None:
-        titles_preview = "、".join(getattr(t, "title", "") for t in tracks[:5])
-        history_hint = ""
-        if history_text:
-            recent_lines = history_text.strip().split("\n")[-4:]
-            history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
-        prompt = (
-            f"{history_hint}"
-            f"用户请求：{query}\n"
-            f"我已找到 {len(tracks)} 个真实视频，前几个：{titles_preview}\n\n"
-            "请写一句自然、有温度的视频推荐开场白（60字内），体现你理解了用户要看MV/现场/演唱会的需求。"
-            "不要列视频名，不要编造信息，不要用书名号。只输出这一句话。"
-        )
         try:
             text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
             if text and len(text) <= 150 and "《" not in text:
@@ -1591,12 +1793,7 @@ def _compose_video_answer(
         except Exception:
             pass
     # 视频列表（确定性拼接）
-    lines = [
-        f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}"
-        f"（{getattr(track, 'source', 'local')}）"
-        for idx, track in enumerate(tracks[:10], start=1)
-    ]
-    return f"{intro}\n" + "\n".join(lines)
+    return f"{intro}\n" + "\n".join(_video_list_lines(tracks))
 
 
 def _compose_artist_albums_answer(
@@ -1649,21 +1846,18 @@ def _compose_taste_experiment_answer(results: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def _compose_artist_info_answer(
+def _artist_info_prompt(
     query: str,
     results: list[dict[str, Any]],
-    agent: AudioVisualAgent | None,
     history_text: str = "",
-) -> str | None:
-    """artist_info 意图专用回答：基于搜索引擎结果生成百科式介绍。"""
+) -> tuple[str | None, str, list[str]]:
+    """构造 artist_info 的 prompt + 兜底（搜索摘要）+ 来源链接。无搜索结果返回 (None, '', [])。"""
     search_results = next(
         (r.get("search_results", []) for r in results if r.get("type") == "web_info_search"),
         [],
     )
     if not search_results:
-        # 搜索无结果，降级到 discuss 模式
-        return None
-
+        return None, "", []
     # 把搜索摘要拼接成上下文
     context_parts: list[str] = []
     for i, item in enumerate(search_results[:5], 1):
@@ -1673,17 +1867,10 @@ def _compose_artist_info_answer(
             context_parts.append(f"[{i}] {title}\n{content}")
     search_context = "\n\n".join(context_parts)
     source_urls = [item["url"] for item in search_results if item.get("url")]
-
-    llm = select_llm(agent, "strong") if agent is not None else None
-    if llm is None:
-        # 无 LLM，直接输出搜索摘要
-        return search_context
-
     history_hint = ""
     if history_text:
         recent_lines = history_text.strip().split("\n")[-4:]
         history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
-
     prompt = (
         f"{history_hint}"
         f"用户问：{query}\n\n"
@@ -1696,12 +1883,30 @@ def _compose_artist_info_answer(
         "4. 如果资料足够，可以涵盖：简介、成员、风格特点、代表作、影响力等\n"
         "5. 末尾附上参考来源链接"
     )
+    return prompt, search_context, source_urls
+
+
+def _compose_artist_info_answer(
+    query: str,
+    results: list[dict[str, Any]],
+    agent: AudioVisualAgent | None,
+    history_text: str = "",
+) -> str | None:
+    """artist_info 意图专用回答：基于搜索引擎结果生成百科式介绍。"""
+    prompt, fallback, source_urls = _artist_info_prompt(query, results, history_text)
+    if prompt is None:
+        # 搜索无结果，降级到 discuss 模式
+        return None
+    llm = select_llm(agent, "strong") if agent is not None else None
+    if llm is None:
+        # 无 LLM，直接输出搜索摘要
+        return fallback
     try:
         text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
     except Exception:
-        return search_context
+        return fallback
     if not text or len(text) > 800:
-        return search_context
+        return fallback
     # 追加来源链接
     if source_urls:
         text += "\n\n📎 参考来源：\n" + "\n".join(f"- {url}" for url in source_urls[:3])

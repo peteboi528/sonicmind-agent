@@ -252,7 +252,7 @@ class MemoryManager:
             self.store.write_model("memory", user_id, memory)
             return memory
 
-    def weighted_query(self, memory: UserMemory) -> str:
+    def weighted_query(self, memory: UserMemory, *, include_artists: bool = True) -> str:
         scored = score_entries(memory.structured_preferences)
         parts: list[str] = []
         # 每个偏好只出现一次。旧逻辑按 int(weight*2) 重复——"The Weeknd"被堆 7-8 次，
@@ -271,9 +271,11 @@ class MemoryManager:
                 parts.append(genre)
             for mood, _ in taste.top_moods[:2]:
                 parts.append(mood)
-            # 艺术家偏好：高分歌手带进搜索查询，提升同风格歌曲召回
-            for artist, _ in taste.top_artists[:3]:
-                parts.append(artist)
+            # 艺人是高特异性信号，只在明确的艺人搜索/分析场景启用。普通推荐、学习、
+            # 旅程等任务只继承风格/情绪，避免长期喜欢某艺人变成每轮硬实体。
+            if include_artists:
+                for artist, _ in taste.top_artists[:3]:
+                    parts.append(artist)
         # 大小写不敏感去重（保留顺序）：structured_preferences 与 taste_profile.top_artists
         # 可能含同一歌手（如 "The Weeknd"），不去重就会重复塞进搜索查询。
         seen: set[str] = set()

@@ -113,6 +113,23 @@ def test_plan_with_llm_playlist_target_count(agent):
     assert plan.target_count == 20
 
 
+def test_explicit_journey_keyword_overrides_llm_recommend_misclassification(agent, monkeypatch):
+    wrong = AgentPlan(intent="recommend", tools_needed=["daily_recommend"])
+    monkeypatch.setattr(nodes, "plan_with_llm_with_meta", lambda *_args, **_kwargs: (wrong, {}, {}))
+    state = nodes.load_context(agent, {
+        "user_id": "u-journey-override",
+        "asset_id": None,
+        "query": "做一个从清晨到深夜的学习旅程",
+        "history": [],
+        "top_k": 3,
+    })
+
+    out = nodes.plan_intent(agent, state)
+
+    assert out["plan"].intent == "journey"
+    assert out["plan"].tools_needed == ["journey"]
+
+
 def test_mock_plan_uses_current_turn_not_journey_history(agent):
     history = "user: 做一个清晨到深夜的音乐旅程，热身到冲刺再放松\nassistant: 已生成音乐旅程"
     plan = nodes.plan_with_llm(agent, "分析我的音乐品味", history_text=history)
@@ -303,7 +320,7 @@ def test_finalize_node_failure_still_emits_final(agent, monkeypatch):
     assert "没有编造额外歌曲" in out["events"][-1].content
 
 
-def test_execute_tool_chain_runs_independent_tools_parallel(agent, monkeypatch):
+def test_execute_tool_chain_runs_web_before_recommend(agent, monkeypatch):
     monkeypatch.setattr(settings, "enable_parallel_tools", True, raising=False)
 
     def fake_safe(agent, tool, plan, query, user_id, top_k, results, trace, events):
@@ -324,7 +341,7 @@ def test_execute_tool_chain_runs_independent_tools_parallel(agent, monkeypatch):
 
     assert executed == {"web_music_search", "recommend"}
     assert [r["type"] for r in results] == ["web_music_search", "recommend"]
-    assert elapsed < 0.18
+    assert elapsed >= 0.18
 
 
 def test_execute_tool_chain_flushes_before_playlist(agent, monkeypatch):

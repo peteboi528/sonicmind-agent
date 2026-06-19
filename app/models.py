@@ -142,6 +142,10 @@ class UserMemory(BaseModel):
     consolidated_profile: str = ""  # 每 N 轮由 LLM 把零散偏好巩固成一句话画像
     turns_since_consolidation: int = 0
     daily_rec_last_generated: str | None = None
+    # 最近展示过的推荐 key。只保存轻量标识，不触碰曲库内容；用于跨轮去重。
+    recommendation_history: list[str] = Field(default_factory=list)
+    # 最近生成过的旅程 key，同样只用于轮换候选。
+    journey_history: list[str] = Field(default_factory=list)
     updated_at: str = Field(default_factory=utc_now_iso)
 
 
@@ -425,7 +429,7 @@ class TasteExperiment(BaseModel):
 class StreamEvent(BaseModel):
     type: Literal[
         "plan", "thinking", "tool_start", "tool_result", "candidates",
-        "song_card", "album_card", "eval", "final", "guard", "error",
+        "song_card", "album_card", "eval", "token", "final", "guard", "error",
     ]
     content: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -585,6 +589,9 @@ class SearchRequest(BaseModel):
     user_id: str = "demo-user"
     query: str
     include_external: bool = True
+    # 只跑在线源、跳过本地检索。Discover 把"本地秒出 / 在线后补"拆成两次独立请求，
+    # 在线那次带此标记，后端便不重复本地检索，也能给在线源更宽裕的时限。
+    external_only: bool = False
     top_k: int = Field(default=20, ge=1, le=50)
 
 
@@ -654,6 +661,22 @@ class TrendingRequest(BaseModel):
     limit: int = Field(default=12, ge=1, le=30)
 
 
+class DiscoverQueryRequest(BaseModel):
+    query: str
+
+
+class DiscoverQueryClassification(BaseModel):
+    kind: Literal["category", "artist", "track"]
+    normalized_query: str
+    label: str
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    matched_artist: str = ""
+    browse_category: Literal["genre", "mood", "scene"] | None = None
+    browse_value: str = ""
+    tags: dict[str, list[str]] = Field(default_factory=dict)
+    reason: str = ""
+
+
 class ArtistInfoRequest(BaseModel):
     artist: str
 
@@ -706,6 +729,8 @@ class SaveAlbumRequest(BaseModel):
 
 class ArtistInfoResponse(BaseModel):
     name: str
+    requested_name: str = ""
+    matched: bool = False
     image: str = ""
     bio: str = ""
     tags: list[str] = Field(default_factory=list)

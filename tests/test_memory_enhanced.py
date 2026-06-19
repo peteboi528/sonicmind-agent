@@ -110,3 +110,23 @@ def test_weighted_query_no_repeat_and_cross_source_dedup(tmp_path):
     query = agent.memory.weighted_query(memory)
     # "The Weeknd" 整串只出现一次（既不因高频重复，也不因 taste_profile 再加一份）
     assert query.lower().count("the weeknd") == 1
+
+
+def test_weighted_query_can_keep_artist_memory_soft_for_generic_tasks(tmp_path):
+    from app.models import TasteProfile, UserMemory
+
+    agent = CineSonicAgent(JsonStore(tmp_path / "store"))
+    memory = UserMemory(
+        user_id="u-soft",
+        taste_profile=TasteProfile(
+            top_genres=[("R&B", 10.0)],
+            top_moods=[("暗黑", 8.0)],
+            top_artists=[("The Weeknd", 12.0)],
+        ),
+    )
+
+    query = agent.memory.weighted_query(memory, include_artists=False)
+
+    assert "R&B" in query
+    assert "暗黑" in query
+    assert "The Weeknd" not in query

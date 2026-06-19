@@ -498,6 +498,13 @@ class TestQueryHasEntity:
         # 清洗后应该只剩 "放松"
         assert AudioVisualAgent._query_has_entity(sq) is False
 
+    def test_style_intensity_phrase_is_not_misread_as_entity(self):
+        from app.agent import AudioVisualAgent, _extract_search_query
+
+        sq = _extract_search_query("有没有偏微电子一点专注")
+        assert sq == "电子 专注"
+        assert AudioVisualAgent._query_has_entity(sq) is False
+
     def test_genre_words_not_entity(self):
         """中文风格词不是实体：说唱、摇滚、电子等应走 LLM+歌单路由。"""
         from app.agent import AudioVisualAgent
@@ -510,6 +517,81 @@ class TestQueryHasEntity:
         from app.agent import AudioVisualAgent
 
         assert AudioVisualAgent._query_has_entity("") is False
+
+
+def test_discover_query_classifier_separates_category_artist_and_track(tmp_path):
+    from app.agent import AudioVisualAgent
+    from app.models import Asset
+    from app.storage import JsonStore
+
+    store = JsonStore(tmp_path / "store")
+    store.write_model("assets", "weeknd", Asset(
+        asset_id="weeknd", source_url="https://example.com/weeknd",
+        title="Blinding Lights", artist="The Weeknd", duration_seconds=200,
+        status="analyzed", genre=["R&B"], mood=["暗黑"],
+    ))
+    store.write_model("assets", "kanye", Asset(
+        asset_id="kanye", source_url="https://example.com/kanye",
+        title="I Wonder", artist="Kanye West、Ye", duration_seconds=200,
+        status="analyzed", genre=["说唱"], mood=["律动"],
+    ))
+    store.write_model("assets", "not-kanye", Asset(
+        asset_id="not-kanye", source_url="https://example.com/not-kanye",
+        title="Kanye Dreams", artist="Joe Example", duration_seconds=200,
+        status="analyzed", genre=["爵士"], mood=["放松"],
+    ))
+    store.write_model("assets", "lana", Asset(
+        asset_id="lana", source_url="https://example.com/lana",
+        title="Video Games", artist="Lana Del Rey", duration_seconds=200,
+        status="analyzed", genre=["流行"], mood=["浪漫"],
+    ))
+    agent = AudioVisualAgent(store)
+
+    category = agent.classify_discover_query("适合专注工作的电子音乐")
+    artist = agent.classify_discover_query("The Weeknd")
+    artist_alias = agent.classify_discover_query("kanye")
+    artist_typo = agent.classify_discover_query("lana del ray")
+    track = agent.classify_discover_query("Blinding Lights")
+    category_focus = agent.classify_discover_query("适合专注工作")
+
+    assert category["kind"] == "category"
+    assert category["browse_category"] == "scene"
+    assert artist["kind"] == "artist"
+    assert artist_alias["kind"] == "artist"
+    assert artist_typo["kind"] == "artist"
+    assert artist_typo["normalized_query"] == "Lana Del Rey"
+    assert artist_typo["reason"] == "library_artist_fuzzy"
+    assert track["kind"] == "track"
+    assert category_focus["kind"] == "category"
+    assert agent.artist_name_matches("kanye", "Kanye West") is True
+    assert agent.artist_name_matches("专注", "Focus Band") is False
+
+    artist_results = agent.search("listener", "kanye", include_external=False, top_k=12)
+    assert [item.asset_id for item in artist_results.local] == ["kanye"]
+    assert "已结合记忆扩展" not in artist_results.summary
+
+    typo_results = agent.search("listener", "lana del ray", include_external=False, top_k=12)
+    assert [item.asset_id for item in typo_results.local] == ["lana"]
+
+
+def test_library_evidence_search_does_not_analyze_or_write_missing_segments():
+    from app.agent import AudioVisualAgent
+    from app.models import Asset
+
+    asset = Asset(
+        asset_id="readonly", source_url="https://example.com/readonly",
+        title="Read Only", artist="Example", duration_seconds=180,
+        status="analyzed", genre=["电子"], mood=["专注"],
+    )
+    agent = AudioVisualAgent.__new__(AudioVisualAgent)
+    agent.list_assets = MagicMock(return_value=[asset])
+    agent.media = MagicMock()
+    agent.media.get_segments.return_value = []
+    agent.analyze_media = MagicMock()
+
+    assert agent.retrieve_library_evidence("专注", top_k=5) == []
+    agent.media.get_segments.assert_called_once_with("readonly")
+    agent.analyze_media.assert_not_called()
 
 
 class TestRecommendForQueryRoutes:

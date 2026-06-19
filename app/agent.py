@@ -4,6 +4,7 @@ import hashlib
 import logging
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from app.compound import is_compound_task
@@ -79,11 +80,13 @@ def _build_source() -> ExternalSource:
 
 class AudioVisualAgent:
     def __init__(self, store: JsonStore | None = None) -> None:
-        self.store = store or JsonStore()
+        self.store = store or JsonStore(settings.store_root)
         self.media = MediaPipeline(self.store)
         self.memory = MemoryManager(self.store)
         self.similarity = AssetSimilarity(self.store)
-        self.library = ResourceLibrary(settings.resource_library_path)
+        # 注入临时 store（测试/隔离运行）时，资源库也必须同域，不能误写真实用户 SQLite。
+        resource_path = Path(self.store.root).parent / "resource_library.sqlite" if store is not None else settings.resource_library_path
+        self.library = ResourceLibrary(resource_path)
         self.llm: LLMProvider = build_llm()
         self._llm_default_ref: LLMProvider = self.llm
         self.llm_fast: LLMProvider = (
@@ -578,20 +581,29 @@ class AudioVisualAgent:
 
     def search(self, user_id: str, query: str, include_external: bool = True, top_k: int = 20, offset: int = 0) -> SearchResponse:
         memory = self.memory.get_memory(user_id)
-        memory_query = self.memory.weighted_query(memory)
+        memory_query = self.memory.weighted_query(memory, include_artists=False)
         expanded_query = f"{query} {memory_query}".strip()
         search_goal = _extract_search_query(query)
+        classification = self.classify_discover_query(query)
+        query_kind = classification.get("kind")
+        artist_query = query_kind == "artist"
+        resolved_artist_query = classification.get("normalized_query") or search_goal or query
         # 本地搜索：只用核心搜索词（search_goal），不用 memory 扩展词。
         # 之前用 expanded_query.split() 做 any() 匹配，memory 的风格标签如
         # "说唱""R&B""chill" 会匹配库里几乎所有歌，淹没真正相关的结果。
         local_terms = search_goal.lower().split() if search_goal else query.lower().split()
         local_results: list[Asset] = []
         for asset in self.list_assets():
+            if artist_query:
+                if _artist_query_matches(resolved_artist_query, asset.artist or "", allow_fuzzy=True):
+                    local_results.append(asset)
+                continue
             searchable = f"{asset.title} {asset.artist or ''} {' '.join(asset.genre)} {' '.join(asset.mood)}".lower()
             if any(term in searchable for term in local_terms):
                 local_results.append(asset)
 
-        evidences = self.retrieve_library_evidence(expanded_query, top_k=min(top_k, 6))
+        # 歌手查询不使用语义证据扩充，否则会把“氛围相似但歌手无关”的歌曲混进结果。
+        evidences = [] if artist_query else self.retrieve_library_evidence(expanded_query, top_k=min(top_k, 6))
         local_by_id = {asset.asset_id: asset for asset in local_results}
         for evidence in evidences:
             asset_id = str(evidence.metadata.get("asset_id", ""))
@@ -604,14 +616,15 @@ class AudioVisualAgent:
             # 用 expanded_query 搜索拿更广结果，但相关性过滤用核心词 search_goal。
             # offset 用于延续指令翻页取新歌（去重时由调用层传入已展示数）。
             external_results = self.search_web_music(
-                expanded_query, top_k=top_k, relevance_query=search_goal, offset=offset,
+                resolved_artist_query if artist_query else expanded_query,
+                top_k=top_k, relevance_query=search_goal, offset=offset,
             )
 
         # 抽象词（"痛苦""孤独""emo"）的字面歌曲搜索常归零——没有歌名叫"痛苦"，
         # netease type=1 又只按标题/歌词做相关性过滤。此时回退到歌单搜索：复用
         # search_and_extract 从真人策划歌单里捞相关曲目，让情绪/概念词也能返回结果
         # 而非 0。仅在外部候选不足时触发，不影响正常歌手/歌名搜索。
-        if include_external and len(external_results) < 3:
+        if include_external and not artist_query and len(external_results) < 3:
             try:
                 from app.search.netease_playlist import search_and_extract
                 playlist_hits = search_and_extract(
@@ -629,7 +642,7 @@ class AudioVisualAgent:
             query=query,
             local=list(local_by_id.values())[:top_k],
             external=external_results[:top_k],
-            memory_query=memory_query,
+            memory_query="" if artist_query else memory_query,
         )
         return SearchResponse(
             local=list(local_by_id.values())[:top_k],
@@ -886,6 +899,86 @@ class AudioVisualAgent:
             query, max_results=5, api_key=settings.tavily_api_key,
         )
 
+    def classify_discover_query(self, query: str) -> dict[str, Any]:
+        """Classify Discover input before choosing category, artist, or track UI.
+
+        Artist cards are intentionally conservative: bare names must exactly match an
+        artist already present in the user's library; unknown artists need an explicit
+        cue such as “歌手 Adele”. This prevents moods and activities from becoming
+        fuzzy artist pages while keeping song-title search broad.
+        """
+        from app.graph.tag_rules import extract_tags
+
+        raw = (query or "").strip()
+        normalized = _extract_search_query(raw).strip() or raw
+        tags = extract_tags(raw)
+        artist_cues = ("歌手", "艺人", "乐队", "组合", "artist", "band")
+        explicit_artist = any(cue in raw.lower() for cue in artist_cues)
+        normalized_key = _normalize_match_text(normalized)
+        artist_catalog: dict[str, set[str]] = {}
+        for asset in self.list_assets():
+            if not asset.artist:
+                continue
+            for artist_name in _artist_credit_parts(asset.artist):
+                artist_catalog.setdefault(artist_name, set()).update(_artist_alias_keys(artist_name))
+
+        exact_artist = next(
+            (name for name, aliases in artist_catalog.items() if normalized_key and normalized_key in aliases),
+            "",
+        )
+
+        if explicit_artist or exact_artist:
+            canonical = exact_artist or normalized
+            return {
+                "kind": "artist", "normalized_query": canonical,
+                "label": "歌手档案", "tags": tags,
+                "confidence": 0.98 if exact_artist else 0.92,
+                "matched_artist": exact_artist,
+                "reason": "explicit_artist" if explicit_artist and not exact_artist else "library_artist_exact",
+            }
+
+        category_order = (("scenario", "scene", "场景电台"), ("mood", "mood", "情绪电台"), ("genre", "genre", "曲风探索"))
+        for tag_key, browse_category, label in category_order:
+            if tags.get(tag_key):
+                values = [*tags.get("genre", []), *tags.get("mood", []), *tags.get("scenario", [])]
+                browse_value = " ".join(dict.fromkeys(values))
+                return {
+                    "kind": "category", "normalized_query": normalized,
+                    "label": label, "browse_category": browse_category,
+                    "browse_value": browse_value or tags[tag_key][0],
+                    "tags": tags, "confidence": 0.96, "reason": f"tag:{tag_key}",
+                }
+
+        # 拼写纠错只在“没有任何情绪/场景/曲风标签”的实体形输入上启用。
+        # 要求高分且第一、第二候选拉开差距，避免把 focus/workout 等活动词误认成歌手。
+        if len(normalized_key) >= 6 and re.search(r"[a-z]", normalized_key) and artist_catalog:
+            scored: list[tuple[float, str]] = []
+            for artist_name, aliases in artist_catalog.items():
+                score = max((_string_similarity(normalized_key, alias) for alias in aliases), default=0.0)
+                scored.append((score, artist_name))
+            scored.sort(key=lambda item: (-item[0], item[1].lower()))
+            best_score, best_artist = scored[0]
+            second_score = scored[1][0] if len(scored) > 1 else 0.0
+            if best_score >= 88.0 and best_score - second_score >= 4.0:
+                return {
+                    "kind": "artist", "normalized_query": best_artist,
+                    "label": "歌手档案", "tags": tags,
+                    "confidence": round(best_score / 100.0, 3),
+                    "matched_artist": best_artist,
+                    "reason": "library_artist_fuzzy",
+                }
+
+        return {
+            "kind": "track", "normalized_query": normalized,
+            "label": "歌曲搜索", "tags": tags, "confidence": 0.55,
+            "reason": "default_track_search",
+        }
+
+    @staticmethod
+    def artist_name_matches(query: str, artist: str) -> bool:
+        """Match full artist names, credited collaborators, and safe Latin aliases."""
+        return _artist_query_matches(query, artist, allow_fuzzy=True)
+
     def fetch_track_metadata(
         self,
         asset_id: str | None = None,
@@ -1118,9 +1211,12 @@ class AudioVisualAgent:
         from app.concurrency import run_parallel
         from app.search.netease_playlist import search_and_extract
 
-        phases = _journey_phases(instruction)
+        memory = self.memory.get_memory(user_id)
+        phases = _journey_phases(instruction, memory.taste_profile)
         out = {"user_id": user_id, "instruction": instruction, "phases": []}
         per_phase = 4
+        recent = set(memory.journey_history[-160:])
+        rotation = len(memory.journey_history) // max(1, per_phase)
 
         # 阶段互相独立，并行从高可信真人歌单召回。不能把完整旅程句子直接作为歌名
         # 搜索条件，否则“清晨/深夜/旅程”等场景词会让所有正式歌曲被相关性过滤掉。
@@ -1128,7 +1224,9 @@ class AudioVisualAgent:
             (
                 f"journey:{phase['name']}",
                 lambda phase=phase: search_and_extract(
-                    phase["query"], max_playlists=3, tracks_per_playlist=per_phase * 3,
+                    phase["queries"][rotation % len(phase["queries"])],
+                    max_playlists=4,
+                    tracks_per_playlist=per_phase * 4,
                 ),
             )
             for phase in phases
@@ -1140,19 +1238,38 @@ class AudioVisualAgent:
             if _is_recommendation_quality_track(track)
             and not self.library.is_disliked(user_id, track)
         ]
+        journey_tracks: list[Asset | ExternalTrack] = []
 
         for phase, batch in zip(phases, batches, strict=False):
-            candidates: list[Asset | ExternalTrack] = []
-            for track in [*(batch or []), *local_fallback]:
+            pool: list[Asset | ExternalTrack] = []
+            for track in _dedupe_tracks([*(batch or []), *local_fallback]):
                 key = _track_key(track)
-                if key in seen or self.library.is_disliked(user_id, track):
+                if key in seen or key in recent or self.library.is_disliked(user_id, track):
                     continue
                 if not _is_recommendation_quality_track(track):
                     continue
-                seen.add(key)
-                candidates.append(track)
-                if len(candidates) >= per_phase:
-                    break
+                pool.append(track)
+            ranked = self._rerank_tracks(
+                user_id, phase["query"], pool, top_k=max(per_phase * 2, per_phase),
+            )
+            candidates = [track for track, _ in ranked[:per_phase]]
+            # 历史排除导致候选不足时，允许旧歌回到尾部，但仍按本阶段目标重新排序。
+            if len(candidates) < per_phase:
+                refill_pool = [
+                    track for track in _dedupe_tracks([*(batch or []), *local_fallback])
+                    if _track_key(track) not in seen
+                    and _is_recommendation_quality_track(track)
+                    and not self.library.is_disliked(user_id, track)
+                ]
+                refill = self._rerank_tracks(user_id, phase["query"], refill_pool, top_k=per_phase)
+                for track, _ in refill:
+                    if _track_key(track) not in {_track_key(item) for item in candidates}:
+                        candidates.append(track)
+                    if len(candidates) >= per_phase:
+                        break
+            for track in candidates:
+                seen.add(_track_key(track))
+            journey_tracks.extend(candidates)
             self.library.record_exposure(candidates)
             serialized_tracks: list[dict[str, Any]] = []
             for track in candidates:
@@ -1176,9 +1293,21 @@ class AudioVisualAgent:
                 "name": phase["name"],
                 "goal": phase["goal"],
                 "transition": phase["transition"],
+                "energy": phase["energy"],
                 "tracks": serialized_tracks,
             })
+        self._record_journey_history(user_id, journey_tracks)
         return out
+
+    def _record_journey_history(self, user_id: str, tracks: list[Asset | ExternalTrack]) -> None:
+        keys = [_track_key(track) for track in tracks]
+        if not keys:
+            return
+        with self.store.lock("memory", user_id):
+            memory = self.memory.get_memory(user_id)
+            memory.journey_history = [*memory.journey_history, *keys][-240:]
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", user_id, memory)
 
     # --- 播放 ---
 
@@ -1333,7 +1462,8 @@ class AudioVisualAgent:
         )
         # 用户画像：品味摘要 + 排除规则，让 LLM 做个性化选曲
         memory = self.memory.get_memory(user_id)
-        taste_summary = self.summarize_taste(user_id) if memory.taste_profile else ""
+        explicit_artist = self._query_has_entity(_extract_search_query(instruction))
+        taste_summary = self.summarize_taste(user_id, include_artists=explicit_artist) if memory.taste_profile else ""
         exclusion_rules = memory.exclusion_rules or None
 
         prompt = GENERATE_PLAYLIST_TEMPLATE(
@@ -1618,13 +1748,23 @@ class AudioVisualAgent:
         for asset in self.list_assets():
             if asset.status != "analyzed":
                 continue
-            ranked.extend(self.retrieve_evidence(asset.asset_id, query, top_k=min(3, top_k)))
+            # 全库搜索必须是只读操作。过去这里调用 retrieve_evidence，后者会在
+            # segments 缺失时自动 analyze_media，导致一次普通歌曲/歌手搜索悄悄
+            # 改写曲库指纹和 updated_at。未分析片段只是不参与 RAG，不应在查询时补写。
+            segments = self.media.get_segments(asset.asset_id)
+            if not segments:
+                continue
+            evidences = HybridRetriever(segments).search(query=query, top_k=min(3, top_k))
+            for evidence in evidences:
+                evidence.metadata["asset_id"] = asset.asset_id
+                evidence.metadata["asset_title"] = asset.title
+            ranked.extend(evidences)
         ranked.sort(key=lambda evidence: evidence.similarity, reverse=True)
         return ranked[:top_k]
 
     def recommend_with_memory(self, asset_id: str, user_id: str, goal: str, top_k: int = 3) -> AgentAnswer:
         memory = self.memory.get_memory(user_id)
-        memory_query = self.memory.weighted_query(memory)
+        memory_query = self.memory.weighted_query(memory, include_artists=False)
         evidences = self.retrieve_evidence(asset_id, f"{goal} {memory_query}".strip(), top_k=max(top_k * 2, top_k))
         segment_map = {segment.segment_id: segment for segment in self._require_segments(asset_id)}
         segments: list[Segment] = []
@@ -1670,7 +1810,7 @@ class AudioVisualAgent:
             },
         }
 
-    def summarize_taste(self, user_id: str) -> str:
+    def summarize_taste(self, user_id: str, *, include_artists: bool = True) -> str:
         memory = self.memory.get_memory(user_id)
         if not memory.taste_profile:
             library = [asset for asset in self.list_assets() if asset.status == "analyzed"]
@@ -1688,7 +1828,7 @@ class AudioVisualAgent:
             f"你的品味目前更偏向 {genre_text}，"
             f"情绪上常出现 {mood_text}，"
         ]
-        if artist_text:
+        if include_artists and artist_text:
             parts.append(f"偏好的艺人有 {artist_text}，")
         parts.append(f"显式表达过的偏好包括 {pref_text}。")
         return "".join(parts)
@@ -1721,13 +1861,20 @@ class AudioVisualAgent:
         hypothesis = self._taste_experiment_hypothesis(memory)
         seeds = self._taste_experiment_search_seeds(memory, prompt)
         candidates = self._collect_taste_candidates(user_id, seeds, total)
-        candidates = self._filter_taste_experiment_candidates(user_id, candidates, memory.exclusion_rules)
+        prompt_rules = self._taste_prompt_exclusions(prompt)
+        candidates = self._filter_taste_experiment_candidates(
+            user_id, candidates, [*memory.exclusion_rules, *prompt_rules],
+        )
         buckets = self._bucket_taste_experiment_candidates(candidates, per_bucket)
+        confidence_ok = bool(buckets["safe"] and buckets["bold"])
         segments = [
             TasteExperimentSegment(
                 name="safe",
                 label="安全区",
-                description="我确认你大概率会喜欢，用来验证稳定偏好。",
+                description=(
+                    "命中你的核心风格或艺人，用来验证稳定偏好。"
+                    if confidence_ok else "本轮证据不足，暂不强行标记安全区。"
+                ),
                 tracks=[
                     self._taste_experiment_track(track, "safe", components, reason, score)
                     for track, components, reason, score in buckets["safe"]
@@ -1736,7 +1883,10 @@ class AudioVisualAgent:
             TasteExperimentSegment(
                 name="stretch",
                 label="轻微越界",
-                description="和你的画像相邻，但在风格、语言或能量上稍微越界。",
+                description=(
+                    "和你的画像相邻，但至少在一个维度上有所变化。"
+                    if confidence_ok else "候选区分度不足，先放在待验证区收集真实反馈。"
+                ),
                 tracks=[
                     self._taste_experiment_track(track, "stretch", components, reason, score)
                     for track, components, reason, score in buckets["stretch"]
@@ -1745,7 +1895,10 @@ class AudioVisualAgent:
             TasteExperimentSegment(
                 name="bold",
                 label="大胆探索",
-                description="明显探索边界，但仍避开你明确排除和不喜欢的内容。",
+                description=(
+                    "有可解释连接点，同时明显超出你的主画像。"
+                    if confidence_ok else "本轮证据不足，暂不强行标记大胆探索。"
+                ),
                 tracks=[
                     self._taste_experiment_track(track, "bold", components, reason, score)
                     for track, components, reason, score in buckets["bold"]
@@ -1753,7 +1906,10 @@ class AudioVisualAgent:
             ),
         ]
         actual_total = sum(len(segment.tracks) for segment in segments)
-        shortfall = "" if actual_total >= total else f"候选不足，本次先生成 {actual_total}/{total} 首。"
+        if not confidence_ok and actual_total:
+            shortfall = "本轮候选的熟悉度差异不足，已停止强行分档；请先试听待验证候选。"
+        else:
+            shortfall = "" if actual_total >= total else f"候选不足，本次先生成 {actual_total}/{total} 首。"
         experiment = TasteExperiment(
             experiment_id=self._new_taste_experiment_id(user_id, prompt),
             user_id=user_id,
@@ -1771,13 +1927,17 @@ class AudioVisualAgent:
         seeds: list[str],
         total: int,
     ) -> list[tuple[Any, dict[str, float], str, float]]:
-        """汇总推荐 + 多种子搜索的候选（未过滤），供 generate/regenerate 复用。"""
-        candidates: list[tuple[Any, dict[str, float], str, float]] = []
+        """汇总多路候选，再在同一查询和同一批次中统一评分。
+
+        旧实现把每个搜索批次内部归一化后的 components 直接混排；这些分数没有
+        可比性，是实验分档错乱的主因。
+        """
+        raw_tracks: list[Asset | ExternalTrack] = []
         if seeds:
             try:
                 rec = self.recommend_for_query(user_id, seeds[0], top_k=max(total * 3, 18))
                 for item in rec.tracks:
-                    candidates.append((item.asset, item.components or {}, item.reason, item.score))
+                    raw_tracks.append(item.asset)
             except Exception:
                 logger.debug("taste_experiment recommend failed for %s", seeds[0], exc_info=True)
         for search_goal in seeds[:16]:
@@ -1786,10 +1946,34 @@ class AudioVisualAgent:
             except Exception:
                 logger.debug("taste_experiment seed search failed for %s", search_goal, exc_info=True)
                 continue
-            ranked = self._rerank_tracks(user_id, search_goal, tracks, top_k=len(tracks))
-            for track, breakdown in ranked:
-                candidates.append((track, breakdown.components, breakdown.reason, breakdown.score))
-        return candidates
+            raw_tracks.extend(tracks)
+        raw_tracks = [
+            track for track in _dedupe_tracks(raw_tracks)
+            if _is_recommendation_quality_track(track)
+        ]
+        if not raw_tracks:
+            return []
+        unified_query = " ".join(seeds[:6])
+        ranked = self._rerank_tracks(user_id, unified_query, raw_tracks, top_k=len(raw_tracks))
+        return [
+            (track, breakdown.components, breakdown.reason, breakdown.score)
+            for track, breakdown in ranked
+        ]
+
+    @staticmethod
+    def _taste_prompt_exclusions(prompt: str) -> list[str]:
+        """Extract hard negative constraints from short experiment prompts."""
+        text = (prompt or "").lower()
+        rules: list[str] = []
+        if any(token in text for token in ("别太吵", "不要太吵", "不吵", "低能量")):
+            rules.extend(["激昂", "金属", "hard rock", "heavy metal"])
+        if "type beat" in text or "不要beat" in text or "不要 beat" in text:
+            rules.append("type beat")
+        for match in re.finditer(r"(?:不要|别推|不想听)\s*([^，。,.；;]{1,16})", text):
+            value = match.group(1).strip()
+            if value:
+                rules.append(value)
+        return list(dict.fromkeys(rules))
 
     def regenerate_taste_experiment_bucket(self, user_id: str, experiment_id: str, bucket: str) -> TasteExperiment:
         """按上一轮反馈重做某一档（safe/stretch/bold）。
@@ -2066,6 +2250,11 @@ class AudioVisualAgent:
         if not candidates:
             return buckets
         ranked = sorted(candidates, key=self._taste_familiarity, reverse=True)
+        familiarities = [self._taste_familiarity(item) for item in ranked]
+        # 绝对区分度不足时不制造虚假的 safe/bold 确定性：统一放进待验证档。
+        if len(ranked) < per_bucket * 3 or max(familiarities) - min(familiarities) < 0.08:
+            buckets["stretch"] = ranked[:per_bucket * 3]
+            return buckets
         buckets["safe"] = self._slice_for_bucket(ranked, "safe", per_bucket)
         buckets["stretch"] = self._slice_for_bucket(ranked, "stretch", per_bucket)
         buckets["bold"] = self._slice_for_bucket(ranked, "bold", per_bucket)
@@ -2258,22 +2447,29 @@ class AudioVisualAgent:
         *,
         excluded_tracks: list[dict[str, str]] | None = None,
         search_variants: list[str] | None = None,
+        seed_tracks: list[Asset | ExternalTrack] | None = None,
     ) -> DailyRecommendation:
         memory = self.memory.get_memory(user_id)
-        memory_query = self.memory.weighted_query(memory)
+        memory_query = self.memory.weighted_query(memory, include_artists=False)
         search_goal = _extract_search_query(goal)
-        taste_summary = self.summarize_taste(user_id) if memory.taste_profile else ""
-        library_artists = list({a.artist for a in self.list_assets() if a.artist})[:10]
+        has_entity = self._query_has_entity(search_goal)
+        taste_summary = self.summarize_taste(user_id, include_artists=has_entity) if memory.taste_profile else ""
+        library_artists = list({a.artist for a in self.list_assets() if a.artist})[:10] if has_entity else []
 
         # ── 三路搜索策略 ──
         # 精确实体查询 (有歌手/歌名) → 网易云歌曲搜索
         # 情绪/场景/模糊查询 → LLM 候选生成 + 网易云歌单搜索
         trace_lines: list[str] = []
-        all_candidates: list[ExternalTrack] = []
+        all_candidates: list[Asset | ExternalTrack] = list(seed_tracks or [])
+        seed_supply = sum(
+            1 for track in all_candidates
+            if (isinstance(track, Asset) or _is_verified_online_track(track))
+            and _is_recommendation_quality_track(track)
+        )
 
-        has_entity = self._query_has_entity(search_goal)
-
-        if has_entity:
+        if seed_supply >= top_k:
+            trace_lines.append(f"route=seed_candidates, supplied={seed_supply}")
+        elif has_entity:
             # 路由C：精确搜索（网易云歌曲搜索，这个是OK的）
             trace_lines.append(f"route=exact, search_goal={search_goal}")
             # 延续去重时翻页：跳过已展示的那批最热结果，取更深位次新歌，
@@ -2322,10 +2518,16 @@ class AudioVisualAgent:
                 trace_lines.append(f"route=lastfm, verified={len(lastfm_tracks)}")
                 all_candidates.extend(lastfm_tracks)
 
-        # 去重 + 过滤
+        # 本地曲库必须真正参与推荐，而不只是被压缩成画像后再去线上搜。
+        # 精确实体查询只加入标题/歌手匹配项；场景查询加入画像/场景相关项。
+        local_candidates = self._local_recommendation_candidates(user_id, search_goal or goal, memory)
+        trace_lines.append(f"route=local_library, matched={len(local_candidates)}")
+        all_candidates.extend(local_candidates)
+
+        # 去重 + 过滤。线上候选必须真实验证；本地曲库本身即可信来源。
         verified = [
             track for track in _dedupe_tracks(all_candidates)
-            if _is_verified_online_track(track)
+            if (isinstance(track, Asset) or _is_verified_online_track(track))
             and not self.library.is_disliked(user_id, track)
             and _is_recommendation_quality_track(
                 track, allow_variants=_query_requests_variant_content(goal)
@@ -2350,8 +2552,18 @@ class AudioVisualAgent:
                         verified.append(track)
 
         if verified:
+            # 跨轮优先使用未展示过的歌；不足时才把旧歌放回尾部，避免越刷越空。
+            recent = set(memory.recommendation_history[-120:])
+            fresh = [track for track in verified if _track_key(track) not in recent]
+            repeated = [track for track in verified if _track_key(track) in recent]
+            verified = fresh if len(fresh) >= top_k else [*fresh, *repeated]
             rerank_query = search_goal or goal
-            ranked = self._rerank_tracks(user_id, rerank_query, _dedupe_tracks(verified), top_k)
+            # 先对完整候选池排序，再做来源平衡。若这里只取 top_k，标签更完整的
+            # local 会在平衡前就把 online 全挤掉，后续再设配额也无候选可选。
+            ranked_pool = self._rerank_tracks(
+                user_id, rerank_query, _dedupe_tracks(verified), top_k=len(verified),
+            )
+            ranked = self._balance_recommendation_sources(ranked_pool, top_k)
             self.library.record_exposure([t for t, _ in ranked])
             self.library.decay_exposure_ts([t for t, _ in ranked])
             tracks: list[RecommendedTrack] = []
@@ -2363,13 +2575,20 @@ class AudioVisualAgent:
                     category="discovery",
                     components=breakdown.components,
                 ))
+            self._record_recommendation_history(user_id, [track for track, _ in ranked])
+            local_count = sum(isinstance(track, Asset) for track, _ in ranked)
+            online_count = len(ranked) - local_count
             return DailyRecommendation(
                 user_id=user_id,
                 tracks=tracks,
-                reason_summary=f"采用 {len(tracks)} 首真实线上候选（LLM候选+歌单搜索+网易云验证），经三锚精排+MMR多样性重排。",
+                reason_summary=(
+                    f"采用 {local_count} 首曲库歌曲 + {online_count} 首真实线上候选，"
+                    "经三锚精排、来源平衡与多样性重排。"
+                ),
                 agent_trace=[
                     *trace_lines,
                     f"online_verified={len(verified)}",
+                    f"source_mix=local:{local_count},online:{online_count}",
                     "rerank=tri_anchor+mmr",
                 ],
             )
@@ -2381,6 +2600,101 @@ class AudioVisualAgent:
             reason_summary=f"未找到与「{goal}」匹配的真实线上候选，暂不推荐虚构歌曲。",
             agent_trace=[*trace_lines, "online_verified=0"],
         )
+
+    def _local_recommendation_candidates(
+        self,
+        user_id: str,
+        query: str,
+        memory: UserMemory,
+        limit: int = 120,
+    ) -> list[Asset]:
+        """Select relevant local songs without mutating the user's library."""
+        taste = memory.taste_profile or TasteProfile()
+        preferred = {
+            *(name.lower() for name, _ in taste.top_genres[:5]),
+            *(name.lower() for name, _ in taste.top_moods[:5]),
+            *(name.lower() for name, _ in taste.top_artists[:8]),
+        }
+        query_terms = {
+            token.lower() for token in re.findall(r"[A-Za-z0-9&'-]+|[一-鿿㐀-䶿]{2,}", query or "")
+            if token.lower() not in _QUERY_NOISE
+        }
+        scored: list[tuple[int, Asset]] = []
+        for track in self.list_assets():
+            if track.status != "analyzed" or not _is_recommendation_quality_track(track):
+                continue
+            if self.library.is_disliked(user_id, track):
+                continue
+            searchable = " ".join([
+                track.title, track.artist or "", *track.genre, *track.mood,
+            ]).lower()
+            query_hits = sum(1 for term in query_terms if term in searchable)
+            taste_hits = sum(1 for term in preferred if term and term in searchable)
+            score = query_hits * 3 + taste_hits
+            if score > 0:
+                scored.append((score, track))
+        scored.sort(key=lambda item: (-item[0], item[1].title.lower(), (item[1].artist or "").lower()))
+        return [track for _, track in scored[:limit]]
+
+    @staticmethod
+    def _balance_recommendation_sources(
+        ranked: list[tuple[Asset | ExternalTrack, Any]],
+        top_k: int,
+        local_ratio: float = 0.4,
+    ) -> list[tuple[Asset | ExternalTrack, Any]]:
+        """Keep local useful without allowing metadata-rich local tracks to monopolize results.
+
+        The cap is soft: when verified online supply is insufficient, skipped local tracks
+        fill the remaining slots so recommendations never become artificially short.
+        """
+        if not ranked or top_k <= 0:
+            return []
+        local = [item for item in ranked if isinstance(item[0], Asset)]
+        online = [item for item in ranked if not isinstance(item[0], Asset)]
+        if not online:
+            return local[:top_k]
+        if not local:
+            return online[:top_k]
+
+        local_target = min(len(local), max(1, round(top_k * local_ratio)))
+        online_target = min(len(online), top_k - local_target)
+        # 某一来源不足时由另一来源补齐，但只在确实缺货时突破软配额。
+        remaining = top_k - local_target - online_target
+        if remaining > 0:
+            extra_online = min(remaining, len(online) - online_target)
+            online_target += extra_online
+            remaining -= extra_online
+        if remaining > 0:
+            local_target += min(remaining, len(local) - local_target)
+
+        total = local_target + online_target
+        selected: list[tuple[Asset | ExternalTrack, Any]] = []
+        local_used = online_used = 0
+        for position in range(total):
+            # 按累计目标交错来源，避免“完整 25 首比例正常，但发现页前 8 首全 local”。
+            should_have_local = round((position + 1) * local_target / total)
+            if local_used < should_have_local and local_used < local_target:
+                selected.append(local[local_used])
+                local_used += 1
+            elif online_used < online_target:
+                selected.append(online[online_used])
+                online_used += 1
+            elif local_used < local_target:
+                selected.append(local[local_used])
+                local_used += 1
+        return selected
+
+    def _record_recommendation_history(self, user_id: str, tracks: list[Asset | ExternalTrack]) -> None:
+        keys = [_track_key(track) for track in tracks]
+        # 部分嵌入调用和单元测试会用 __new__ 构造无持久层的轻量 Agent。
+        # 推荐本身仍应可用，只跳过跨轮历史记录。
+        if not keys or not hasattr(self, "store"):
+            return
+        with self.store.lock("memory", user_id):
+            memory = self.memory.get_memory(user_id)
+            memory.recommendation_history = [*memory.recommendation_history, *keys][-200:]
+            memory.updated_at = utc_now_iso()
+            self.store.write_model("memory", user_id, memory)
 
     @staticmethod
     def _query_has_entity(search_goal: str) -> bool:
@@ -2420,7 +2734,7 @@ class AudioVisualAgent:
             "甜蜜", "兴奋", "空灵", "愉悦", "感动", "舒服", "烦躁", "低沉", "吵闹",
             # 场景
             "跑步", "运动", "工作", "学习", "睡眠", "开车", "通勤", "派对", "咖啡",
-            "健身", "旅行", "约会", "散步", "泡澡",
+            "健身", "旅行", "约会", "散步", "泡澡", "专注",
             # 时间
             "深夜", "早晨", "下午", "夜晚", "凌晨", "熬夜", "今夜", "今晚", "周末",
             "早上", "晚上", "白天", "午后", "傍晚",
@@ -2728,7 +3042,7 @@ def _is_recommendation_quality_track(track: Any, *, allow_variants: bool = False
     noise_patterns = (
         r"\btype\s*beat\b", r"\bfree\s*beat\b", r"\binstrumental\b",
         r"\bbpm\s*\d+\b", r"\bprod\.?(?:\s|$)", r"\bdemo\b",
-        r"\bai\s*(?:翻唱|cover|歌曲|音乐)",
+        r"\bai\s*(?:翻唱|cover|歌曲|音乐)", r"\blive\s*stage\b",
     )
     if any(re.search(pattern, lowered_title) for pattern in noise_patterns):
         return False
@@ -2744,7 +3058,8 @@ def _is_recommendation_quality_track(track: Any, *, allow_variants: bool = False
         "热门歌曲", "热门音乐", "流行音乐", "独立流行", "另类流行", "新灵魂",
         "更新灵魂", "氛围说唱", "律动rnb", "律动rb", "另类rnb", "另类rb",
         "小众rnb", "小众rb", "neosoulbeat", "neosoul", "纯音乐", "伴奏",
-        "typebeat", "unknown", "佚名", "群星",
+        "typebeat", "unknown", "佚名", "群星", "rnb", "rb", "律动", "说唱",
+        "学习专注", "专注学习", "学习能量", "专注力读书音乐", "学习专注力读书音乐",
     }
     if compact_title in generic_names or compact_artist in generic_names:
         return False
@@ -2785,24 +3100,47 @@ def _playlist_online_queries(search_terms: str) -> list[str]:
     return unique[:4]
 
 
-def _journey_phases(instruction: str) -> list[dict[str, str]]:
+def _journey_phases(instruction: str, taste: TasteProfile | None = None) -> list[dict[str, Any]]:
+    """Plan an energy arc from the instruction and current taste profile.
+
+    The stage shape is deterministic for readability; each stage carries several
+    retrieval variants, and cross-journey history rotates the actual songs.
+    """
     lowered = instruction.lower()
+    taste = taste or TasteProfile()
+    genres = [name for name, _ in taste.top_genres[:3]]
+    anchor = " ".join(genres[:2])
+
+    def phase(name: str, goal: str, energy: float, intents: list[str], transition: str) -> dict[str, Any]:
+        queries = [f"{intent} {anchor}".strip() for intent in intents]
+        return {
+            "name": name,
+            "goal": goal,
+            "energy": energy,
+            "query": queries[0],
+            "queries": queries,
+            "transition": transition,
+        }
+
     if "清晨" in instruction and "深夜" in instruction:
         return [
-            {"name": "清晨", "goal": "温和唤醒", "query": "清晨 轻快 流行", "transition": "从轻盈、明亮的旋律开始一天。"},
-            {"name": "午后", "goal": "保持活力", "query": "午后 律动 R&B", "transition": "逐步增加律动和能量，承接白天的节奏。"},
-            {"name": "深夜", "goal": "放松收束", "query": "深夜 R&B 放松", "transition": "降低能量和密度，让一天安静落幕。"},
+            phase("清晨", "温和唤醒", 0.28, ["清晨 治愈 轻快", "晨光 温柔 放松", "早起 清新 节奏"], "从低密度、明亮的声音开始。"),
+            phase("上午", "进入状态", 0.46, ["上午 专注 律动", "工作学习 稳定节奏", "通勤 清醒 groove"], "保持清醒感，逐步建立稳定拍点。"),
+            phase("午后", "维持活力", 0.64, ["午后 律动 活力", "下午 groove 欢快", "白天 节奏 能量"], "中段抬高律动与辨识度。"),
+            phase("傍晚", "释放张力", 0.76, ["傍晚 热血 节奏", "黄昏 高能 律动", "下班 释放 活力"], "在日落前达到整条旅程的能量峰值。"),
+            phase("深夜", "放松收束", 0.32, ["深夜 放松 氛围", "夜晚 慵懒 舒缓", "午夜 安静 治愈"], "逐步降低能量与声音密度，安静落幕。"),
         ]
     if any(token in lowered or token in instruction for token in ["跑步", "运动", "running", "workout"]):
         return [
-            {"name": "热身", "goal": "轻快进入状态", "query": "热身 轻快 节奏", "transition": "从低强度节奏进入身体状态。"},
-            {"name": "冲刺", "goal": "高能量推进", "query": "跑步 高能 快节奏", "transition": "中段提升 BPM 和能量，适合冲起来。"},
-            {"name": "放松", "goal": "降速恢复", "query": "运动后 放松 舒缓", "transition": "尾段降低强度，帮助恢复。"},
+            phase("热身", "轻快进入状态", 0.45, ["热身 轻快 节奏", "运动 开场 groove", "慢跑 活力"], "从低强度节奏进入身体状态。"),
+            phase("推进", "稳定耐力", 0.72, ["跑步 稳定 高能", "运动 律动 节奏", "训练 动感"], "稳定拍点，保持持续推进。"),
+            phase("冲刺", "高能量峰值", 0.92, ["冲刺 高能 快节奏", "跑步 爆发 热血", "训练 峰值"], "把 BPM 和能量推到峰值。"),
+            phase("放松", "降速恢复", 0.30, ["运动后 放松 舒缓", "拉伸 治愈", "恢复 安静"], "尾段降低强度，帮助恢复。"),
         ]
     return [
-        {"name": "开场", "goal": "建立氛围", "query": "开场 氛围 音乐", "transition": "先用稳定情绪铺底。"},
-        {"name": "推进", "goal": "提升记忆点", "query": "高潮 推荐 音乐", "transition": "中段提高辨识度和情绪张力。"},
-        {"name": "收束", "goal": "留下余韵", "query": "结尾 放松 音乐", "transition": "最后用更耐听的曲目收尾。"},
+        phase("开场", "建立氛围", 0.35, [f"{instruction} 开场 氛围", "温和 开场", "稳定 情绪"], "先用稳定情绪铺底。"),
+        phase("推进", "提升记忆点", 0.68, [f"{instruction} 推进 律动", "中段 能量", "节奏 提升"], "中段提高辨识度和情绪张力。"),
+        phase("收束", "留下余韵", 0.30, [f"{instruction} 收束 放松", "结尾 舒缓", "余韵 安静"], "最后降低声音密度，留下余韵。"),
     ]
 
 
@@ -2969,6 +3307,7 @@ _QUERY_NOISE = {"的", "了", "在", "是", "我", "你", "他", "她", "它", "
                 "生成", "只要", "其他", "不要", "别的", "还有", "有没有",
                 "可以", "能", "会", "让", "从", "到", "去", "来", "上", "这", "那",
                 "什么", "怎么", "哪些", "如何", "为什么", "多少", "很多", "比较",
+                "一点", "稍微", "偏", "微", "更",
                 "帮我搜索", "帮我找", "给我推荐", "帮我推荐", "来几首", "弄几首",
                 "做", "弄", "搞", "弄个", "做个", "生成个",
                 "songs", "song", "music", "me", "some", "please",
@@ -2982,6 +3321,68 @@ def _normalize_match_text(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text or "").lower()
     normalized = normalized.replace("r&b", "rnb").replace("r and b", "rnb").replace("hip-hop", "hiphop")
     return re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", normalized)
+
+
+_ARTIST_ALIAS_STOPWORDS = {
+    "the", "and", "band", "music", "official", "feat", "featuring",
+    "with", "from", "west",  # 方位/连接词单独出现时不应触发歌手页
+}
+
+
+def _artist_credit_parts(artist: str) -> list[str]:
+    return [
+        part.strip()
+        for part in re.split(r"[、,/;&]|\b(?:feat\.?|featuring|with)\b", artist or "", flags=re.IGNORECASE)
+        if part.strip()
+    ]
+
+
+def _artist_alias_keys(artist: str) -> set[str]:
+    """Build conservative aliases from one credited artist string.
+
+    ``Kanye West、Ye`` yields the full names plus ``kanye`` and ``ye``;
+    Chinese names remain whole to avoid turning each character into an alias.
+    """
+    aliases: set[str] = set()
+    for part in _artist_credit_parts(artist):
+        full_key = _normalize_match_text(part)
+        if full_key:
+            aliases.add(full_key)
+        cleaned_key = _normalize_match_text(_extract_search_query(part))
+        if cleaned_key:
+            aliases.add(cleaned_key)
+        if re.search(r"[A-Za-z]", part):
+            for token in re.findall(r"[A-Za-z0-9]+", part.lower()):
+                if len(token) >= 3 and token not in _ARTIST_ALIAS_STOPWORDS:
+                    aliases.add(_normalize_match_text(token))
+    return aliases
+
+
+def _artist_query_matches(query: str, artist: str, *, allow_fuzzy: bool = False) -> bool:
+    query_key = _normalize_match_text(_extract_search_query(query) or query)
+    if not query_key or query_key in _ARTIST_ALIAS_STOPWORDS:
+        return False
+    aliases = _artist_alias_keys(artist)
+    if query_key in aliases:
+        return True
+    return bool(
+        allow_fuzzy
+        and len(query_key) >= 6
+        and max((_string_similarity(query_key, alias) for alias in aliases), default=0.0) >= 88.0
+    )
+
+
+def _string_similarity(a: str, b: str) -> float:
+    if not a or not b:
+        return 0.0
+    try:
+        from rapidfuzz import fuzz
+
+        return float(fuzz.ratio(a, b))
+    except Exception:
+        from difflib import SequenceMatcher
+
+        return SequenceMatcher(None, a, b).ratio() * 100.0
 
 
 def _fuzzy_ratio(a: str, b: str) -> float:
@@ -3111,12 +3512,15 @@ def _online_candidate_reason(track: ExternalTrack, memory_query: str) -> str:
 
 def _dedupe_tracks(tracks: list[Asset | ExternalTrack]) -> list[Asset | ExternalTrack]:
     seen: set[str] = set()
+    seen_titles: set[str] = set()
     unique: list[Asset | ExternalTrack] = []
     for track in tracks:
         key = _track_key(track)
-        if key in seen:
+        title_key = f"{track.title.strip().lower()}|{(track.artist or '').strip().lower()}"
+        if key in seen or title_key in seen_titles:
             continue
         seen.add(key)
+        seen_titles.add(title_key)
         unique.append(track)
     return unique
 

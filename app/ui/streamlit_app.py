@@ -1250,7 +1250,8 @@ with tab5:
                 stream_events.append(event)
                 if event.type == "candidates":
                     stream_cards = event.payload.get("cards", []) or stream_cards
-                if event.type != "final":
+                # token 事件是答案正文的增量块（每个仅几字），final 会给权威全文，这里不逐块刷屏。
+                if event.type not in ("final", "token"):
                     stream_box.caption(f"{event.type}: {event.content}")
                 else:
                     from app.models import AgentAnswer

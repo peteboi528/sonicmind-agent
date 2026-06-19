@@ -23,6 +23,8 @@ def _track(title: str, artist: str = "x", source: str = "netease", eid: str | No
 def test_reflect_marks_refine_and_excluded_tracks(tmp_path, monkeypatch):
     agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
     monkeypatch.setattr(settings, "llm_api_key", "fake-key")
+    # refine 回环默认关闭（提速：省掉第 4/5 次串行往返）；这里显式打开以测「剔除后应回环补量」这条路径。
+    monkeypatch.setattr(settings, "enable_reflect_refine", True)
     agent.memory.add_exclusion("u", "抖音热歌")
     monkeypatch.setattr(agent.llm, "generate", lambda *a, **k: '{"drop": [0], "reason": "bad"}')
 
@@ -94,7 +96,6 @@ def test_fallback_invoke_refines_once(monkeypatch, tmp_path):
 
     monkeypatch.setattr(builder, "execute_tools", fake_execute)
     monkeypatch.setattr(builder, "web_fallback", lambda agent, state: state)
-    monkeypatch.setattr(builder, "evaluate", lambda agent, state: state)
     monkeypatch.setattr(builder, "reflect", fake_reflect)
     monkeypatch.setattr(builder, "finalize", lambda agent, state: {**state, "answer": "ok"})
 
@@ -123,16 +124,14 @@ def test_stream_runs_refine_loop_once(monkeypatch, tmp_path):
         events = [*state.get("events", []), StreamEvent(type="eval", content=f"reflect-{call_counts['reflect']}")]
         return {**state, "events": events, "_need_refine": call_counts["reflect"] == 1}
 
-    def fake_finalize(agent, state):
+    def fake_finalize_stream(agent, state):
         call_counts["finalize"] += 1
-        events = [*state.get("events", []), StreamEvent(type="final", content="done")]
-        return {**state, "events": events, "answer": "ok"}
+        yield StreamEvent(type="final", content="done")
 
     monkeypatch.setattr(builder, "execute_tools", fake_execute)
     monkeypatch.setattr(builder, "web_fallback", lambda agent, state: state)
-    monkeypatch.setattr(builder, "evaluate", lambda agent, state: state)
     monkeypatch.setattr(builder, "reflect", fake_reflect)
-    monkeypatch.setattr(builder, "finalize", fake_finalize)
+    monkeypatch.setattr(builder, "finalize_stream", fake_finalize_stream)
 
     events = list(runner.stream("u", None, "q"))
 

@@ -147,6 +147,8 @@ class TestRecommendationQualityGate:
             ("Neo Soul Beat", "Chill5"),
             ("#梦核 #新风格探索 #trap", "SAAC"),
             ("热门歌曲", "热门歌曲"),
+            ("学习专注", "学习能量"),
+            ("学习专注力读书音乐", "休闲音乐"),
         ]
         for index, (title, artist) in enumerate(noisy):
             track = ExternalTrack(

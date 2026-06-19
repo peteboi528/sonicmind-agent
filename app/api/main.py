@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -21,6 +22,8 @@ from app.models import (
     BrowseRequest,
     ChatRequest,
     DailyRequest,
+    DiscoverQueryClassification,
+    DiscoverQueryRequest,
     DislikeRequest,
     EnrichRequest,
     FeedbackRequest,
@@ -32,6 +35,7 @@ from app.models import (
     RatingRequest,
     SaveAlbumRequest,
     SearchRequest,
+    SearchResponse,
     TasteExperimentFeedbackRequest,
     TasteExperimentRegenerateRequest,
     TasteExperimentReportRequest,
@@ -148,6 +152,8 @@ def health() -> dict[str, Any]:
     checks["llm"] = llm_mode == "mock" or bool(settings.llm_api_key)
     details["llm_mode"] = llm_mode
     details["store_root"] = str(agent.store.root)
+    details["store_candidates"] = settings.store_candidates
+    details["duplicate_store_warning"] = sum(count > 0 for count in settings.store_candidates.values()) > 1
     details["resource_library_path"] = str(settings.resource_library_path)
     details["frontend_build_hash"] = _frontend_build_hash()
     details["auth_mode"] = (
@@ -332,6 +338,59 @@ async def agent_stream(payload: ChatRequest, request: Request):
 
 # ── Discover / Browse ──
 
+@app.post("/discover/classify", response_model=DiscoverQueryClassification)
+def discover_classify(request: DiscoverQueryRequest):
+    """Classify Discover input before the frontend launches expensive detail requests."""
+    return agent.classify_discover_query(request.query)
+
+
+@app.post("/discover/search", response_model=SearchResponse)
+async def discover_search(payload: SearchRequest, request: Request):
+    """Discover 专用搜索：本地与在线源拆成两次独立请求，互不阻塞。
+
+    前端对同一 query 并发两次调用：
+    - 本地那次（include_external=False）只读曲库，毫秒级返回，先把结果铺出来；
+    - 在线那次（external_only=True）只跑网易云搜索，不重复本地检索，因此能给
+      它更宽裕的时限（12s）。网易云间歇限流时靠多端点轮询+重试扛，需要时间多试
+      几次，故不再 6s 硬超时丢结果——超时/失败时如实回报，而不是谎称已展示。
+
+    两条路彼此独立：在线慢不拖累本地，本地结果也永不因在线超时被丢弃。
+    """
+    user_id = _effective_user_id(request, payload.user_id)
+
+    # 在线专用请求：跳过本地检索，只补在线候选。
+    if payload.external_only:
+        response = SearchResponse()
+        try:
+            external = await asyncio.wait_for(
+                asyncio.to_thread(
+                    agent.search_web_music,
+                    payload.query,
+                    payload.top_k,
+                    payload.query,
+                ),
+                timeout=12.0,
+            )
+            response.external = external[:payload.top_k]
+            response.agent_trace.append(f"discover_external_hits={len(external)}")
+            response.summary = (
+                f"在线找到 {len(response.external)} 首相关曲目。"
+                if response.external else "在线来源这次没有匹配，换个说法试试。"
+            )
+        except TimeoutError:
+            response.agent_trace.append("discover_external_timeout=12s")
+            response.summary = "在线来源响应较慢，稍后可再点搜索补充在线结果。"
+        except Exception:
+            logger.debug("Discover external search failed for %s", payload.query, exc_info=True)
+            response.agent_trace.append("discover_external_error=true")
+            response.summary = "在线来源暂不可用。"
+        return response
+
+    # 本地专用请求：只读曲库，秒级返回。
+    return await asyncio.to_thread(
+        agent.search, user_id, payload.query, False, payload.top_k,
+    )
+
 @app.post("/discover/browse")
 def discover_browse(request: BrowseRequest):
     """按曲风/心情/场景浏览歌曲。轻量双路搜索（网易云歌单 + Last.fm 标签），不走 LLM，秒级返回。
@@ -509,7 +568,10 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
 
     from app.models import ExternalTrack
 
-    info = {"name": request.artist, "image": "", "bio": "", "tags": [], "top_albums": [], "top_tracks": []}
+    info = {
+        "name": request.artist, "requested_name": request.artist, "matched": False,
+        "image": "", "bio": "", "tags": [], "top_albums": [], "top_tracks": [],
+    }
 
     lfm = None
     if settings.lastfm_api_key:
@@ -546,16 +608,20 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
 
     async def _hot_tracks():
         try:
-            raw_tracks = await asyncio.to_thread(agent.search_web_music, f"{request.artist} 热门歌曲", 6)
+            raw_tracks = await asyncio.to_thread(
+                agent.search_web_music, request.artist, 12, request.artist,
+            )
             return [
                 ExternalTrack(
                     external_id=t.external_id or "",
-                    title=t.title, artist=t.artist or request.artist,
+                    title=t.title, artist=t.artist or "",
                     cover_url=t.cover_url, source=t.source,
                     playback_url=t.playback_url, candidate_kind=t.candidate_kind,
                 )
-                for t in raw_tracks[:6]
-            ]
+                for t in raw_tracks
+                if agent.artist_name_matches(request.artist, t.artist or "")
+                and t.title.strip().lower() not in {"热门歌曲", "热门单曲", "top songs", "popular songs"}
+            ][:6]
         except Exception:
             logger.debug("Artist hot tracks search failed", exc_info=True)
             return []
@@ -615,6 +681,13 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
             break
     info["top_albums"] = top_albums[:6]
     info["top_tracks"] = ext
+
+    resolved_names = {info["name"]} if artist_data else set()
+    resolved_names.update(a.get("artist", "") for a in top_albums)
+    for track in ext:
+        resolved_names.update(part for part in re.split(r"[、,/&]", track.artist or ""))
+    resolved_names.discard("")
+    info["matched"] = any(agent.artist_name_matches(request.artist, name) for name in resolved_names)
 
     return ArtistInfoResponse(**info)
 

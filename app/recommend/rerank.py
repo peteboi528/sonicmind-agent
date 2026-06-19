@@ -252,7 +252,9 @@ def _behavior_anchor(tracks: list[Any], behavior_scores: dict[str, float] | None
             any_hit = True
         reward = max(-1.0, min(1.0, raw / 3.0))
         out.append((reward + 1.0) / 2.0)  # [-1,1] → [0,1]
-    return out, any_hit
+    # 有历史但当前候选一个都没命中时，0.5 只是数学上的“中性值”，不能在 UI 中
+    # 冒充行为证据，更不能参与实验熟悉度。明确归零并关闭该锚。
+    return (out, True) if any_hit else ([0.0] * len(tracks), False)
 
 
 def _normalized_weights(

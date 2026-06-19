@@ -7,9 +7,9 @@ from app.concurrency import run_parallel
 from app.config import settings
 from app.graph.decompose import SubTask, decompose_compound, decompose_compound_with_meta, summarize_subtasks
 from app.graph.nodes import (
-    evaluate,
     execute_tools,
     finalize,
+    finalize_stream,
     load_context,
     plan_intent,
     reflect,
@@ -144,7 +144,9 @@ class AgentGraphRunner:
                     yield event
                 if route_after_reflect(state) != "refine":
                     break
-            for event in advance(finalize):
+            # finalize：流式增量驱动——token 事件边生成边吐，最后吐 final（权威）。
+            # 不走 advance()：advance 会等节点跑完才一次性吐事件，那 token 流式就失去意义。
+            for event in finalize_stream(self.agent, state):
                 yield event
         except Exception as exc:  # noqa: BLE001
             yield StreamEvent(type="error", content=f"处理出错：{exc}")

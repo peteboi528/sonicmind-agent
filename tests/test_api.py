@@ -205,6 +205,8 @@ def test_artist_album_tracks_not_found_returns_empty(monkeypatch):
 
 def test_artist_info_top_albums_use_netease_ids(monkeypatch):
     """歌手页代表专辑优先用网易云带真实 id 的专辑，而非 Last.fm 无 id 的（点击免二次猜匹配）。"""
+    from app.api import main as main_module
+    from app.models import ExternalTrack
     from app.sources import netease as ns
 
     # 强制离线：关掉 Last.fm（否则开发机的 key 会触发真实网络请求）
@@ -214,6 +216,10 @@ def test_artist_info_top_albums_use_netease_ids(monkeypatch):
         {"id": "18894", "name": "叶惠美", "image": "cover2", "artist": "周杰伦", "track_count": 11},
     ])
     monkeypatch.setattr(ns, "search_netease_artist_image", lambda artist: None)
+    monkeypatch.setattr(main_module.agent, "search_web_music", lambda *args, **kwargs: [
+        ExternalTrack(external_id="good", title="晴天", artist="周杰伦", source="netease"),
+        ExternalTrack(external_id="noise", title="热门歌曲", artist="热门歌曲", source="netease"),
+    ])
 
     client = TestClient(app)
     resp = client.post("/artist/info", json={"artist": "周杰伦"})
@@ -224,6 +230,77 @@ def test_artist_info_top_albums_use_netease_ids(monkeypatch):
     assert albums[0]["id"] == "18893"
     assert albums[0]["track_count"] == 10
     assert albums[1]["id"] == "18894"
+    assert resp.json()["matched"] is True
+    assert [track["title"] for track in resp.json()["top_tracks"]] == ["晴天"]
+
+
+def test_discover_classify_routes_activity_away_from_artist_page():
+    client = TestClient(app)
+
+    response = client.post("/discover/classify", json={"query": "跑步时听的电子音乐"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["kind"] == "category"
+    assert data["browse_category"] == "scene"
+    assert "运动" in data["tags"]["scenario"]
+    assert "电子" in data["tags"]["genre"]
+
+
+def test_discover_search_returns_local_and_bounded_external_results(monkeypatch):
+    from app.api import main as main_module
+    from app.models import Asset, ExternalTrack, SearchResponse
+
+    local = Asset(
+        asset_id="local-1", source_url="https://example.com/local-1",
+        title="Blinding Lights", artist="The Weeknd", duration_seconds=200,
+        status="analyzed",
+    )
+    monkeypatch.setattr(main_module.agent, "search", lambda *args, **kwargs: SearchResponse(
+        local=[local], external=[], summary="local first", evidences=[], agent_trace=[],
+    ))
+    monkeypatch.setattr(main_module.agent, "search_web_music", lambda *args, **kwargs: [
+        ExternalTrack(external_id="online-1", title="Blinding Lights", artist="The Weeknd", source="netease")
+    ])
+
+    client = TestClient(app)
+
+    # 本地那次：只读曲库，秒级返回，不带在线候选。
+    local_resp = client.post("/discover/search", json={
+        "user_id": "discover-user", "query": "Blinding Lights",
+        "include_external": False, "top_k": 12,
+    })
+    assert local_resp.status_code == 200
+    assert local_resp.json()["local"][0]["title"] == "Blinding Lights"
+    assert local_resp.json()["external"] == []
+
+    # 在线那次：external_only，跳过本地，只回在线候选。
+    ext_resp = client.post("/discover/search", json={
+        "user_id": "discover-user", "query": "Blinding Lights",
+        "external_only": True, "top_k": 12,
+    })
+    assert ext_resp.status_code == 200
+    assert ext_resp.json()["local"] == []
+    assert ext_resp.json()["external"][0]["source"] == "netease"
+    assert "在线找到 1 首" in ext_resp.json()["summary"]
+
+
+def test_artist_info_rejects_fuzzy_non_artist_match(monkeypatch):
+    from app.api import main as main_module
+    from app.models import ExternalTrack
+    from app.sources import netease as ns
+
+    monkeypatch.setattr("app.api.main.settings.lastfm_api_key", "")
+    monkeypatch.setattr(ns, "search_netease_artist_albums", lambda artist, limit=6: [])
+    monkeypatch.setattr(ns, "search_netease_artist_image", lambda artist: None)
+    monkeypatch.setattr(main_module.agent, "search_web_music", lambda *args, **kwargs: [
+        ExternalTrack(external_id="1", title="Focus", artist="Unrelated Artist", source="netease")
+    ])
+
+    response = TestClient(app).post("/artist/info", json={"artist": "专注"})
+
+    assert response.status_code == 200
+    assert response.json()["matched"] is False
 
 
 def test_saved_album_save_list_delete_and_isolation():

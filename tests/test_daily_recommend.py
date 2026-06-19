@@ -1,5 +1,5 @@
 from app.agent import AudioVisualAgent
-from app.models import MemoryUpdateRequest
+from app.models import Asset, ExternalTrack, MemoryUpdateRequest, RankingBreakdown, TasteProfile
 from app.storage import JsonStore
 
 
@@ -21,6 +21,61 @@ def test_daily_recommend(tmp_path):
     for track in rec.tracks:
         assert track.reason
         assert track.category in ("familiar", "discovery", "mood_match")
+
+
+def test_recommendation_uses_local_library_and_avoids_recent_round(tmp_path, monkeypatch):
+    from app.search import lastfm_discovery, netease_playlist, web_music_discovery
+
+    store = JsonStore(tmp_path / "store")
+    agent = AudioVisualAgent(store)
+    for i in range(4):
+        asset = Asset(
+            asset_id=f"local-{i}", source_url=f"https://example.com/{i}",
+            title=f"Night R&B {i}", artist=f"Artist {i}", duration_seconds=180,
+            status="analyzed", genre=["R&B"], mood=["深夜", "放松"],
+        )
+        store.write_model("assets", asset.asset_id, asset)
+    memory = agent.memory.get_memory("u-local")
+    memory.taste_profile = TasteProfile(top_genres=[("R&B", 10)], top_moods=[("放松", 8)])
+    store.write_model("memory", "u-local", memory)
+
+    monkeypatch.setattr(netease_playlist, "search_and_extract", lambda *a, **k: [])
+    monkeypatch.setattr(web_music_discovery, "discover_from_llm", lambda *a, **k: [])
+    monkeypatch.setattr(lastfm_discovery, "discover_from_lastfm", lambda *a, **k: [])
+    monkeypatch.setattr(agent, "search_web_music", lambda *a, **k: [])
+
+    first = agent.recommend_for_query("u-local", "深夜 R&B 放松", top_k=2)
+    second = agent.recommend_for_query("u-local", "深夜 R&B 放松", top_k=2)
+    first_ids = {item.asset.asset_id for item in first.tracks}
+    second_ids = {item.asset.asset_id for item in second.tracks}
+    assert first_ids
+    assert second_ids
+    assert first_ids.isdisjoint(second_ids)
+    assert all(item.asset.source == "local" for item in first.tracks + second.tracks)
+
+
+def test_source_balance_caps_local_when_online_supply_exists(tmp_path):
+    agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+    ranked = []
+    for i in range(10):
+        track = Asset(
+            asset_id=f"l-{i}", source_url=f"https://example.com/l-{i}",
+            title=f"Local {i}", artist="Local Artist", duration_seconds=180,
+            status="analyzed", genre=["R&B"], mood=["放松"],
+        )
+        ranked.append((track, RankingBreakdown(title=track.title, source="local", score=1 - i * 0.01, reason="test")))
+    for i in range(10):
+        track = ExternalTrack(
+            external_id=f"o-{i}", title=f"Online {i}", artist="Online Artist", source="netease",
+        )
+        ranked.append((track, RankingBreakdown(title=track.title, source="netease", score=0.5 - i * 0.01, reason="test")))
+
+    selected = agent._balance_recommendation_sources(ranked, top_k=10)
+
+    assert sum(isinstance(track, Asset) for track, _ in selected) == 4
+    assert sum(isinstance(track, ExternalTrack) for track, _ in selected) == 6
+    assert sum(isinstance(track, Asset) for track, _ in selected[:8]) <= 4
+    assert any(isinstance(track, ExternalTrack) for track, _ in selected[:3])
 
 
 def test_search(tmp_path):

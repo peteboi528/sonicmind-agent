@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, watch } from "vue";
+import { computed, ref, onMounted } from "vue";
 import { store } from "../store.js";
 import { api } from "../api.js";
 import SongCard from "./SongCard.vue";
@@ -34,8 +34,10 @@ const MOODS = [
 // ── State ──
 const query = ref("");
 const loading = ref(false);
+const externalLoading = ref(false); // 在线源后补的独立加载态：本地结果已铺出，在线仍在跑
 const searchResults = ref(null);
 const searchMsg = ref("");
+const searchIntent = ref(null); // { kind: category|artist|track, label, tags, ... }
 
 const forYou = ref([]);
 const forYouLoading = ref(false);
@@ -56,9 +58,29 @@ const savedAlbumIds = ref(new Set());  // 已收藏专辑 id 集合，驱动 ♡
 const toast = ref("");
 const toastKey = ref(0);
 
+const searchResultTitle = computed(() => ({
+  category: "分类电台",
+  artist: "相关歌曲",
+  track: "歌曲结果",
+}[searchIntent.value?.kind] || "搜索结果"));
+
+const searchIntentIcon = computed(() => ({
+  category: "◉",
+  artist: "◎",
+  track: "♫",
+}[searchIntent.value?.kind] || "⌕"));
+
 function showToast(msg) {
   toast.value = msg;
   toastKey.value++;
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(`${label}_timeout`)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timer));
 }
 
 // ── Card mapper ──
@@ -111,42 +133,119 @@ async function loadTrending() {
   }
 }
 
-// ── Search (enhanced with artist detection) ──
+// ── Search: classify first, then launch only the relevant data path ──
 async function search() {
   const q = query.value.trim();
   if (!q) return;
   const seq = ++searchSeq.value;  // 本次搜索的代次令牌
   loading.value = true;
+  externalLoading.value = false;
   searchMsg.value = "";
   searchResults.value = null;
+  searchIntent.value = null;
   artistInfo.value = null;
   albumDetail.value = null;
   albumLoadingKey.value = "";
   bioExpanded.value = false;
-  artistLoading.value = true;
-
-  // 歌手信息独立 resolve：一到就渲染，不串在 search 后面（旧实现先 await search 再
-  // await artistPromise，歌手卡被搜索拖慢才出现）。
-  // 代次守卫：连续搜 A→B 时，若 A 的回调晚于 B 返回，丢弃 A，避免 A 的歌手卡/搜索结果覆盖 B。
-  api.artistInfo(q).then((info) => {
-    if (seq !== searchSeq.value) return;
-    if (info && info.name && (info.bio || info.top_tracks?.length || info.top_albums?.length)) {
-      artistInfo.value = info;
-    }
-  }).catch(() => { /* no artist info, fine */ }).finally(() => {
-    if (seq === searchSeq.value) artistLoading.value = false;
-  });
+  artistLoading.value = false;
 
   try {
-    const data = await api.search(store.userId, q);
+    const classification = await withTimeout(api.discoverClassify(q), 5000, "classify");
     if (seq !== searchSeq.value) return;
-    searchResults.value = data;
-  } catch {
+    searchIntent.value = classification;
+
+    if (classification.kind === "category") {
+      const data = await withTimeout(api.discoverBrowse(
+        store.userId,
+        classification.browse_category || "mood",
+        classification.browse_value || classification.normalized_query,
+        12,
+        0,
+      ), 12000, "browse");
+      if (seq !== searchSeq.value) return;
+      searchResults.value = {
+        external: data.tracks || [],
+        local: [],
+        summary: data.summary || `已进入${classification.label}`,
+      };
+      return;
+    }
+
+    const resolvedQuery = classification.kind === "artist"
+      ? (classification.normalized_query || q)
+      : q;
+    // 本地秒出：只读曲库，先把结果铺出来。
+    const localPromise = withTimeout(api.discoverSearch(store.userId, resolvedQuery), 10000, "search");
+    // 在线后补：独立请求，跑到哪补到哪，永不因慢而被丢弃。本地慢也不拖它。
+    externalLoading.value = true;
+    withTimeout(api.discoverSearchExternal(store.userId, resolvedQuery), 14000, "search-external")
+      .then((ext) => {
+        if (seq !== searchSeq.value) return;
+        const tracks = ext?.external || [];
+        if (!searchResults.value) searchResults.value = { local: [], external: [], summary: "" };
+        searchResults.value.external = tracks;
+        // 本地为空且在线也空时，给一句在线源的实情，别让结果区一片空白。
+        if (!searchResults.value.local?.length && !tracks.length && ext?.summary) {
+          searchResults.value.summary = ext.summary;
+        }
+      })
+      .catch(() => { /* 在线源可选，失败不影响本地结果 */ })
+      .finally(() => {
+        if (seq === searchSeq.value) externalLoading.value = false;
+      });
+    // 歌手卡：artist 分类必查；track 分类也试探性查一次——曲库里没有歌手数据时，
+    // 裸打"周杰伦"会被保守判成 track，但 /artist/info 自带反误判（歌名/活动词不会
+    // 匹配成歌手），所以试探是安全的，匹配上才显示，恢复"输歌手名即出歌手卡"的体验。
+    if (classification.kind === "artist" || classification.kind === "track") {
+      if (classification.kind === "artist") artistLoading.value = true;
+      withTimeout(api.artistInfo(classification.normalized_query || q), 10000, "artist").then((info) => {
+        if (seq !== searchSeq.value) return;
+        if (info?.matched && info.name && (info.bio || info.top_tracks?.length || info.top_albums?.length)) {
+          artistInfo.value = info;
+          // track 分类下试探命中歌手时，把路由条从"歌曲搜索"提升为"歌手档案"，
+          // 否则顶部显示「♫ 歌曲搜索」却又出歌手卡，自相矛盾。
+          if (searchIntent.value?.kind === "track") {
+            searchIntent.value = { ...searchIntent.value, kind: "artist", label: "歌手档案", normalized_query: info.name };
+          }
+        }
+      }).catch(() => { /* artist detail is optional */ }).finally(() => {
+        if (seq === searchSeq.value) artistLoading.value = false;
+      });
+    }
+
+    const data = await localPromise;
     if (seq !== searchSeq.value) return;
-    searchMsg.value = "搜索失败，请稍后重试。";
+    // 在线结果可能已先到（externalLoading 那条路），合并时保住它，别被本地覆盖。
+    const alreadyExternal = searchResults.value?.external || [];
+    searchResults.value = {
+      local: data.local || [],
+      external: data.external?.length ? data.external : alreadyExternal,
+      summary: data.summary || searchResults.value?.summary || "",
+    };
+  } catch (error) {
+    if (seq !== searchSeq.value) return;
+    searchMsg.value = String(error?.message || "").endsWith("_timeout")
+      ? "搜索服务响应较慢，请稍后重试。"
+      : "搜索失败，请稍后重试。";
   } finally {
-    if (seq === searchSeq.value) loading.value = false;
+    if (seq === searchSeq.value) {
+      loading.value = false;
+      if (searchIntent.value?.kind !== "artist") artistLoading.value = false;
+    }
   }
+}
+
+function clearSearch() {
+  searchSeq.value += 1;
+  query.value = "";
+  externalLoading.value = false;
+  searchResults.value = null;
+  searchIntent.value = null;
+  searchMsg.value = "";
+  artistInfo.value = null;
+  artistLoading.value = false;
+  albumDetail.value = null;
+  loading.value = false;
 }
 
 // ── Play an album: 加载网易云专辑详情，按专辑原始曲序播放并展示曲目清单 ──
@@ -287,10 +386,10 @@ onMounted(() => {
 </script>
 
 <template>
-  <div>
+  <div class="discover-workbench">
     <!-- ── Header ── -->
     <div class="section-title">探索工作台</div>
-    <div class="section-sub">从歌手进入专辑、热门歌曲和视频线索；点击专辑会按原始曲序加载完整清单。</div>
+    <div class="section-sub">先识别你在找歌曲、歌手还是一种状态，再进入对应的探索路径。</div>
 
     <!-- ── Search Bar ── -->
     <div class="search-row">
@@ -303,6 +402,21 @@ onMounted(() => {
       <button class="btn" :disabled="loading || !query.trim()" @click="search">搜索</button>
     </div>
 
+    <div v-if="searchIntent" class="query-route" :class="`route-${searchIntent.kind}`">
+      <span class="route-glyph">{{ searchIntentIcon }}</span>
+      <div class="route-copy">
+        <span class="route-kicker">识别为</span>
+        <strong>{{ searchIntent.label }}</strong>
+        <small v-if="searchIntent.normalized_query">{{ searchIntent.normalized_query }}</small>
+      </div>
+      <div v-if="searchIntent.tags" class="route-tags">
+        <span v-for="tag in [...(searchIntent.tags.genre || []), ...(searchIntent.tags.mood || []), ...(searchIntent.tags.scenario || [])]" :key="tag">
+          {{ tag }}
+        </span>
+      </div>
+      <button class="route-close" title="清除搜索" @click="clearSearch">✕</button>
+    </div>
+
     <!-- ── Search Loading ── -->
     <div v-if="loading" class="loading-hint">
       <div class="loading-dots"><span></span><span></span><span></span></div>
@@ -311,7 +425,7 @@ onMounted(() => {
     <div v-if="searchMsg" class="empty-hint">{{ searchMsg }}</div>
 
     <!-- ── Artist Info Skeleton (loading) ── -->
-    <div v-if="artistLoading && !artistInfo" class="artist-card artist-skeleton">
+    <div v-if="searchIntent?.kind === 'artist' && artistLoading && !artistInfo" class="artist-card artist-skeleton">
       <div class="artist-header">
         <div class="skeleton-cover shimmer" style="width:88px;height:88px;border-radius:50%;flex-shrink:0"></div>
         <div class="skeleton-lines" style="flex:1">
@@ -434,17 +548,8 @@ onMounted(() => {
     <!-- ── Search Results ── -->
     <template v-if="searchResults">
       <div v-if="searchResults.summary" class="summary">{{ searchResults.summary }}</div>
-      <div v-if="searchResults.external?.length" class="group">
-        <div class="group-title">全网候选</div>
-        <button v-if="searchResults.external.length > 1" class="play-all-btn" @click="store.playAll(searchResults.external.map(toCard))">
-          ▶ 全部播放（{{ searchResults.external.length }}首）
-        </button>
-        <div v-for="(t, i) in searchResults.external" :key="'e'+i" class="stagger-item" :style="{ animationDelay: `${i * 50}ms` }">
-          <SongCard :card="toCard(t)" @toast="(m) => showToast(m)" />
-        </div>
-      </div>
       <div v-if="searchResults.local?.length" class="group">
-        <div class="group-title">本地库</div>
+        <div class="group-title"><span>我的曲库匹配</span><em>{{ searchResults.local.length }} local</em></div>
         <button v-if="searchResults.local.length > 1" class="play-all-btn" @click="store.playAll(searchResults.local.map(toCard))">
           ▶ 全部播放（{{ searchResults.local.length }}首）
         </button>
@@ -452,7 +557,24 @@ onMounted(() => {
           <SongCard :card="toCard(t)" @toast="(m) => showToast(m)" />
         </div>
       </div>
-      <div v-if="!searchResults.external?.length && !searchResults.local?.length && !artistInfo" class="empty-hint">
+      <div v-if="searchResults.external?.length" class="group">
+        <div class="group-title">
+          <span>{{ searchResultTitle }}</span>
+          <em>{{ searchResults.external.length }} tracks</em>
+        </div>
+        <button v-if="searchResults.external.length > 1" class="play-all-btn" @click="store.playAll(searchResults.external.map(toCard))">
+          ▶ 全部播放（{{ searchResults.external.length }}首）
+        </button>
+        <div v-for="(t, i) in searchResults.external" :key="'e'+i" class="stagger-item" :style="{ animationDelay: `${i * 50}ms` }">
+          <SongCard :card="toCard(t)" @toast="(m) => showToast(m)" />
+        </div>
+      </div>
+      <!-- 在线源后补：本地已铺出，在线仍在跑时显示进度，到了就替换成结果。 -->
+      <div v-if="externalLoading && !searchResults.external?.length" class="external-pending">
+        <div class="loading-dots"><span></span><span></span><span></span></div>
+        <span>在线来源搜索中，结果会自动补上…</span>
+      </div>
+      <div v-if="!externalLoading && !searchResults.external?.length && !searchResults.local?.length && !artistInfo" class="empty-hint">
         没找到可追溯的结果，换个说法试试。
       </div>
     </template>
@@ -623,10 +745,79 @@ onMounted(() => {
 
 <style scoped>
 /* ── Search ── */
-.search-row {
-  display: flex; gap: 10px; margin-bottom: 28px; max-width: 640px;
+.discover-workbench {
+  position: relative;
+  isolation: isolate;
 }
-.search-input { flex: 1; }
+.discover-workbench::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: -54px;
+  right: -8vw;
+  width: 420px;
+  height: 240px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(29,185,84,0.07), transparent 70%);
+  pointer-events: none;
+}
+.search-row {
+  display: flex; gap: 10px; margin-bottom: 14px; max-width: 760px;
+}
+.search-input {
+  flex: 1;
+  min-height: 48px;
+  font-size: 0.98rem;
+  background: linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.025));
+}
+.query-route {
+  --route-color: var(--accent);
+  display: grid;
+  grid-template-columns: 42px minmax(0, auto) minmax(0, 1fr) 32px;
+  align-items: center;
+  gap: 12px;
+  max-width: 760px;
+  margin: 0 0 24px;
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--route-color) 34%, var(--border));
+  border-radius: var(--radius);
+  background: linear-gradient(110deg, color-mix(in srgb, var(--route-color) 11%, var(--bg-card)), var(--bg-card) 58%);
+  animation: fadeInUp 0.32s var(--ease-out) both;
+}
+.query-route.route-artist { --route-color: #f2b84b; }
+.query-route.route-track { --route-color: #62a8ff; }
+.query-route.route-category { --route-color: #46d483; }
+.route-glyph {
+  width: 42px; height: 42px;
+  display: grid; place-items: center;
+  border-radius: 50%;
+  color: var(--route-color);
+  border: 1px solid color-mix(in srgb, var(--route-color) 45%, transparent);
+  background: color-mix(in srgb, var(--route-color) 12%, transparent);
+  font-size: 1.1rem; font-weight: 900;
+}
+.route-copy { display: flex; flex-direction: column; min-width: 116px; }
+.route-kicker {
+  color: var(--text-muted); font-size: 0.62rem; font-weight: 800;
+  letter-spacing: 0.12em; text-transform: uppercase;
+}
+.route-copy strong { color: var(--text); font-size: 0.9rem; }
+.route-copy small {
+  max-width: 220px; color: var(--text-sub); font-size: 0.72rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.route-tags { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.route-tags span {
+  padding: 4px 9px; border-radius: var(--radius-pill);
+  color: var(--route-color); background: color-mix(in srgb, var(--route-color) 10%, transparent);
+  font-size: 0.7rem; font-weight: 700;
+}
+.route-close {
+  width: 30px; height: 30px; border-radius: 50%;
+  color: var(--text-muted); background: transparent;
+  transition: all var(--transition);
+}
+.route-close:hover { color: var(--text); background: var(--bg-hover); }
 .summary {
   background: var(--bg-card); padding: 16px 18px;
   border-radius: var(--radius); margin-bottom: 20px;
@@ -634,10 +825,16 @@ onMounted(() => {
 }
 .group { margin-bottom: 28px; }
 .group-title {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
   font-family: var(--font-display);
   font-weight: 700; color: var(--text-sub);
   margin-bottom: 12px; font-size: 0.88rem;
   text-transform: uppercase; letter-spacing: 0.5px;
+}
+.group-title em {
+  color: var(--text-muted); font-family: var(--font-body);
+  font-size: 0.68rem; font-style: normal; font-weight: 600;
+  letter-spacing: 0.08em;
 }
 .loading-hint {
   display: flex; flex-direction: column; align-items: center;
@@ -651,6 +848,13 @@ onMounted(() => {
 }
 .loading-dots span:nth-child(2) { animation-delay: 0.16s; }
 .loading-dots span:nth-child(3) { animation-delay: 0.32s; }
+
+/* 在线源后补的内联提示：本地已铺出，在线还在跑 */
+.external-pending {
+  display: flex; align-items: center; gap: 12px;
+  color: var(--text-sub); font-size: 13px;
+  padding: 14px 4px; margin-top: 4px;
+}
 
 /* ── Artist Info Card ── */
 .artist-card {
@@ -1017,6 +1221,9 @@ onMounted(() => {
 
 /* ── Responsive ── */
 @media (max-width: 768px) {
+  .query-route { grid-template-columns: 38px minmax(0, 1fr) 30px; }
+  .route-glyph { width: 38px; height: 38px; }
+  .route-tags { grid-column: 1 / -1; justify-content: flex-start; padding-left: 50px; }
   .artist-header { flex-direction: column; align-items: center; text-align: center; }
   .artist-tags { justify-content: center; }
   .tag-grid { grid-template-columns: repeat(auto-fill, minmax(90px, 1fr)); gap: 8px; }

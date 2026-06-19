@@ -91,6 +91,23 @@ def test_bucketing_splits_by_familiarity_into_three_even_buckets(agent):
     assert safe_fam > bold_fam
 
 
+def test_bucketing_refuses_fake_labels_when_scores_are_indistinguishable(agent):
+    candidates = [
+        _cand(0.05, 0.05), _cand(0.04, 0.05), _cand(0.04, 0.04),
+        _cand(0.03, 0.04), _cand(0.03, 0.03), _cand(0.02, 0.03),
+    ]
+    buckets = agent._bucket_taste_experiment_candidates(candidates, per_bucket=2)
+    assert buckets["safe"] == []
+    assert buckets["bold"] == []
+    assert len(buckets["stretch"]) == 6
+
+
+def test_prompt_negative_constraints_become_hard_rules(agent):
+    rules = agent._taste_prompt_exclusions("推荐点不一样的，别太吵，不要 Type Beat")
+    assert "激昂" in rules
+    assert "type beat" in rules
+
+
 def test_taste_feedback_feeds_listening_history(agent):
     """实验反馈写进 listening_history（key=source_id），打通「反馈→行为锚→下一轮」闭环。
 

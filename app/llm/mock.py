@@ -83,8 +83,11 @@ class MockLLM:
             "provider": f"mock:{kind}",
         }
 
-    def generate(self, prompt: str, system: str | None = None, temperature: float = 0.7) -> str:
+    def generate(self, prompt: str, system: str | None = None, temperature: float = 0.7, thinking: bool | None = None) -> str:
         self._mark_call("generate")
+        return self._dispatch(prompt, system)
+
+    def _dispatch(self, prompt: str, system: str | None) -> str:
         # 同时检查 system，让意图分类器在 mock 下也能命中（system 含"意图"）
         haystack = f"{system or ''}\n{prompt}".lower()
         if "复合任务拆解器" in (system or ""):
@@ -105,7 +108,19 @@ class MockLLM:
             return self._intent(prompt)
         return self._chat(prompt)
 
-    def chat(self, messages: list[dict[str, Any]], temperature: float = 0.7) -> str:
+    def generate_stream(self, prompt: str, system: str | None = None, temperature: float = 0.7, thinking: bool | None = None) -> Any:
+        """Mock 流式：先算出整段，再按块 yield（mock 无真实网络，模拟首字即可）。
+
+        注意不走 generate()，避免重复 _mark_call；直接复用 _dispatch 同一份派发逻辑，
+        保证流式与非流式产出的文本一致。
+        """
+        self._mark_call("generate_stream")
+        text = self._dispatch(prompt, system)
+        step = max(1, len(text) // 8)
+        for i in range(0, len(text), step):
+            yield text[i:i + step]
+
+    def chat(self, messages: list[dict[str, Any]], temperature: float = 0.7, thinking: bool | None = None) -> str:
         self._mark_call("chat")
         last_user = next(
             (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
@@ -118,6 +133,7 @@ class MockLLM:
         tools: list[dict[str, Any]],
         temperature: float = 0.3,
         tool_choice: str = "auto",
+        thinking: bool | None = None,
     ) -> LLMResponse:
         self._mark_call("chat_with_tools")
         """Mock 实现：第一轮根据关键词选 1 个 tool 调用，第二轮收到工具结果后给最终答案。"""

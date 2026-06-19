@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 from app.agent import AudioVisualAgent
 from app.api.main import app
 from app.graph.nodes import build_agent_plan
-from app.models import DislikeRequest
+from app.models import AgentPlan, DislikeRequest, ExternalTrack
 from app.storage import JsonStore
 
 
@@ -52,7 +52,7 @@ def test_dislike_filters_online_recommendations(tmp_path):
     assert agent.memory.get_memory("u1").dislikes
 
 
-def test_journey_has_three_phases(tmp_path, monkeypatch):
+def test_journey_has_dynamic_day_arc_and_rotates_tracks(tmp_path, monkeypatch):
     from app.search import netease_playlist
 
     def fake_extract(query, max_playlists=3, tracks_per_playlist=12):
@@ -72,10 +72,16 @@ def test_journey_has_three_phases(tmp_path, monkeypatch):
 
     journey = agent.generate_music_journey("u1", "做一个清晨到深夜的音乐旅程")
 
-    assert len(journey["phases"]) == 3
-    assert [phase["name"] for phase in journey["phases"]] == ["清晨", "午后", "深夜"]
+    assert len(journey["phases"]) == 5
+    assert [phase["name"] for phase in journey["phases"]] == ["清晨", "上午", "午后", "傍晚", "深夜"]
     assert all(len(phase["tracks"]) == 4 for phase in journey["phases"])
-    assert len({t["external_id"] for p in journey["phases"] for t in p["tracks"]}) == 12
+    first_ids = {t["external_id"] for p in journey["phases"] for t in p["tracks"]}
+    assert len(first_ids) == 20
+    assert [phase["energy"] for phase in journey["phases"]] == [0.28, 0.46, 0.64, 0.76, 0.32]
+
+    second = agent.generate_music_journey("u1", "做一个清晨到深夜的音乐旅程")
+    second_ids = {t["external_id"] for p in second["phases"] for t in p["tracks"]}
+    assert first_ids.isdisjoint(second_ids)
 
 
 def test_journey_stream_emits_track_cards(monkeypatch):
@@ -118,6 +124,30 @@ def test_journey_stream_emits_track_cards(monkeypatch):
     assert '"journey_phase": "清晨"' in body
     assert '"final_cards": 3' in body
     assert '"tools": ["journey"]' in body
+
+
+def test_journey_final_cards_keep_all_phases_without_explicit_count():
+    from app.graph.nodes import _select_listed_tracks
+
+    phases = []
+    for phase_index, name in enumerate(["清晨", "上午", "午后", "傍晚", "深夜"]):
+        phases.append({
+            "name": name,
+            "tracks": [
+                ExternalTrack(
+                    external_id=f"{phase_index}-{track_index}",
+                    title=f"Track {phase_index}-{track_index}",
+                    artist="Artist",
+                    source="netease",
+                ).model_dump(mode="json")
+                for track_index in range(4)
+            ],
+        })
+    results = [{"type": "journey", "journey": {"phases": phases}}]
+
+    tracks = _select_listed_tracks(results, AgentPlan(intent="journey"))
+
+    assert len(tracks) == 20
 
 
 def test_stream_endpoint_emits_sse_events():

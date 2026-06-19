@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -33,9 +34,25 @@ class LLMResponse:
 
 
 class LLMProvider(Protocol):
-    def generate(self, prompt: str, system: str | None = None, temperature: float = 0.7) -> str: ...
+    def generate(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.7,
+        thinking: bool | None = None,
+    ) -> str: ...
 
-    def chat(self, messages: list[dict[str, Any]], temperature: float = 0.7) -> str:
+    def generate_stream(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.7,
+        thinking: bool | None = None,
+    ) -> Iterator[str]:
+        """单次补全的流式版本：逐块 yield content 增量，首 token 可在几百毫秒到达。"""
+        ...
+
+    def chat(self, messages: list[dict[str, Any]], temperature: float = 0.7, thinking: bool | None = None) -> str:
         """多轮对话接口，messages 格式为 OpenAI messages 列表。"""
         ...
 
@@ -45,6 +62,7 @@ class LLMProvider(Protocol):
         tools: list[dict[str, Any]],
         temperature: float = 0.3,
         tool_choice: str = "auto",
+        thinking: bool | None = None,
     ) -> LLMResponse:
         """带工具调用的多轮对话。LLM 可能返回工具调用或最终文本。
 

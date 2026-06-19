@@ -128,6 +128,18 @@ export const api = {
     jsonFetch("/discover/browse", { method: "POST", body: JSON.stringify({ user_id: userId, category, value, limit, seed }) }),
   discoverTrending: (userId, limit = 12) =>
     jsonFetch("/discover/trending", { method: "POST", body: JSON.stringify({ user_id: userId, limit }) }),
+  discoverClassify: (query) =>
+    jsonFetch("/discover/classify", { method: "POST", body: JSON.stringify({ query }) }),
+  discoverSearch: (userId, query, topK = 12) =>
+    jsonFetch("/discover/search", {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId, query, include_external: false, top_k: topK }),
+    }),
+  discoverSearchExternal: (userId, query, topK = 12) =>
+    jsonFetch("/discover/search", {
+      method: "POST",
+      body: JSON.stringify({ user_id: userId, query, external_only: true, top_k: topK }),
+    }),
   artistInfo: (artist) =>
     jsonFetch("/artist/info", { method: "POST", body: JSON.stringify({ artist }) }),
   artistAlbumTracks: (artist, album, albumId, limit = 100) =>

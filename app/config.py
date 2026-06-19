@@ -5,7 +5,29 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+
+
+def _absolute_path(raw: str) -> Path:
+    path = Path(raw).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def _default_store_root() -> Path:
+    """Pick the populated legacy store once, independently of process cwd.
+
+    Older releases interpreted ``data/store`` relative to the launch directory,
+    so starting uvicorn from ``frontend/`` created a second store.  We do not
+    move or merge user data automatically: among the two known locations, keep
+    using the one containing the most assets.  An explicit STORE_ROOT always
+    wins.
+    """
+    candidates = [PROJECT_ROOT / "data/store", PROJECT_ROOT / "frontend/data/store"]
+    return max(
+        candidates,
+        key=lambda path: len(list((path / "assets").glob("*.json"))) if (path / "assets").exists() else 0,
+    )
 
 
 class Settings:
@@ -16,9 +38,20 @@ class Settings:
         self.llm_fast_model: str = os.getenv("LLM_FAST_MODEL", self.llm_model)
         self.llm_strong_model: str = os.getenv("LLM_STRONG_MODEL", self.llm_model)
         self.llm_timeout_seconds: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
+        # 连接超时（建连阶段）：连接类卡死应快速失败，别等满 llm_timeout_seconds。
+        self.llm_connect_timeout: float = float(os.getenv("LLM_CONNECT_TIMEOUT", "8"))
+        # LLM 网络瞬时错误（连接重置 / 5xx / 429）的重试次数。超时与 4xx 不重试——
+        # 超时多半是慢生成，重试只会加倍等待；4xx（鉴权/格式）重试无意义。
+        self.llm_max_retries: int = int(os.getenv("LLM_MAX_RETRIES", "1"))
         # 推理模型（deepseek-v4-flash 等）会先消耗 token 做推理，再产出 content。
         # 1024 容易被推理吃光导致 content 为空，故默认提到 2048。
         self.llm_max_tokens: int = int(os.getenv("LLM_MAX_TOKENS", "2048"))
+        # DeepSeek-V4 思考模式开关。服务端默认 enabled（每次先吐 reasoning_content，用户看不到却要等）。
+        # 对结构化/闲聊小任务推理无收益：默认 false 关掉，单次调用快约 35%、输出 token 少约 3 倍。
+        # 真正需要推理的调用可按 thinking=True 显式开启；设 true 则全局恢复思考。
+        self.llm_thinking: bool = os.getenv("LLM_THINKING", "false").lower() == "true"
+        # 思考开启时的强度（DeepSeek-V4：low/medium→high，xhigh→max）。仅 thinking=true 时生效。
+        self.llm_reasoning_effort: str = os.getenv("LLM_REASONING_EFFORT", "")
         self.llm_input_price_per_1m_tokens: float = float(os.getenv("LLM_INPUT_PRICE_PER_1M_TOKENS", "0"))
         self.llm_output_price_per_1m_tokens: float = float(os.getenv("LLM_OUTPUT_PRICE_PER_1M_TOKENS", "0"))
         # 温度三档：结构化任务要稳定、对话要自然、生成文案要有变化。
@@ -28,9 +61,18 @@ class Settings:
         self.external_source: str = os.getenv("EXTERNAL_SOURCE", "netease")
         self.lastfm_api_key: str = os.getenv("LASTFM_API_KEY", "")
         self.tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
-        self.store_root: str = os.getenv("STORE_ROOT", "data/store")
-        self.media_root: str = os.getenv("MEDIA_ROOT", "data/media")
-        self.resource_library_path: str = os.getenv("RESOURCE_LIBRARY_PATH", "data/resource_library.sqlite")
+        store_env = os.getenv("STORE_ROOT", "").strip()
+        store_root = _absolute_path(store_env) if store_env else _default_store_root()
+        self.store_candidates: dict[str, int] = {
+            str(path.resolve()): len(list((path / "assets").glob("*.json")))
+            if (path / "assets").exists() else 0
+            for path in (PROJECT_ROOT / "data/store", PROJECT_ROOT / "frontend/data/store")
+        }
+        data_root = store_root.parent
+        self.store_root: str = str(store_root.resolve())
+        self.media_root: str = str(_absolute_path(os.getenv("MEDIA_ROOT", "").strip()).resolve()) if os.getenv("MEDIA_ROOT", "").strip() else str((data_root / "media").resolve())
+        resource_env = os.getenv("RESOURCE_LIBRARY_PATH", "").strip()
+        self.resource_library_path: str = str(_absolute_path(resource_env).resolve()) if resource_env else str((data_root / "resource_library.sqlite").resolve())
         self.allowed_origins: list[str] = _csv_env("ALLOWED_ORIGINS", "*")
         self.daily_rec_count: int = int(os.getenv("DAILY_REC_COUNT", "25"))
         self.enable_online_enrich: bool = os.getenv("ENABLE_ONLINE_ENRICH", "false").lower() == "true"
@@ -59,6 +101,10 @@ class Settings:
         # Deep/Agentic 模式：复合多步任务走真迭代 ReAct（一级分支，非降级兜底）。
         # 仅真实 LLM（非 mock）下生效；mock 模式仍走图，保持测试/demo 稳定。
         self.enable_deep_mode: bool = os.getenv("ENABLE_DEEP_MODE", "true").lower() == "true"
+        # reflect 候选补量回环：reflect 剔除违规候选后若不足，回 execute_tools+reflect 再补一轮。
+        # 默认关闭——这会引入第 4/5 次串行往返（含联网搜索）。reflect 本身仍跑（thinking-off 后很快），
+        # 不足时由 _compose_intro 如实说明 shortfall，不阻塞主流程。
+        self.enable_reflect_refine: bool = os.getenv("ENABLE_REFLECT_REFINE", "false").lower() == "true"
         # P1-G 记忆升级：语义召回 + LLM 偏好抽取兜底 + 巩固画像。
         # 仅真实 LLM 下做 LLM 抽取/巩固；语义召回随 embeddings 开关自动降级。
         self.enable_semantic_memory: bool = os.getenv("ENABLE_SEMANTIC_MEMORY", "true").lower() == "true"

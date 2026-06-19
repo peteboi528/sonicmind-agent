@@ -252,6 +252,12 @@ async function send(text) {
           botMsg.albums.push(normalizeAlbumCard(event.payload));
           if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
           scrollDown();
+        } else if (event.type === "token") {
+          // 真流式：答案正文边生成边追加。首 token 清掉「思考中」，并把气泡入列（chat 等无候选卡片的意图靠这里首次出现）。
+          if (thinking.value) thinking.value = "";
+          botMsg.text += event.content || "";
+          if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
+          scrollDown();
         } else if (event.type === "final") {
           finalText = event.content || "";
           const finalCards = event.payload?.cards;
@@ -267,7 +273,8 @@ async function send(text) {
       },
     }, abortController.signal);
     thinking.value = "";
-    botMsg.text = finalText;
+    // final 事件是权威文本（可能经 guard_answer 清理过幻觉歌名），覆盖流式预览。
+    botMsg.text = finalText || botMsg.text;
     if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
     history.push({ role: "assistant", content: finalText });
   } catch (err) {

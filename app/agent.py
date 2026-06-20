@@ -2759,6 +2759,20 @@ class AudioVisualAgent:
                     if not any(_track_key(track) == _track_key(v) for v in verified):
                         verified.append(track)
 
+        # 候选池兜底：网易云限流时所有在线路由同时空，但 SQLite 已攒了大量已验证真歌。
+        # 与其返回空，不如从候选池语义/词法召回补位——这些是历史搜到、验证过的真实曲目，
+        # 可播放、不是幻觉。限流是间歇的，今天搜不到的昨天可能已入池。
+        # 复用 _dense_library_fallback：它做 semantic→lexical 召回 + 转 ExternalTrack +
+        # 按 existing 去重，类型与下游 rerank 兼容。
+        if len(verified) < top_k:
+            pool_hits = self._dense_library_fallback(
+                search_goal or goal, verified, limit=max(top_k * 2, top_k),
+            )
+            pool_hits = [t for t in pool_hits if not self.library.is_disliked(user_id, t)]
+            if pool_hits:
+                trace_lines.append(f"route=resource_pool, recalled={len(pool_hits)}")
+                verified.extend(pool_hits)
+
         if verified:
             # 跨轮优先使用未展示过的歌；不足时才把旧歌放回尾部，避免越刷越空。
             recent = set(memory.recommendation_history[-120:])

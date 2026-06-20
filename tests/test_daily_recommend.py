@@ -54,6 +54,35 @@ def test_recommendation_uses_local_library_and_avoids_recent_round(tmp_path, mon
     assert all(item.asset.source == "local" for item in first.tracks + second.tracks)
 
 
+def test_rate_limited_recommend_falls_back_to_resource_pool(tmp_path, monkeypatch):
+    """网易云限流（所有在线路由空）时，从 SQLite 已验证候选池召回，而非返回空。"""
+    from app.models import ExternalTrack
+    from app.search import lastfm_discovery, netease_playlist, web_music_discovery
+
+    store = JsonStore(tmp_path / "store")
+    agent = AudioVisualAgent(store)
+
+    # 候选池里预先攒了真实已验证的 netease 歌（模拟历史搜索成果）。
+    for i in range(6):
+        agent.library.upsert_external(ExternalTrack(
+            external_id=f"pool-{i}", title=f"Night Song {i}", artist="Real Artist",
+            source="netease", genre=["R&B"], mood=["放松", "深夜"],
+            playback_url=f"https://music.163.com/song?id=pool-{i}",
+        ))
+
+    # 模拟限流：所有在线路由全空。
+    monkeypatch.setattr(netease_playlist, "search_and_extract", lambda *a, **k: [])
+    monkeypatch.setattr(web_music_discovery, "discover_from_llm", lambda *a, **k: [])
+    monkeypatch.setattr(lastfm_discovery, "discover_from_lastfm", lambda *a, **k: [])
+    monkeypatch.setattr(agent, "search_web_music", lambda *a, **k: [])
+
+    rec = agent.recommend_for_query("u-pool", "深夜 R&B 放松", top_k=3)
+
+    # 限流前：返回空。限流后（本修复）：从候选池捞到真实歌。
+    assert rec.tracks, "候选池兜底应在限流时仍给出真实候选，而非空结果"
+    assert any("resource_pool" in line for line in rec.agent_trace)
+
+
 def test_source_balance_caps_local_when_online_supply_exists(tmp_path):
     agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
     ranked = []

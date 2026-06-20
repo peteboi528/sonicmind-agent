@@ -134,14 +134,57 @@ class MemoryManager:
             self.store.write_model("memory", user_id, memory)
             return memory
 
+    # 一次性/局部约束标记：带这些词的否定是"这一轮"的临时要求，或句内的生成约束，
+    # 不应升级成长期排除规则。"这轮/这次/上一批/今天" = 临时；"但/不过/尤其" 前缀的
+    # 否定 = 句内修饰（如"有铜管但鼓不要太炸"里的"太炸"）。
+    _EPHEMERAL_CONSTRAINT_MARKERS = (
+        "这轮", "这次", "本轮", "本次", "这批", "上一批", "上一首", "这一批",
+        "今天", "今晚", "现在", "暂时", "临时", "刚才那批",
+    )
+
     @staticmethod
     def _extract_negative_preference(query: str) -> str | None:
-        """从用户输入中提取负面偏好（如"不要抖音热歌"→"抖音热歌"）。"""
+        """从用户输入中提取**长期**负面偏好（如"不要抖音热歌"→"抖音热歌"）。
+
+        只在否定是本句**主要意图**且**非一次性**时才作为长期排除：
+        - 含一次性标记（这轮/上一批/今天…）→ 跳过，临时约束不入长期记忆。
+        - 否定出现在句中、前面还有别的内容（如"有铜管但鼓不要太炸"）→ 是句内生成
+          约束，不是"请永久别给我X"，跳过。
+        - 纠正类（不喜欢X了/改掉）由 _detect_preference_correction 单独处理，这里不抓。
+        """
+        if any(marker in query for marker in MemoryManager._EPHEMERAL_CONSTRAINT_MARKERS):
+            return None
         for pat in NEGATIVE_PREFERENCE_PATTERNS:
             m = pat.search(query)
             if m:
+                # 否定词不在句首附近（前面还有 >8 字的实质内容）→ 句内修饰，非主意图。
+                if m.start() > 8:
+                    continue
                 text = m.group(1).strip().rstrip("的了着过")
+                # 纠正类后缀（X了/改掉/取消）交给纠正处理，不当排除抓。
+                if text.endswith(("改掉", "取消", "删掉", "去掉")):
+                    continue
                 if text and 2 <= len(text) <= 20:
+                    return text
+        return None
+
+    # 纠正指令：用户撤回/反转之前的偏好（"不喜欢X了""不再喜欢X""把X那条改掉/删掉"）。
+    # 与普通否定区分：纠正要"删除冲突的正偏好"，而非新增一条排除。
+    _CORRECTION_PATTERNS = [
+        re.compile(r"(?:现在|其实)?不(?:再)?(?:喜欢|想听|爱听)\s*(.+?)\s*了"),
+        re.compile(r"(?:之前|那条|刚才)?(.+?)(?:那条|这条)?(?:偏好)?(?:请)?(?:改掉|删掉|去掉|取消|删除)"),
+        re.compile(r"(?:别|不要)再(?:把我|给我)?(?:当成|当作|认为).*(?:喜欢)\s*(.+)"),
+    ]
+
+    @staticmethod
+    def _detect_preference_correction(query: str) -> str | None:
+        """检测纠正指令，返回被撤回的偏好关键词（如"不喜欢 city pop 了"→"city pop"）。"""
+        for pat in MemoryManager._CORRECTION_PATTERNS:
+            m = pat.search(query)
+            if m:
+                text = m.group(1).strip().strip("，,。.的了").strip()
+                # 过滤掉抓到代词/空壳的情况。
+                if text and 2 <= len(text) <= 30 and text not in {"这个", "那个", "它", "他", "她"}:
                     return text
         return None
 
@@ -292,11 +335,23 @@ class MemoryManager:
     ) -> bool:
         """Conservatively learn from an agent turn without requiring an explicit memory tool call."""
         explicit = extract_preference(query)
-        llm_preferences = [] if explicit else await self._llm_extract_preferences_async(query)
+        correction = self._detect_preference_correction(query)
+        # 纠正语句（"不喜欢X了/改掉"）不当作正偏好抽取，否则会把被撤回的 X 又记成喜欢。
+        if correction:
+            explicit = None
+        llm_preferences = [] if (explicit or correction) else await self._llm_extract_preferences_async(query)
         consolidation_memory: UserMemory | None = None
         with self.store.lock("memory", user_id):
             memory = self.get_memory(user_id)
             changed = False
+
+            # 纠正指令：删除冲突的正偏好 + 落一条排除规则，而不是"喜欢"和"不喜欢"并存。
+            if correction:
+                if self._remove_preference(memory, correction):
+                    changed = True
+                if correction not in memory.exclusion_rules:
+                    memory.exclusion_rules.append(correction)
+                    changed = True
 
             if explicit:
                 if self._upsert_entry(memory, explicit, "auto_explicit"):
@@ -559,6 +614,24 @@ class MemoryManager:
         )
         return True
 
+    @staticmethod
+    def _remove_preference(memory: UserMemory, needle: str) -> bool:
+        """删除与 needle 冲突的正偏好（结构化 + 旧版 preferences 列表）。
+
+        子串匹配（大小写不敏感）：用户说"不喜欢 city pop 了"，要清掉
+        "city pop，不过工作时少一点人声"这类含该关键词的正偏好条目。返回是否有删除。
+        """
+        key = needle.lower().strip()
+        if not key:
+            return False
+        before_struct = len(memory.structured_preferences)
+        memory.structured_preferences = [
+            e for e in memory.structured_preferences if key not in e.text.lower()
+        ]
+        before_legacy = len(memory.preferences)
+        memory.preferences = [p for p in memory.preferences if key not in p.lower()]
+        return (len(memory.structured_preferences) < before_struct) or (len(memory.preferences) < before_legacy)
+
     def _migrate_preferences(self, memory: UserMemory) -> None:
         if memory.preferences and not memory.structured_preferences:
             for pref in memory.preferences:
@@ -617,16 +690,20 @@ def _extract_entities_from_results(results: list[dict[str, Any]]) -> list[str]:
 
     如果某个歌手在结果中出现了 2 次以上，说明用户正在关注这个歌手。
     这比等用户说"我喜欢XXX"更主动。
+
+    关键：只从**用户主动发起**的检索（search/playlist）抽兴趣信号，**不从
+    daily_recommend 抽**——推荐是系统push给用户看的，"被展示过"不等于"喜欢"，
+    把展示歌手写成长期正偏好会污染口味画像（realistic eval Turn 4）。
     """
     artist_counts: dict[str, int] = {}
-    for track in _iter_verified_tracks(results):
+    for track in _iter_verified_tracks(results, include_recommend=False):
         artist = (getattr(track, "artist", "") or "").strip()
         if artist and 2 <= len(artist) <= 30:
             artist_counts[artist] = artist_counts.get(artist, 0) + 1
     return [artist for artist, count in artist_counts.items() if count >= 2][:5]
 
 
-def _iter_verified_tracks(results: list[dict[str, Any]]) -> list[Any]:
+def _iter_verified_tracks(results: list[dict[str, Any]], *, include_recommend: bool = True) -> list[Any]:
     tracks: list[Any] = []
     for result in results:
         result_type = result.get("type")
@@ -636,6 +713,8 @@ def _iter_verified_tracks(results: list[dict[str, Any]]) -> list[Any]:
                 if source in {"netease", "bilibili", "youtube"}:
                     tracks.append(track)
         elif result_type == "daily_recommend":
+            if not include_recommend:
+                continue  # 兴趣信号抽取跳过推荐结果（展示≠喜欢）
             tracks.extend(item.asset for item in result["recommendation"].tracks[:5])
         elif result_type == "playlist":
             for track in result["playlist"].tracks[:8]:

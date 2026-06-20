@@ -88,7 +88,13 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     sources = [
         ContextSource(name="user_query", content=state["query"], priority=0, min_tokens=200),
         ContextSource(name="memory", content=enriched_memory, priority=1, min_tokens=80),
-        ContextSource(name="history", content=history_text, priority=2, min_tokens=40),
+        ContextSource(
+            name="history",
+            content=history_text,
+            priority=2,
+            min_tokens=40,
+            preserve_tail=True,
+        ),
     ]
     budgeted, report = ContextBudgetManager(total_budget=2000).allocate(sources)
 
@@ -180,8 +186,11 @@ def _finish_plan_intent(
 _GENERIC_ENTITY_WORDS = {
     "随便", "好听", "歌曲", "音乐", "推荐", "来点", "来几首", "一些",
     "深夜", "放松", "专注", "学习", "工作", "跑步", "睡前", "chill",
+    # 延续/反重复指令词不是音乐实体（mock 或 LLM 偶把"再来"抽成 entity）。
+    "再来", "再来几首", "再来点", "再来些", "换一批", "换几首", "多来", "多来几首",
+    "继续", "更多", "还要", "还想", "再推", "再给",
 }
-_ENTITY_REQUEST_SIGNALS = ("来点", "来些", "推荐", "适合", "搜索", "搜一下", "找点", "歌曲", "音乐")
+_ENTITY_REQUEST_SIGNALS = ("来点", "来些", "推荐", "适合", "搜索", "搜一下", "找点", "歌曲", "音乐", "再来", "换一批", "多来")
 
 
 def _sanitize_retrieval_entities(plan: AgentPlan) -> AgentPlan:

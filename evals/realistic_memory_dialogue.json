@@ -1,0 +1,93 @@
+{
+  "name": "三天音乐伴侣：长期偏好、临时约束与纠正",
+  "user_id": "realistic-memory-user",
+  "description": "模拟同一用户跨三个会话使用 Agent。每个新 session 都清空客户端 history，但保留服务端长期记忆。",
+  "turns": [
+    {
+      "session": "day1_onboarding",
+      "message": "我平时喜欢 R&B，尤其是深夜有空间感、低饱和的那种。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["R&B"], "episode_contains": ["空间感"]}
+    },
+    {
+      "session": "day1_onboarding",
+      "message": "我也喜欢 city pop，不过工作时最好少一点人声。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["city pop"]}
+    },
+    {
+      "session": "day1_onboarding",
+      "message": "别再给我推抖音神曲。",
+      "expect": {"answer_non_empty": true, "exclusion_contains": ["抖音神曲"]}
+    },
+    {
+      "session": "day1_onboarding",
+      "message": "现在要写两个小时代码，来点专注但别太催眠的。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "trace_contains": ["[recommend]"], "positive_not_contains": ["Demo Artist", "Demo Runner"]},
+      "rationale": "仅仅被系统展示过的歌手不等于用户喜欢，不应自动写成长期正偏好。"
+    },
+    {
+      "session": "day1_onboarding",
+      "message": "再来几首，不要上一批。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "shown_tracks_min": 2, "exclusion_not_contains": ["上一批"]}
+    },
+    {
+      "session": "day1_onboarding",
+      "message": "这轮不要中文歌，英文或日文都行。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_not_contains": ["中文歌"]},
+      "rationale": "“这轮”是一次性约束，不应升级成长期排除规则。"
+    },
+    {
+      "session": "day2_return",
+      "message": "分析一下你记得的我的口味。",
+      "expect": {"answer_non_empty": true, "trace_contains": ["[taste]"], "positive_contains": ["R&B", "city pop"], "exclusion_contains": ["抖音神曲"]}
+    },
+    {
+      "session": "day2_return",
+      "message": "最近我开始喜欢慵懒爵士，尤其是有铜管但鼓不要太炸。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["慵懒爵士"], "exclusion_not_contains": ["太炸"]},
+      "rationale": "句内的局部生成约束不应被粗粒度正则截成长期排除。"
+    },
+    {
+      "session": "day2_return",
+      "message": "其实我现在不喜欢 city pop 了，之前那条偏好请改掉。",
+      "expect": {"answer_non_empty": true, "positive_not_contains": ["city pop"], "exclusion_contains": ["city pop"]},
+      "rationale": "用户纠正应替换冲突记忆，而不是同时保留“喜欢”和“不喜欢”。"
+    },
+    {
+      "session": "day2_return",
+      "message": "那按我现在的口味，给今晚回家路上来几首。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "trace_contains": ["记忆检索种子"]}
+    },
+    {
+      "session": "day2_return",
+      "message": "顺便介绍一下 NewJeans 的背景。",
+      "expect": {"answer_non_empty": true, "trace_contains": ["[web_info_search]"]}
+    },
+    {
+      "session": "day2_return",
+      "message": "回到刚才通勤那批，再换几首。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1},
+      "rationale": "测试话题插入后的恢复，而不只是紧邻上一轮的 continuation。"
+    },
+    {
+      "session": "day2_return",
+      "message": "找 The Weeknd 的歌。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "dialogue_entities_contains": ["The Weeknd"]}
+    },
+    {
+      "session": "day3_fresh_session",
+      "message": "再来几首。",
+      "expect": {"answer_non_empty": true, "dialogue_entities_not_contains": ["The Weeknd", "再来"]},
+      "rationale": "新会话没有客户端历史时，不应无限继承上一次会话的短期实体，也不应把“再来”误抽成音乐实体。"
+    },
+    {
+      "session": "day3_fresh_session",
+      "message": "我今晚跑步，临时想听高能量电子，但还是不要抖音神曲。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_contains": ["抖音神曲"]}
+    },
+    {
+      "session": "day3_fresh_session",
+      "message": "跑完了。回到平时的深夜氛围，别太吵。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "positive_contains": ["R&B", "慵懒爵士"]}
+    }
+  ]
+}

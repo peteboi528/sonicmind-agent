@@ -223,6 +223,30 @@ class TestSearchNeteasePlaylists:
 
         assert search_netease_playlists("不存在的歌单") == []
 
+    @patch("app.search.netease_playlist.time.sleep", lambda *_a, **_k: None)
+    @patch("app.search.netease_playlist.requests.get")
+    def test_rate_limit_429_is_retried_then_succeeds(self, mock_get):
+        """429 限流应重试，而非被吞成空——重试后拿到结果即返回。"""
+        throttled = MagicMock(status_code=429)
+        ok = MagicMock(status_code=200)
+        ok.json.return_value = {"result": {"playlists": [{"id": 9, "name": "ok", "trackCount": 3}]}}
+        mock_get.side_effect = [throttled, ok]
+        from app.search.netease_playlist import search_netease_playlists
+
+        result = search_netease_playlists("限流后重试")
+        assert mock_get.call_count == 2  # 第一次 429 触发重试
+        assert len(result) == 1 and result[0]["id"] == 9
+
+    @patch("app.search.netease_playlist.time.sleep", lambda *_a, **_k: None)
+    @patch("app.search.netease_playlist.requests.get")
+    def test_persistent_429_returns_empty_after_retries(self, mock_get):
+        """持续 429：重试用尽后返回空（不伪造），且 call_count 证明确实重试过。"""
+        mock_get.return_value = MagicMock(status_code=429)
+        from app.search.netease_playlist import search_netease_playlists
+
+        assert search_netease_playlists("一直限流") == []
+        assert mock_get.call_count >= 2  # 至少重试一次,而非单发即弃
+
 
 class TestGetPlaylistTracks:
     """get_playlist_tracks: 从歌单提取歌曲。"""

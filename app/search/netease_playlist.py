@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,24 +21,43 @@ _NETEASE_SEARCH_URL = "https://music.163.com/api/search/get/web"
 _NETEASE_PLAYLIST_URL = "https://music.163.com/api/v6/playlist/detail"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
+# 限流/网络抖动重试。429/5xx/超时是可重试的（与 http_transport 异步路径一致），
+# 而 HTTP 200 的合法空结果不重试。退避避免连打加重限流。
+_RETRIES = 1
+_BACKOFF = 0.3
+_TIMEOUT = 10
+
+
+def _get_with_retry(url: str, params: dict[str, Any], desc: str) -> dict[str, Any] | None:
+    """GET + 重试。返回解析后的 JSON dict；网络/限流失败重试后仍败返回 None。
+
+    与旧实现的关键区别：429/5xx/超时不再被静默吞成空——它们会重试，且最终失败时
+    升到 WARNING 让限流可见（旧代码全 debug，限流和"真没结果"无法区分）。
+    """
+    attempts = _RETRIES + 1
+    for attempt in range(attempts):
+        try:
+            resp = requests.get(url, params=params, headers=_HEADERS, timeout=_TIMEOUT)
+            status = getattr(resp, "status_code", 200)
+            if status == 429 or status >= 500:
+                # 限流/服务端错误：可重试。
+                raise requests.RequestException(f"retryable status {status}")
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, dict) else None
+        except Exception:
+            if attempt + 1 < attempts:
+                time.sleep(_BACKOFF * (attempt + 1))
+                continue
+            logger.warning("Netease %s 失败（疑似限流），重试 %d 次后放弃：%r", desc, _RETRIES, params, exc_info=True)
+            return None
+    return None
+
 
 def search_netease_playlists(query: str, limit: int = 5) -> list[dict[str, Any]]:
     """搜索网易云歌单，返回 [{id, name, track_count}, ...]。"""
-    try:
-        resp = requests.get(
-            _NETEASE_SEARCH_URL,
-            params={"s": query, "type": 1000, "limit": limit},
-            headers=_HEADERS,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        logger.debug("Netease playlist search failed for %r", query, exc_info=True)
-        return []
-
+    data = _get_with_retry(_NETEASE_SEARCH_URL, {"s": query, "type": 1000, "limit": limit}, "playlist search")
     if not isinstance(data, dict):
-        logger.debug("Netease playlist search returned non-dict payload for %r: %r", query, type(data).__name__)
         return []
     result = data.get("result")
     if not isinstance(result, dict):
@@ -62,21 +82,8 @@ def search_netease_playlists(query: str, limit: int = 5) -> list[dict[str, Any]]
 
 def get_playlist_detail(playlist_id: int, limit: int = 30) -> dict[str, Any] | None:
     """获取歌单元数据与曲目，供榜单调用方校验名称和更新时间。"""
-    try:
-        resp = requests.get(
-            _NETEASE_PLAYLIST_URL,
-            params={"id": playlist_id, "n": limit},
-            headers=_HEADERS,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        logger.debug("Netease playlist detail failed for id=%s", playlist_id, exc_info=True)
-        return None
-
+    data = _get_with_retry(_NETEASE_PLAYLIST_URL, {"id": playlist_id, "n": limit}, "playlist detail")
     if not isinstance(data, dict):
-        logger.debug("Netease playlist detail returned non-dict payload for id=%s: %r", playlist_id, type(data).__name__)
         return None
     playlist = data.get("playlist")
     if not isinstance(playlist, dict):

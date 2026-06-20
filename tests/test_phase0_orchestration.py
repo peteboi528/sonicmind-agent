@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import time
+import asyncio
 
 import pytest
 
 from app.agent import AudioVisualAgent
-from app.config import settings
 from app.graph import nodes
 from app.graph.tag_rules import extract_genre, extract_mood, extract_scenario, extract_tags
 from app.models import AgentPlan
@@ -17,6 +16,10 @@ from app.storage import JsonStore
 @pytest.fixture
 def agent(tmp_path):
     return AudioVisualAgent(JsonStore(tmp_path / "store"))
+
+
+def _run(coro):
+    return asyncio.run(coro)
 
 
 # ---- 确定性标签规则 ----
@@ -43,7 +46,7 @@ def test_extract_tags_bundles_three_dimensions():
 # ---- LLM 结构化意图（MockLLM 走 query_plan 路径）----
 
 def test_plan_with_llm_recommend(agent):
-    plan = nodes.plan_with_llm(agent, "推荐几首适合跑步的歌")
+    plan = _run(nodes.plan_with_llm_async(agent, "推荐几首适合跑步的歌"))
     assert plan is not None
     assert plan.intent == "recommend"
     assert plan.online_required is True
@@ -53,14 +56,14 @@ def test_plan_with_llm_recommend(agent):
 
 
 def test_plan_with_llm_adds_typo_search_variant(agent):
-    plan = nodes.plan_with_llm(agent, "推荐几首 Emenem 的歌")
+    plan = _run(nodes.plan_with_llm_async(agent, "推荐几首 Emenem 的歌"))
     assert plan is not None
     assert plan.intent == "recommend"
     assert "Eminem" in plan.retrieval_plan.search_variants
 
 
 def test_plan_with_llm_taste_is_memory_only(agent):
-    plan = nodes.plan_with_llm(agent, "分析我的音乐品味")
+    plan = _run(nodes.plan_with_llm_async(agent, "分析我的音乐品味"))
     assert plan is not None
     assert plan.intent == "taste"
     assert plan.strategy == "memory_only"
@@ -82,7 +85,7 @@ def test_chat_skips_semantic_recall(agent, monkeypatch):
         "history": [],
         "top_k": 3,
     })
-    out = nodes.plan_intent(agent, state)
+    out = _run(nodes.plan_intent_async(agent, state))
 
     assert out["plan"].intent == "chat"
     assert calls["n"] == 0
@@ -100,14 +103,14 @@ def test_non_chat_attaches_deferred_semantic_recall(agent, monkeypatch):
     })
     assert not any("语义召回" in line for line in state["trace"])
 
-    out = nodes.plan_intent(agent, state)
+    out = _run(nodes.plan_intent_async(agent, state))
 
     assert "三周前偏好：慵懒爵士" in out["context"]["memory_query"]
     assert any("语义召回 1 条" in line for line in out["trace"])
 
 
 def test_plan_with_llm_playlist_target_count(agent):
-    plan = nodes.plan_with_llm(agent, "帮我做 20 首 chill 歌单")
+    plan = _run(nodes.plan_with_llm_async(agent, "帮我做 20 首 chill 歌单"))
     assert plan is not None
     assert plan.intent == "playlist"
     assert plan.target_count == 20
@@ -115,7 +118,10 @@ def test_plan_with_llm_playlist_target_count(agent):
 
 def test_explicit_journey_keyword_overrides_llm_recommend_misclassification(agent, monkeypatch):
     wrong = AgentPlan(intent="recommend", tools_needed=["daily_recommend"])
-    monkeypatch.setattr(nodes, "plan_with_llm_with_meta", lambda *_args, **_kwargs: (wrong, {}, {}))
+    async def wrong_plan(*_args, **_kwargs):
+        return wrong, {}, {}
+
+    monkeypatch.setattr(nodes, "plan_with_llm_with_meta_async", wrong_plan)
     state = nodes.load_context(agent, {
         "user_id": "u-journey-override",
         "asset_id": None,
@@ -124,7 +130,7 @@ def test_explicit_journey_keyword_overrides_llm_recommend_misclassification(agen
         "top_k": 3,
     })
 
-    out = nodes.plan_intent(agent, state)
+    out = _run(nodes.plan_intent_async(agent, state))
 
     assert out["plan"].intent == "journey"
     assert out["plan"].tools_needed == ["journey"]
@@ -132,7 +138,7 @@ def test_explicit_journey_keyword_overrides_llm_recommend_misclassification(agen
 
 def test_mock_plan_uses_current_turn_not_journey_history(agent):
     history = "user: 做一个清晨到深夜的音乐旅程，热身到冲刺再放松\nassistant: 已生成音乐旅程"
-    plan = nodes.plan_with_llm(agent, "分析我的音乐品味", history_text=history)
+    plan = _run(nodes.plan_with_llm_async(agent, "分析我的音乐品味", history_text=history))
     assert plan is not None
     assert plan.intent == "taste"
     assert plan.strategy == "memory_only"
@@ -147,7 +153,7 @@ def test_mock_plan_uses_current_turn_not_journey_history(agent):
     ("帮我导入这个网易云歌单 playlist?id=123456", "import", "import"),
 ])
 def test_mock_plan_routes_new_intents(agent, query, expected_intent, expected_tool):
-    plan = nodes.plan_with_llm(agent, query)
+    plan = _run(nodes.plan_with_llm_async(agent, query))
     assert plan is not None
     assert plan.intent == expected_intent
     assert expected_tool in plan.tools_needed
@@ -161,33 +167,36 @@ def test_keyword_plan_artist_albums_uses_album_tool():
 
 
 def test_plan_falls_back_to_keyword_on_bad_json(agent, monkeypatch):
-    monkeypatch.setattr(agent.llm, "generate", lambda *a, **k: "这不是 JSON")
-    plan = nodes.plan_with_llm(agent, "推荐几首歌")
+    async def invalid(*_args, **_kwargs):
+        return "这不是 JSON"
+
+    monkeypatch.setattr(agent.llm, "agenerate", invalid)
+    plan = _run(nodes.plan_with_llm_async(agent, "推荐几首歌"))
     assert plan is None  # 调用方会降级到 build_agent_plan
 
 
-def test_plan_repairs_invalid_payload_once(agent, monkeypatch):
+def test_plan_does_not_spend_a_second_llm_call_repairing_invalid_payload(agent, monkeypatch):
     calls = {"n": 0}
 
-    def fake_generate(*args, **kwargs):
+    async def fake_generate(*args, **kwargs):
         calls["n"] += 1
         if calls["n"] == 1:
             return '{"intent":"recommend","entities":"周杰伦","use_local":true,"use_vector":true,"use_web":true}'
         return '{"intent":"recommend","entities":["周杰伦"],"use_local":true,"use_vector":true,"use_web":true,"search_query":"周杰伦","language":"","target_count":5,"reasoning":"repair ok"}'
 
-    monkeypatch.setattr(agent.llm, "generate", fake_generate)
-    plan = nodes.plan_with_llm(agent, "推荐5首周杰伦的歌")
+    monkeypatch.setattr(agent.llm, "agenerate", fake_generate)
+    plan = _run(nodes.plan_with_llm_async(agent, "推荐5首周杰伦的歌"))
 
-    assert plan is not None
-    assert plan.intent == "recommend"
-    assert plan.target_count == 5
-    assert plan.retrieval_plan.entities == ["周杰伦"]
-    assert calls["n"] == 2
+    assert plan is None
+    assert calls["n"] == 1
 
 
 def test_plan_returns_none_when_repair_still_invalid(agent, monkeypatch):
-    monkeypatch.setattr(agent.llm, "generate", lambda *a, **k: "not valid json at all")
-    plan = nodes.plan_with_llm(agent, "推荐几首歌")
+    async def invalid(*_args, **_kwargs):
+        return "not valid json at all"
+
+    monkeypatch.setattr(agent.llm, "agenerate", invalid)
+    plan = _run(nodes.plan_with_llm_async(agent, "推荐几首歌"))
     assert plan is None
 
 
@@ -216,12 +225,13 @@ def test_execute_tools_isolates_single_tool_failure(agent, monkeypatch):
         tools_needed=["web_music_search", "recommend"],
         online_required=True,
     )
+    plan = nodes._materialize_tool_stages(plan, "推荐几首歌", 3)
 
     def boom(*args, **kwargs):
         raise RuntimeError("recommend down")
 
     monkeypatch.setattr(agent, "recommend_for_query", boom)
-    state = nodes.execute_tools(agent, {
+    state = _run(nodes.execute_tools_async(agent, {
         "user_id": "u-tool-fail",
         "asset_id": None,
         "query": "推荐几首歌",
@@ -231,7 +241,7 @@ def test_execute_tools_isolates_single_tool_failure(agent, monkeypatch):
         "results": [],
         "trace": [],
         "events": [],
-    })
+    }))
 
     assert any(r.get("type") == "web_music_search" for r in state["results"])
     assert any("[tool_error] recommend" in line for line in state["trace"])
@@ -242,11 +252,11 @@ def test_execute_tools_isolates_single_tool_failure(agent, monkeypatch):
 def test_web_fallback_isolates_web_search_failure(agent, monkeypatch):
     plan = AgentPlan(intent="recommend", tools_needed=["recommend"], online_required=True)
 
-    def boom(*args, **kwargs):
+    async def boom(*args, **kwargs):
         raise RuntimeError("web down")
 
-    monkeypatch.setattr(agent, "search_web_music", boom)
-    state = nodes.web_fallback(agent, {
+    monkeypatch.setattr(agent, "search_web_music_async", boom)
+    state = _run(nodes.web_fallback_async(agent, {
         "user_id": "u-web-fail",
         "asset_id": None,
         "query": "推荐几首歌",
@@ -256,7 +266,7 @@ def test_web_fallback_isolates_web_search_failure(agent, monkeypatch):
         "results": [],
         "trace": [],
         "events": [],
-    })
+    }))
 
     assert any("[tool_error] web_music_search" in line for line in state["trace"])
     assert any(event.type == "error" and event.payload.get("tool") == "web_music_search" for event in state["events"])
@@ -264,8 +274,11 @@ def test_web_fallback_isolates_web_search_failure(agent, monkeypatch):
 
 
 def test_reflect_node_failure_isolated(agent, monkeypatch):
-    monkeypatch.setattr(nodes, "_reflect_impl", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("reflect down")))
-    out = nodes.reflect(agent, {
+    async def broken(*_args, **_kwargs):
+        raise RuntimeError("reflect down")
+
+    monkeypatch.setattr(nodes, "_prepare_empty_result_recovery_async", broken)
+    out = _run(nodes.reflect_async(agent, {
         "user_id": "u-reflect-fail",
         "asset_id": None,
         "query": "推荐几首歌",
@@ -275,7 +288,7 @@ def test_reflect_node_failure_isolated(agent, monkeypatch):
         "results": [],
         "trace": [],
         "events": [],
-    })
+    }))
 
     assert out["_need_refine"] is False
     assert any("[reflect_error]" in line for line in out["trace"])
@@ -283,7 +296,7 @@ def test_reflect_node_failure_isolated(agent, monkeypatch):
 
 
 def test_reflect_adds_eval_when_evaluate_node_skipped(agent):
-    out = nodes.reflect(agent, {
+    out = _run(nodes.reflect_async(agent, {
         "user_id": "u-reflect-eval",
         "asset_id": None,
         "query": "推荐几首歌",
@@ -293,16 +306,15 @@ def test_reflect_adds_eval_when_evaluate_node_skipped(agent):
         "results": [],
         "trace": [],
         "events": [],
-    })
+    }))
 
     assert out["_evaluated"] is True
     assert any(line.startswith("[eval]") for line in out["trace"])
     assert any(event.type == "eval" for event in out["events"])
 
 
-def test_finalize_node_failure_still_emits_final(agent, monkeypatch):
-    monkeypatch.setattr(nodes, "_finalize_impl", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("final down")))
-    out = nodes.finalize(agent, {
+def test_finalize_failure_still_emits_final(agent):
+    out = nodes._finalize_fallback({
         "user_id": "u-final-fail",
         "asset_id": None,
         "query": "推荐几首歌",
@@ -313,88 +325,17 @@ def test_finalize_node_failure_still_emits_final(agent, monkeypatch):
         "trace": [],
         "events": [],
         "context": {},
-    })
+    }, RuntimeError("final down"))
 
     assert out["answer"].fallback_reason.startswith("finalize_error")
     assert out["events"][-1].type == "final"
     assert "没有编造额外歌曲" in out["events"][-1].content
 
 
-def test_execute_tool_chain_runs_web_before_recommend(agent, monkeypatch):
-    monkeypatch.setattr(settings, "enable_parallel_tools", True, raising=False)
-
-    def fake_safe(agent, tool, plan, query, user_id, top_k, results, trace, events):
-        time.sleep(0.1)
-        results.append({"type": tool})
-        trace.append(tool)
-        return True
-
-    monkeypatch.setattr(nodes, "_run_tool_safely", fake_safe)
-    plan = AgentPlan(intent="recommend", tools_needed=["web_music_search", "recommend"], online_required=True)
-    results: list[dict] = []
-    trace: list[str] = []
-    events = []
-
-    start = time.monotonic()
-    executed = nodes._execute_tool_chain(agent, plan.tools_needed, plan, "q", "u", 5, results, trace, events)
-    elapsed = time.monotonic() - start
-
-    assert executed == {"web_music_search", "recommend"}
-    assert [r["type"] for r in results] == ["web_music_search", "recommend"]
-    assert elapsed >= 0.18
-
-
-def test_execute_tool_chain_flushes_before_playlist(agent, monkeypatch):
-    monkeypatch.setattr(settings, "enable_parallel_tools", True, raising=False)
-    seen_by_playlist = {"has_web": False}
-
-    def fake_safe(agent, tool, plan, query, user_id, top_k, results, trace, events):
-        if tool == "web_music_search":
-            results.append({"type": "web_music_search", "tracks": ["seed"]})
-        if tool == "playlist":
-            seen_by_playlist["has_web"] = any(r.get("type") == "web_music_search" for r in results)
-            results.append({"type": "playlist", "playlist": "ok"})
-        trace.append(tool)
-        return True
-
-    monkeypatch.setattr(nodes, "_run_tool_safely", fake_safe)
-    plan = AgentPlan(intent="playlist", tools_needed=["web_music_search", "playlist"], online_required=True)
-    results: list[dict] = []
-
-    nodes._execute_tool_chain(agent, plan.tools_needed, plan, "q", "u", 5, results, [], [])
-
-    assert seen_by_playlist["has_web"] is True
-    assert [r["type"] for r in results] == ["web_music_search", "playlist"]
-
-
-def test_execute_tool_chain_import_finishes_before_recommend(agent, monkeypatch):
-    monkeypatch.setattr(settings, "enable_parallel_tools", True, raising=False)
-    seen_by_recommend = {"has_import": False}
-
-    def fake_safe(agent, tool, plan, query, user_id, top_k, results, trace, events):
-        if tool == "import":
-            results.append({"type": "import_netease_playlist", "result": {"tracks": []}})
-        if tool == "recommend":
-            seen_by_recommend["has_import"] = any(
-                result.get("type") == "import_netease_playlist" for result in results
-            )
-            results.append({"type": "daily_recommend", "recommendation": "ok"})
-        return True
-
-    monkeypatch.setattr(nodes, "_run_tool_safely", fake_safe)
-    plan = AgentPlan(intent="import", tools_needed=["import", "recommend"], online_required=True)
-    results: list[dict] = []
-
-    nodes._execute_tool_chain(agent, plan.tools_needed, plan, "q", "u", 5, results, [], [])
-
-    assert seen_by_recommend["has_import"] is True
-    assert [result["type"] for result in results] == ["import_netease_playlist", "daily_recommend"]
-
-
 # ---- 端到端：graph 主路径产出可追溯答案 + trace ----
 
 def test_chat_recommend_end_to_end(agent):
-    answer = agent.chat("u-p0", "推荐几首适合跑步的歌")
+    answer = _run(agent.chat_async("u-p0", "推荐几首适合跑步的歌"))
     assert answer.answer
     assert any("[plan]" in t for t in answer.agent_trace)
     assert any("web_music_search" in t or "recommend" in t for t in answer.agent_trace)

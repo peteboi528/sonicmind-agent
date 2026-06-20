@@ -55,6 +55,42 @@ def search_youtube_many(query: str, limit: int = 3) -> list[dict[str, str]]:
         logger.debug("YouTube search request failed", exc_info=True)
         return []
 
+    return _parse_youtube_search_html(html, limit)
+
+
+async def asearch_youtube_many(query: str, limit: int = 3) -> list[dict[str, str]]:
+    from app.sources.http_transport import source_transport
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+    }
+    try:
+        response = await source_transport.request(
+            "youtube", "GET", "https://www.youtube.com/results",
+            params={"search_query": query}, headers=headers, retries=1, concurrency=3,
+        )
+        return _parse_youtube_search_html(response.text, limit)
+    except Exception:
+        logger.debug("Async YouTube search request failed", exc_info=True)
+        return []
+
+
+async def afetch_youtube_title(video_id: str) -> str:
+    from app.sources.http_transport import source_transport
+
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    try:
+        response = await source_transport.request(
+            "youtube", "GET", "https://www.youtube.com/oembed",
+            params={"url": url, "format": "json"}, retries=1, concurrency=3,
+        )
+        return str(response.json().get("title") or "")
+    except Exception:
+        return ""
+
+
+def _parse_youtube_search_html(html: str, limit: int) -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
 
     match = re.search(r"var ytInitialData\s*=\s*(\{.+?\});\s*</script>", html, re.DOTALL)

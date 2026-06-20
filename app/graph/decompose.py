@@ -25,31 +25,51 @@ _SEGMENT_SPLIT_RE = re.compile(
 _DEPENDENCY_HINTS = ("他", "她", "它", "这个", "那个", "这些", "那些", "类似", "基于", "继续", "再", "上一步", "前面")
 
 
-def decompose_compound(agent, query: str, history: list[dict[str, str]] | None = None) -> list[SubTask]:
-    tasks, _, _ = decompose_compound_with_meta(agent, query, history)
-    return tasks
-
-
-def decompose_compound_with_meta(
+async def decompose_compound_async(
     agent,
     query: str,
     history: list[dict[str, str]] | None = None,
 ) -> tuple[list[SubTask], dict[str, str], dict[str, float | int]]:
-    """把复合 query 拆成有序子任务；优先走结构化输出，失败时退化为启发式。"""
+    """Async decomposition used by the sole production LangGraph path."""
     if not is_compound_task(query):
         return [_make_subtask(query, index=0)], {}, empty_runtime_metrics()
-
-    structured = _decompose_with_llm(agent, query, history)
-    if structured[0]:
-        return structured[0], {"decompose": DECOMPOSE_VERSION}, structured[1]
-
+    llm = select_llm(agent, "fast")
+    history_text = "\n".join(f"{m.get('role', '')}: {m.get('content', '')}" for m in (history or [])[-6:])
+    try:
+        raw = await llm.agenerate(
+            DECOMPOSE_USER(query, history_text), system=DECOMPOSE_SYSTEM, temperature=0.1,
+        )
+        metrics = capture_llm_stats(llm)
+        data = extract_json_dict(raw)
+        items = data.get("subtasks") if isinstance(data, dict) else None
+        tasks = _parse_subtasks(items)
+        if tasks:
+            return tasks, {"decompose": DECOMPOSE_VERSION}, metrics
+    except Exception:
+        metrics = capture_llm_stats(llm)
     parts = [_clean_segment(part) for part in _SEGMENT_SPLIT_RE.split(query) if _clean_segment(part)]
     if len(parts) < 2:
         fallback = _split_by_action_markers(query)
         parts = fallback if len(fallback) >= 2 else [query]
+    return [_make_subtask(part, index=i) for i, part in enumerate(parts)], {}, metrics
 
-    tasks = [_make_subtask(part, index=i) for i, part in enumerate(parts)]
-    return tasks or [_make_subtask(query, index=0)], {}, empty_runtime_metrics()
+
+def _parse_subtasks(items) -> list[SubTask]:
+    if not isinstance(items, list):
+        return []
+    tasks: list[SubTask] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        task_query = _clean_segment(str(item.get("query", "")))
+        if not task_query:
+            continue
+        tasks.append(SubTask(
+            intent=str(item.get("intent") or match_intent_by_keywords(task_query) or "recommend"),
+            query=task_query,
+            depends_on_prev=bool(item.get("depends_on_prev")) if index > 0 else False,
+        ))
+    return tasks
 
 
 def summarize_subtasks(subtasks: list[SubTask]) -> str:
@@ -63,38 +83,6 @@ def _make_subtask(segment: str, index: int) -> SubTask:
     intent = match_intent_by_keywords(segment) or "recommend"
     depends = index > 0 and any(token in segment for token in _DEPENDENCY_HINTS)
     return SubTask(intent=intent, query=segment, depends_on_prev=depends)
-
-
-def _decompose_with_llm(
-    agent,
-    query: str,
-    history: list[dict[str, str]] | None,
-) -> tuple[list[SubTask], dict[str, float | int]]:
-    llm = select_llm(agent, "fast")
-    if llm is None:
-        return [], empty_runtime_metrics()
-    history_text = "\n".join(f"{m.get('role', '')}: {m.get('content', '')}" for m in (history or [])[-6:])
-    prompt = DECOMPOSE_USER(query, history_text)
-    try:
-        raw = llm.generate(prompt, system=DECOMPOSE_SYSTEM, temperature=0.1)
-        metrics = capture_llm_stats(llm)
-        data = extract_json_dict(raw)
-        items = data.get("subtasks") if isinstance(data, dict) else None
-        if not isinstance(items, list):
-            return [], metrics
-        tasks: list[SubTask] = []
-        for index, item in enumerate(items):
-            if not isinstance(item, dict):
-                continue
-            task_query = _clean_segment(str(item.get("query", "")))
-            if not task_query:
-                continue
-            intent = str(item.get("intent") or match_intent_by_keywords(task_query) or "recommend")
-            depends = bool(item.get("depends_on_prev")) if index > 0 else False
-            tasks.append(SubTask(intent=intent, query=task_query, depends_on_prev=depends))
-        return tasks, metrics
-    except Exception:
-        return [], capture_llm_stats(llm)
 
 
 def _split_by_action_markers(query: str) -> list[str]:

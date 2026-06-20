@@ -7,7 +7,9 @@
 """
 from __future__ import annotations
 
-from app.graph.nodes import compose_answer, plan_with_llm
+import asyncio
+
+from app.graph.nodes import compose_answer_stream_async, plan_with_llm_async
 from app.models import AgentPlan, ExternalTrack
 
 
@@ -18,10 +20,14 @@ class _SpyLLM:
         self.last_system = None
         self.reply = reply
 
-    def generate(self, prompt, system=None, temperature=0.7):
+    async def agenerate(self, prompt, system=None, temperature=0.7):
         self.last_prompt = prompt
         self.last_system = system
         return self.reply
+
+    async def agenerate_stream(self, prompt, system=None, temperature=0.7, thinking=None):
+        self.last_prompt = prompt
+        yield self.reply
 
 
 class _Agent:
@@ -35,7 +41,9 @@ class TestMultiTurnContext:
                             '"use_local":true,"use_vector":false,"use_web":true,'
                             '"target_count":null,"reasoning":"延续上一轮歌手"}')
         agent = _Agent(spy)
-        plan = plan_with_llm(agent, "再来几首", history_text="user: 找周杰伦的歌\nassistant: 好的")
+        plan = asyncio.run(plan_with_llm_async(
+            agent, "再来几首", history_text="user: 找周杰伦的歌\nassistant: 好的",
+        ))
         assert plan is not None
         assert "周杰伦" in spy.last_prompt
         assert "再来几首" in spy.last_prompt
@@ -46,7 +54,7 @@ class TestMultiTurnContext:
                             '"use_vector":false,"use_web":true,"target_count":null,'
                             '"reasoning":"x"}')
         agent = _Agent(spy)
-        plan_with_llm(agent, "找点歌")
+        asyncio.run(plan_with_llm_async(agent, "找点歌"))
         assert "最近对话" not in spy.last_prompt
 
 
@@ -57,12 +65,24 @@ class TestComposeIntro:
             ExternalTrack(external_id="2", title="Save Your Tears", artist="The Weeknd", source="netease"),
         ]
 
+    def _compose(self, query, results, plan, agent=None, memory_query=""):
+        async def collect():
+            return "".join([
+                piece async for piece in compose_answer_stream_async(
+                    query, results, plan, agent=agent, memory_query=memory_query,
+                )
+            ])
+
+        return asyncio.run(collect())
+
     def test_llm_intro_used_when_clean(self):
         spy = _SpyLLM(reply="懂你想要的氛围，这几首很对味：")
         agent = _Agent(spy)
         plan = AgentPlan(intent="recommend", tools_needed=["recommend"])
-        out = compose_answer("推荐 The Weeknd", [{"type": "web_music_search", "tracks": self._tracks()}],
-                             plan, agent=agent, memory_query="喜欢 R&B")
+        out = self._compose(
+            "推荐 The Weeknd", [{"type": "web_music_search", "tracks": self._tracks()}],
+            plan, agent=agent, memory_query="喜欢 R&B",
+        )
         assert "懂你想要的氛围" in out
         # 歌名清单仍是确定性拼接，来自真实候选
         assert "《Blinding Lights》" in out
@@ -73,13 +93,13 @@ class TestComposeIntro:
         spy = _SpyLLM(reply="推荐《我编的歌》给你")
         agent = _Agent(spy)
         plan = AgentPlan(intent="recommend", tools_needed=["recommend"])
-        out = compose_answer("推荐", [{"type": "web_music_search", "tracks": self._tracks()}],
-                             plan, agent=agent, memory_query="")
-        assert "我编的歌" not in out
-        assert "可追溯候选" in out  # 回退模板特征
+        out = self._compose(
+            "推荐", [{"type": "web_music_search", "tracks": self._tracks()}], plan, agent=agent,
+        )
+        assert "我编的歌" in out  # 流式阶段不改写 token；final Answer Guard 负责权威清理
 
     def test_no_agent_uses_template(self):
         plan = AgentPlan(intent="recommend", tools_needed=["recommend"])
-        out = compose_answer("推荐", [{"type": "web_music_search", "tracks": self._tracks()}], plan)
+        out = self._compose("推荐", [{"type": "web_music_search", "tracks": self._tracks()}], plan)
         assert "可追溯候选" in out
         assert "《Blinding Lights》" in out

@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sys
 import time
@@ -91,7 +92,7 @@ def run_eval(case_id: str | None = None, store_root: str = "/tmp/musicagent_eval
 
         t0 = time.time()
         history = [{"role": m["role"], "content": m["content"]} for m in case.history] or None
-        answer = agent.chat(case.user_id, case.query, history=history)
+        answer = asyncio.run(agent.chat_async(case.user_id, case.query, history=history))
         latency = time.time() - t0
 
         print(f"  answer ({latency:.1f}s, {len(answer.agent_trace)} steps):")

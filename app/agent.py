@@ -7,7 +7,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from app.compound import is_compound_task
 from app.config import settings
 from app.library import ResourceLibrary
 from app.llm.client import build_llm
@@ -28,6 +27,7 @@ from app.models import (
     Playlist,
     RagEvidence,
     RecommendedTrack,
+    ResourceTrack,
     SavedAlbum,
     SearchResponse,
     Segment,
@@ -49,7 +49,6 @@ from app.prompts import (
     IDENTIFY_FROM_URL_TEMPLATE,
     LLM_SEARCH_TEMPLATE,
 )
-from app.react_loop import ReActLoop
 from app.recommend.daily import DailyRecommender
 from app.recommend.engine import RecommendEngine
 from app.retrieval.vector_store import HybridRetriever
@@ -64,6 +63,16 @@ from app.sources.protocol import ExternalSource
 from app.storage import JsonStore
 
 logger = logging.getLogger(__name__)
+
+
+def _graph_unavailable_answer() -> AgentAnswer:
+    return AgentAnswer(
+        answer="Agent 编排暂时不可用，请稍后重试。",
+        evidences=[],
+        recommended_tracks=[],
+        agent_trace=["[graph_error] LangGraph unavailable; no secondary orchestrator was executed."],
+        fallback_reason="langgraph_unavailable",
+    )
 
 
 def _build_source() -> ExternalSource:
@@ -100,14 +109,13 @@ class AudioVisualAgent:
         self.source: ExternalSource = _build_source()
         self.engine = RecommendEngine()
         self.daily = DailyRecommender(self.engine, self.source, self.llm)
-        self.react = ReActLoop(self)
         self.graph = None
         self.library.sync_assets(self.list_assets())
         try:
             from app.graph.builder import build_agent_graph
             self.graph = build_agent_graph(self)
         except Exception:
-            logger.debug("LangGraph wrapper unavailable; using ReAct fallback", exc_info=True)
+            logger.exception("LangGraph wrapper unavailable")
 
     def ingest_video(self, url: str, force_refresh: bool = False) -> Asset:
         return self.media.ingest_video(url, force_refresh=force_refresh)
@@ -671,7 +679,7 @@ class AudioVisualAgent:
         """Agent tool wrapper for explicit online search.
 
         The default product flow remains offline-first. This method is only
-        called when the ReAct loop decides the user needs real platform data.
+        called when the LangGraph plan needs real platform data.
         每个候选都必须回查到真实曲目元数据；回查失败的候选直接丢弃，
         绝不把搜索词 query 当成歌名返回（这是幻觉的主要来源之一）。
 
@@ -800,6 +808,67 @@ class AudioVisualAgent:
             self.library.upsert_external(track)
         return selected
 
+    async def search_web_music_async(
+        self,
+        query: str,
+        top_k: int = 5,
+        relevance_query: str = "",
+        include_video_sources: bool = False,
+        offset: int = 0,
+        variants: list[str] | None = None,
+    ) -> list[ExternalTrack]:
+        """Native async music-source path used by Tool Runtime."""
+        import asyncio
+
+        query_list = _merge_search_queries(query, variants)
+        if len(query_list) > 1:
+            batches = await asyncio.gather(*(
+                self.search_web_music_async(
+                    item, top_k=max(top_k, 3), relevance_query=relevance_query or query,
+                    include_video_sources=include_video_sources,
+                    offset=offset if index == 0 else 0,
+                    variants=None,
+                )
+                for index, item in enumerate(query_list)
+            ))
+            selected = _dedupe_tracks([track for batch in batches for track in batch])[:top_k]
+            await asyncio.gather(*(asyncio.to_thread(self.library.upsert_external, track) for track in selected))
+            return selected
+
+        from app.sources.netease import asearch_netease_many
+
+        metadata = await asearch_netease_many(query, limit=top_k, offset=offset)
+        tracks = [
+            ExternalTrack(
+                external_id=item["song_id"],
+                title=item["title"],
+                artist=item.get("artist", ""),
+                album=item.get("album"),
+                cover_url=item.get("cover"),
+                source="netease",
+                candidate_kind=_classify_candidate_kind(item["title"], "netease"),
+                playback_url=f"https://music.163.com/song?id={item['song_id']}",
+            )
+            for item in metadata if item.get("title")
+        ]
+        if include_video_sources and len(tracks) < top_k:
+            video_tracks = await self.search_videos_async(query, top_k=top_k - len(tracks))
+            tracks.extend(video_tracks)
+        rel_q = relevance_query or query
+        tracks = [track for track in tracks if _valid_external_track(track, rel_q)]
+        if len(tracks) < top_k:
+            tracks.extend(await asyncio.to_thread(
+                self._dense_library_fallback, rel_q, tracks, top_k - len(tracks),
+            ))
+        if len(tracks) < top_k and isinstance(self.source, MockSource):
+            for candidate in self.source.search(query, limit=top_k - len(tracks)):
+                fallback = candidate.model_copy(update={"source": f"{candidate.source}-fallback"})
+                if _valid_external_track(fallback, rel_q):
+                    tracks.append(fallback)
+        selected = _dedupe_tracks(tracks)[:top_k]
+        await asyncio.gather(*(asyncio.to_thread(self.library.upsert_external, track) for track in selected))
+        return selected
+
     def _dense_library_fallback(self, query: str, existing: list[ExternalTrack], limit: int = 5) -> list[ExternalTrack]:
         if limit <= 0:
             return []
@@ -810,6 +879,8 @@ class AudioVisualAgent:
                 limit=max(limit * 2, limit),
                 min_score=settings.dense_recall_min_score,
             )
+            if not hits:
+                hits = self._lexical_resource_fallback(query, limit=max(limit * 2, limit))
             out: list[ExternalTrack] = []
             for item in hits:
                 track = ExternalTrack(
@@ -832,6 +903,41 @@ class AudioVisualAgent:
         except Exception:
             logger.debug("dense library fallback failed for query=%s", query, exc_info=True)
             return []
+
+    def _lexical_resource_fallback(self, query: str, limit: int = 10) -> list[ResourceTrack]:
+        """Zero-network fallback over verified resource metadata when embeddings are unavailable."""
+        from app.graph.tag_rules import extract_tags
+
+        tags = extract_tags(query)
+        wanted_genres = {item.lower() for item in tags["genre"]}
+        wanted_moods = {item.lower() for item in tags["mood"]}
+        wanted_scenarios = {item.lower() for item in tags["scenario"]}
+        terms = {
+            item.lower() for item in re.findall(r"[A-Za-z0-9&'-]+|[一-鿿㐀-䶿]{2,}", query or "")
+            if item.lower() not in _QUERY_NOISE
+        }
+        scenario_moods = {
+            "深夜": {"放松", "宁静", "孤独", "慵懒", "治愈"},
+            "睡眠": {"放松", "宁静", "舒缓"},
+            "学习": {"专注", "宁静", "放松"},
+            "工作": {"专注", "放松"},
+        }
+        for scenario in wanted_scenarios:
+            wanted_moods.update(item.lower() for item in scenario_moods.get(scenario, set()))
+
+        ranked: list[tuple[float, ResourceTrack]] = []
+        for track in self.library.list_tracks(3000):
+            if not track.verified:
+                continue
+            genres = {item.lower() for item in track.genre}
+            moods = {item.lower() for item in track.mood}
+            searchable = " ".join([track.title, track.artist, *track.genre, *track.mood]).lower()
+            score = len(wanted_genres & genres) * 4.0 + len(wanted_moods & moods) * 3.0
+            score += sum(1.0 for term in terms if term in searchable)
+            if score > 0:
+                ranked.append((score, track))
+        ranked.sort(key=lambda item: (-item[0], item[1].exposure_count, item[1].title.lower()))
+        return [track for _, track in ranked[:limit]]
 
     def search_videos(self, query: str, top_k: int = 5) -> list[ExternalTrack]:
         """搜索 MV/现场/演唱会视频，B站优先、YouTube 补位。不走网易云。
@@ -889,6 +995,30 @@ class AudioVisualAgent:
             unique.append(track)
         return unique[:top_k]
 
+    async def search_videos_async(self, query: str, top_k: int = 5) -> list[ExternalTrack]:
+        import asyncio
+
+        bili_items, youtube_items = await asyncio.gather(
+            bilibili_source.asearch_bilibili_many(query, limit=min(top_k, 5)),
+            youtube_source.asearch_youtube_many(query, limit=min(top_k, 3)),
+        )
+        tracks = [
+            ExternalTrack(
+                external_id=item["bvid"], title=item["title"], artist=item.get("author", ""),
+                source="bilibili", candidate_kind=_classify_candidate_kind(item["title"], "bilibili"),
+                playback_url=f"https://player.bilibili.com/player.html?bvid={item['bvid']}&autoplay=0&high_quality=1&danmaku=0",
+            )
+            for item in bili_items
+        ]
+        for item in youtube_items:
+            title = item.get("title") or await youtube_source.afetch_youtube_title(item["video_id"])
+            tracks.append(ExternalTrack(
+                external_id=item["video_id"], title=title, artist="", source="youtube",
+                candidate_kind=_classify_candidate_kind(title, "youtube"),
+                playback_url=f"https://www.youtube.com/embed/{item['video_id']}?autoplay=1&rel=0",
+            ))
+        return _dedupe_tracks(tracks)[:top_k]
+
     def search_artist_info(self, query: str) -> list[dict[str, str]]:
         """用 Tavily/DuckDuckGo 搜索歌手/乐队百科信息。
 
@@ -896,6 +1026,11 @@ class AudioVisualAgent:
         返回 [{"title": ..., "content": ..., "url": ...}] 搜索摘要列表。
         """
         return web_search_source.search_web_info(
+            query, max_results=5, api_key=settings.tavily_api_key,
+        )
+
+    async def search_artist_info_async(self, query: str) -> list[dict[str, str]]:
+        return await web_search_source.asearch_web_info(
             query, max_results=5, api_key=settings.tavily_api_key,
         )
 
@@ -1095,43 +1230,48 @@ class AudioVisualAgent:
 
     # --- 对话 ---
 
-    def chat(self, user_id: str, message: str, history: list[dict[str, Any]] | None = None) -> AgentAnswer:
+    async def chat_async(
+        self,
+        user_id: str,
+        message: str,
+        history: list[dict[str, Any]] | None = None,
+        thread_id: str | None = None,
+        run_id: str | None = None,
+    ) -> AgentAnswer:
         asset_id = self._resolve_asset_context(user_id, message)
-        # Deep/Agentic 模式：复合多步任务走 graph 内部的 compound 编排，
-        # 不再单独分流到第二执行引擎。ReAct 仅保留为图失败时的兜底。
-        if settings.enable_deep_mode and not settings.mock_mode and is_compound_task(message):
-            if self.graph is not None:
-                try:
-                    return self.graph.invoke_compound(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
-                except Exception:
-                    logger.debug("Compound graph invoke failed; falling back to ReActLoop", exc_info=True)
-            return self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
         if self.graph is not None:
             try:
-                return self.graph.invoke(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
+                return await self.graph.ainvoke(
+                    user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5,
+                    thread_id=thread_id, run_id=run_id,
+                )
             except Exception:
-                logger.debug("LangGraph invoke failed; falling back to ReActLoop", exc_info=True)
-        return self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
+                logger.exception("LangGraph invoke failed")
+        return _graph_unavailable_answer()
 
-    def stream_chat(self, user_id: str, message: str, history: list[dict[str, Any]] | None = None):
+    async def stream_chat_async(
+        self,
+        user_id: str,
+        message: str,
+        history: list[dict[str, Any]] | None = None,
+        thread_id: str | None = None,
+        run_id: str | None = None,
+    ):
         asset_id = self._resolve_asset_context(user_id, message)
-        # 复合任务走 compound graph；单意图走常规图；ReAct 仅兜底。
-        if settings.enable_deep_mode and not settings.mock_mode and is_compound_task(message):
-            if self.graph is not None:
-                try:
-                    yield from self.graph.stream_compound(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
-                    return
-                except Exception:
-                    logger.debug("Compound graph stream failed; falling back to ReActLoop", exc_info=True)
-            answer = self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
-            from app.models import StreamEvent
-            yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))
-            return
         if self.graph is not None:
-            yield from self.graph.stream(user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5)
+            async for event in self.graph.astream(
+                user_id=user_id,
+                asset_id=asset_id,
+                query=message,
+                history=history,
+                top_k=5,
+                thread_id=thread_id,
+                run_id=run_id,
+            ):
+                yield event
             return
-        answer = self.react.run(user_id=user_id, asset_id=asset_id, query=message, top_k=5, history=history)
         from app.models import StreamEvent
+        answer = _graph_unavailable_answer()
         yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))
 
     def generate_greeting(self, user_id: str) -> str:
@@ -1850,6 +1990,22 @@ class AudioVisualAgent:
             logger.debug("recommend_artist_albums failed for %s", artist, exc_info=True)
             return []
 
+    async def recommend_artist_albums_async(
+        self, user_id: str, artist: str, limit: int = 6,
+    ) -> list[dict[str, Any]]:
+        import asyncio
+
+        artist = (artist or "").strip()
+        if not artist:
+            return []
+        try:
+            return await netease_source.asearch_netease_artist_albums(artist, limit)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("async recommend_artist_albums failed for %s", artist, exc_info=True)
+            return []
+
     def generate_taste_experiment(self, user_id: str, prompt: str, total: int = 12) -> TasteExperiment:
         """生成 safe/stretch/bold 三档品味实验。
 
@@ -2463,7 +2619,7 @@ class AudioVisualAgent:
         all_candidates: list[Asset | ExternalTrack] = list(seed_tracks or [])
         seed_supply = sum(
             1 for track in all_candidates
-            if (isinstance(track, Asset) or _is_verified_online_track(track))
+            if _is_verified_recommendation_track(track)
             and _is_recommendation_quality_track(track)
         )
 
@@ -2527,7 +2683,7 @@ class AudioVisualAgent:
         # 去重 + 过滤。线上候选必须真实验证；本地曲库本身即可信来源。
         verified = [
             track for track in _dedupe_tracks(all_candidates)
-            if (isinstance(track, Asset) or _is_verified_online_track(track))
+            if _is_verified_recommendation_track(track)
             and not self.library.is_disliked(user_id, track)
             and _is_recommendation_quality_track(
                 track, allow_variants=_query_requests_variant_content(goal)
@@ -2576,7 +2732,7 @@ class AudioVisualAgent:
                     components=breakdown.components,
                 ))
             self._record_recommendation_history(user_id, [track for track, _ in ranked])
-            local_count = sum(isinstance(track, Asset) for track, _ in ranked)
+            local_count = sum(_is_local_recommendation_track(track) for track, _ in ranked)
             online_count = len(ranked) - local_count
             return DailyRecommendation(
                 user_id=user_id,
@@ -2649,8 +2805,8 @@ class AudioVisualAgent:
         """
         if not ranked or top_k <= 0:
             return []
-        local = [item for item in ranked if isinstance(item[0], Asset)]
-        online = [item for item in ranked if not isinstance(item[0], Asset)]
+        local = [item for item in ranked if _is_local_recommendation_track(item[0])]
+        online = [item for item in ranked if not _is_local_recommendation_track(item[0])]
         if not online:
             return local[:top_k]
         if not local:
@@ -2709,13 +2865,31 @@ class AudioVisualAgent:
             return False
         import re
 
-        # 英文：排除纯风格/情绪词
-        generic_en = {"chill", "lofi", "vibe", "mix", "remix", "relax", "mood", "groove",
-                       "upbeat", "slow", "fast", "happy", "sad", "deep", "party",
-                       "r&b", "soul", "pop", "rock", "rap", "hip", "hop", "jazz",
-                       "electronic", "ambient", "acoustic", "indie", "funk",
-                       "morning", "night", "evening", "summer", "winter",
-                       "playlist", "songs", "music", "recommend"}
+        # 英文：排除纯风格/情绪词。默认"未知英文词=实体"会把情绪/场景描述词
+        # （cozy/dreamy/mellow 等）误判成歌手名，进而走网易云精确单曲搜索而搜空。
+        # 这里尽量收全不可能是歌手名的描述性词汇，降低误判（真实歌手名不会落进此表）。
+        generic_en = {
+            # 氛围/情绪
+            "chill", "lofi", "lo-fi", "vibe", "vibes", "mix", "remix", "relax", "relaxing",
+            "mood", "moody", "groove", "groovy", "upbeat", "slow", "fast", "happy", "sad",
+            "deep", "party", "cozy", "dreamy", "mellow", "smooth", "calm", "calming", "peaceful",
+            "soothing", "soft", "warm", "bright", "dark", "melancholy", "melancholic",
+            "nostalgic", "uplifting", "energetic", "emotional", "romantic", "sexy", "sensual",
+            "dramatic", "epic", "ethereal", "atmospheric", "minimal", "lush",
+            # 曲风
+            "r&b", "rnb", "soul", "pop", "rock", "rap", "hip", "hop", "hiphop", "jazz",
+            "electronic", "edm", "ambient", "acoustic", "indie", "funk", "house", "techno",
+            "trap", "disco", "reggae", "blues", "country", "classical", "metal", "punk",
+            "folk", "dance", "dreampop", "shoegaze", "synthwave", "instrumental", "vocal",
+            # 场景/时间
+            "morning", "night", "nighttime", "evening", "afternoon", "midnight", "summer",
+            "winter", "autumn", "spring", "rainy", "sunny", "study", "focus", "sleep", "sleepy",
+            "workout", "gym", "running", "driving", "coffee", "work", "working", "commute",
+            # 功能/描述
+            "playlist", "playlists", "songs", "song", "music", "track", "tracks", "recommend",
+            "recommendation", "recommendations", "best", "top", "new", "old", "classic",
+            "popular", "trending", "favorite", "favourites", "similar", "like", "beats", "tunes",
+        }
         english = re.findall(r"[A-Za-z][A-Za-z0-9'&\-]*", search_goal)
         english = [t for t in english if len(t) > 1 and t.lower() not in generic_en]
         if english:
@@ -2867,7 +3041,7 @@ class AudioVisualAgent:
 
     def _resolve_asset_context(self, user_id: str, query: str) -> str | None:
         # Keep only explicit/recent media context. Tool selection itself is now
-        # delegated to the ReAct loop, so this method no longer tries to infer
+        # delegated to the LangGraph planner, so this method no longer tries to infer
         # broad intent from keywords.
         if not _query_needs_asset_context(query):
             return None
@@ -3225,6 +3399,18 @@ def _track_key(track: Asset | ExternalTrack | dict[str, Any]) -> str:
 def _is_verified_online_track(track: Asset | ExternalTrack) -> bool:
     """验证是否为真实线上曲目。纯歌曲推荐只认网易云；视频源仅 MV 搜索时使用。"""
     return isinstance(track, ExternalTrack) and track.source == "netease"
+
+
+def _is_local_recommendation_track(track: Asset | ExternalTrack) -> bool:
+    return isinstance(track, Asset) or (
+        isinstance(track, ExternalTrack)
+        and track.source == "local"
+        and bool(track.external_id or track.playback_url)
+    )
+
+
+def _is_verified_recommendation_track(track: Asset | ExternalTrack) -> bool:
+    return _is_local_recommendation_track(track) or _is_verified_online_track(track)
 
 
 def _is_fallback_track(track: Asset | ExternalTrack) -> bool:

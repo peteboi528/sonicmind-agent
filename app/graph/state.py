@@ -7,6 +7,8 @@ from app.models import AgentAnswer, AgentPlan, StreamEvent
 
 class AgentState(TypedDict, total=False):
     user_id: str
+    run_id: str
+    thread_id: str
     asset_id: str | None
     query: str
     top_k: int
@@ -17,7 +19,9 @@ class AgentState(TypedDict, total=False):
     trace: list[str]
     answer: AgentAnswer
     events: list[StreamEvent]
+    tool_outcomes: list[dict[str, Any]]
     error: str
     _need_web_fallback: bool
     _need_refine: bool
     _refine_count: int
+    _interrupt_enabled: bool

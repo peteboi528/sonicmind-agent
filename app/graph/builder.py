@@ -1,21 +1,19 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from app.concurrency import run_parallel
-from app.config import settings
-from app.graph.decompose import SubTask, decompose_compound, decompose_compound_with_meta, summarize_subtasks
+from app.compound import is_compound_task
+from app.graph.decompose import SubTask, decompose_compound_async, summarize_subtasks
 from app.graph.nodes import (
-    execute_tools,
-    finalize,
-    finalize_stream,
+    execute_tools_async,
+    finalize_stream_async,
     load_context,
-    plan_intent,
-    reflect,
+    plan_intent_async,
+    reflect_async,
     route_after_execute,
     route_after_reflect,
-    web_fallback,
+    web_fallback_async,
 )
 from app.graph.state import AgentState
 from app.llm.observability import empty_runtime_metrics, format_runtime_metrics, merge_runtime_metrics
@@ -30,299 +28,260 @@ if TYPE_CHECKING:
 class AgentGraphRunner:
     def __init__(self, agent: AudioVisualAgent) -> None:
         self.agent = agent
-        self.compiled = _try_build_langgraph(agent)
+        self.compiled_stream = _try_build_streaming_langgraph(agent)
+        self._checkpoint_connection = None
 
-    def invoke(
+    async def initialize_checkpointing(self, path: str) -> None:
+        if self._checkpoint_connection is not None:
+            return
+        import aiosqlite
+        from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+
+        from app.tools.checkpoint_serde import SanitizingCheckpointSerializer
+
+        connection = await aiosqlite.connect(path)
+        self._checkpoint_connection = connection
+        self.compiled_stream = _try_build_streaming_langgraph(
+            agent=self.agent,
+            checkpointer=AsyncSqliteSaver(connection, serde=SanitizingCheckpointSerializer()),
+        )
+
+    async def close(self) -> None:
+        if self._checkpoint_connection is not None:
+            await self._checkpoint_connection.close()
+            self._checkpoint_connection = None
+
+    @property
+    def checkpointing_ready(self) -> bool:
+        return self._checkpoint_connection is not None and self.compiled_stream is not None
+
+    async def resume(
+        self,
+        *,
+        thread_id: str,
+        action_id: str,
+        approved: bool,
+    ) -> AsyncIterator[StreamEvent]:
+        if not self.checkpointing_ready:
+            raise RuntimeError("LangGraph checkpointing is not available")
+        from langgraph.types import Command
+
+        config = {"configurable": {"thread_id": thread_id}}
+        command = Command(resume={"action_id": action_id, "approved": approved})
+        async for chunk in self.compiled_stream.astream(command, config=config, stream_mode="custom"):
+            if isinstance(chunk, StreamEvent):
+                yield chunk
+            elif isinstance(chunk, dict):
+                yield StreamEvent.model_validate(chunk)
+
+    async def ainvoke(
         self,
         user_id: str,
         asset_id: str | None,
         query: str,
         history: list[dict[str, Any]] | None = None,
         top_k: int = 5,
+        thread_id: str | None = None,
+        run_id: str | None = None,
     ) -> AgentAnswer:
-        return self._invoke_state(user_id, asset_id, query, history=history, top_k=top_k)["answer"]
-
-    def invoke_compound(
-        self,
-        user_id: str,
-        asset_id: str | None,
-        query: str,
-        history: list[dict[str, Any]] | None = None,
-        top_k: int = 5,
-    ) -> AgentAnswer:
-        subtasks, compound_prompt_versions, compound_runtime_metrics = decompose_compound_with_meta(self.agent, query, history)
-        scratchpad: dict[str, Any] = {}
-        states: list[AgentState] = []
-        answers: list[AgentAnswer] = []
-        compound_trace = [f"[compound_plan] {summarize_subtasks(subtasks)}"]
-
-        for index, task, task_query, state in _run_compound_subtasks(
-            self, subtasks, scratchpad, user_id, asset_id, history, top_k
+        final: StreamEvent | None = None
+        async for event in self.astream(
+            user_id, asset_id, query, history=history, top_k=top_k,
+            thread_id=thread_id, run_id=run_id,
         ):
-            answer = state["answer"]
-            states.append(state)
-            answers.append(answer)
-            compound_trace.append(f"[compound_step] {index}/{len(subtasks)} {task.intent}: {task_query}")
-            compound_trace.extend(f"[subtask {index}] {line}" for line in answer.agent_trace)
+            if event.type == "final":
+                final = event
+        if final is None:
+            raise RuntimeError("LangGraph completed without a final event")
+        return AgentAnswer.model_validate(final.payload)
 
-        final_answer, synth_versions, synth_runtime_metrics = _compose_compound_answer(self.agent, query, subtasks, answers)
+    async def astream(
+        self,
+        user_id: str,
+        asset_id: str | None,
+        query: str,
+        history: list[dict[str, Any]] | None = None,
+        top_k: int = 5,
+        thread_id: str | None = None,
+        run_id: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """The sole production execution path."""
+        resolved_thread = thread_id or f"{user_id}:default"
+        if is_compound_task(query):
+            async for event in self._astream_compound(
+                user_id, asset_id, query, history or [], top_k, resolved_thread, run_id or "",
+            ):
+                yield event
+            return
+        async for event in self._astream_single(
+            user_id, asset_id, query, history or [], top_k, resolved_thread, run_id or "",
+        ):
+            yield event
+
+    async def _astream_single(
+        self,
+        user_id: str,
+        asset_id: str | None,
+        query: str,
+        history: list[dict[str, Any]],
+        top_k: int,
+        thread_id: str,
+        run_id: str,
+    ) -> AsyncIterator[StreamEvent]:
+        state: AgentState = {
+            "user_id": user_id,
+            "run_id": run_id,
+            "thread_id": thread_id,
+            "asset_id": asset_id,
+            "query": query,
+            "history": history,
+            "top_k": top_k,
+            "_refine_count": 0,
+            "_interrupt_enabled": self.checkpointing_ready,
+        }
+        if self.compiled_stream is None:
+            raise RuntimeError("LangGraph is unavailable; no secondary orchestrator is configured")
+        config = {"configurable": {"thread_id": state["thread_id"]}}
+        try:
+            async for chunk in self.compiled_stream.astream(state, config=config, stream_mode="custom"):
+                if isinstance(chunk, StreamEvent):
+                    yield chunk
+                elif isinstance(chunk, dict):
+                    yield StreamEvent.model_validate(chunk)
+        except Exception as exc:  # noqa: BLE001
+            yield StreamEvent(type="error", content=f"处理出错：{exc}")
+
+    async def _astream_compound(
+        self,
+        user_id: str,
+        asset_id: str | None,
+        query: str,
+        history: list[dict[str, Any]],
+        top_k: int,
+        thread_id: str,
+        run_id: str,
+    ) -> AsyncIterator[StreamEvent]:
+        subtasks, decompose_versions, decompose_metrics = await decompose_compound_async(
+            self.agent, query, history,
+        )
+        yield StreamEvent(type="plan", content=summarize_subtasks(subtasks))
+        scratchpad: dict[str, Any] = {}
+        answers: list[AgentAnswer] = []
+        cards: list[dict[str, Any]] = []
+        trace = [f"[compound_plan] {summarize_subtasks(subtasks)}"]
+        for index, task in enumerate(subtasks, start=1):
+            task_query = _hydrate_subtask_query(task, scratchpad)
+            final: StreamEvent | None = None
+            async for event in self._astream_single(
+                user_id, asset_id, task_query, history, top_k,
+                f"{thread_id}:sub:{index}", f"{run_id}:sub:{index}" if run_id else "",
+            ):
+                if event.type == "final":
+                    final = event
+                else:
+                    yield event
+            if final is None:
+                continue
+            answer = AgentAnswer.model_validate(final.payload)
+            answers.append(answer)
+            cards.extend((final.payload or {}).get("cards") or [])
+            _update_compound_scratchpad(scratchpad, task, answer, index, len(subtasks))
+            trace.append(f"[compound_step] {index}/{len(subtasks)} {task.intent}: {task_query}")
+            trace.extend(f"[subtask {index}] {line}" for line in answer.agent_trace)
+        text, synth_versions, synth_metrics = await _compose_compound_answer_async(
+            self.agent, query, subtasks, answers,
+        )
         last = answers[-1] if answers else AgentAnswer(answer="", evidences=[])
-        merged_prompt_versions = _merge_prompt_version_maps(
-            *[ans.prompt_versions for ans in answers],
-            compound_prompt_versions,
-            synth_versions,
+        versions = _merge_prompt_version_maps(
+            *[answer.prompt_versions for answer in answers], decompose_versions, synth_versions,
         )
-        merged_runtime_metrics = merge_runtime_metrics(
-            empty_runtime_metrics(),
-            *[ans.runtime_metrics for ans in answers],
-            compound_runtime_metrics,
-            synth_runtime_metrics,
+        metrics = merge_runtime_metrics(
+            empty_runtime_metrics(), *[answer.runtime_metrics for answer in answers],
+            decompose_metrics, synth_metrics,
         )
-        if merged_prompt_versions:
-            compound_trace.append(f"[prompt] {_format_prompt_versions(merged_prompt_versions)}")
-        compound_trace.append(f"[meta] {format_runtime_metrics(merged_runtime_metrics)}")
-        compound_answer = AgentAnswer(
-            answer=final_answer,
-            evidences=[ev for ans in answers for ev in ans.evidences][:8],
+        trace.append(f"[meta] {format_runtime_metrics(metrics)}")
+        answer = AgentAnswer(
+            answer=text,
+            evidences=[ev for item in answers for ev in item.evidences][:8],
             recommended_segments=last.recommended_segments,
             recommended_tracks=_merge_compound_recommended_tracks(answers),
-            prompt_versions=merged_prompt_versions,
-            runtime_metrics=merged_runtime_metrics,
-            memory_updated=any(ans.memory_updated for ans in answers),
-            agent_trace=compound_trace,
+            prompt_versions=versions,
+            runtime_metrics=metrics,
+            memory_updated=any(item.memory_updated for item in answers),
+            agent_trace=trace,
             pending_goal=last.pending_goal,
             goal_progress=last.goal_progress,
             fallback_reason=last.fallback_reason,
         )
-        cards = _merge_compound_cards(states)
-        if cards:
-            compound_answer._compound_cards = cards
-        return compound_answer
-
-    def stream(
-        self,
-        user_id: str,
-        asset_id: str | None,
-        query: str,
-        history: list[dict[str, Any]] | None = None,
-        top_k: int = 5,
-    ) -> Iterable[StreamEvent]:
-        """同步生成器节点级流式：逐节点执行，每跑完一个节点就吐出它新增的事件。
-
-        事件顺序：plan → tool_start → candidates(先吐候选卡片) → tool_result
-        → eval → final，对齐 SoulTuner 候选先于解释文本的体验。
-        """
-        state: AgentState = {
-            "user_id": user_id,
-            "asset_id": asset_id,
-            "query": query,
-            "history": history or [],
-            "top_k": top_k,
-            "_refine_count": 0,
-        }
-        emitted = 0
-        try:
-            def advance(node):
-                nonlocal state, emitted
-                state = node(self.agent, state)
-                events = state.get("events", [])
-                while emitted < len(events):
-                    yield events[emitted]
-                    emitted += 1
-
-            for event in advance(load_context):
-                yield event
-            for event in advance(plan_intent):
-                yield event
-            while True:
-                for event in advance(execute_tools):
-                    yield event
-                if route_after_execute(state) == "web_fallback":
-                    for event in advance(web_fallback):
-                        yield event
-                for event in advance(reflect):
-                    yield event
-                if route_after_reflect(state) != "refine":
-                    break
-            # finalize：流式增量驱动——token 事件边生成边吐，最后吐 final（权威）。
-            # 不走 advance()：advance 会等节点跑完才一次性吐事件，那 token 流式就失去意义。
-            for event in finalize_stream(self.agent, state):
-                yield event
-        except Exception as exc:  # noqa: BLE001
-            yield StreamEvent(type="error", content=f"处理出错：{exc}")
-
-    def stream_compound(
-        self,
-        user_id: str,
-        asset_id: str | None,
-        query: str,
-        history: list[dict[str, Any]] | None = None,
-        top_k: int = 5,
-    ) -> Iterable[StreamEvent]:
-        subtasks = decompose_compound(self.agent, query, history)
-        yield StreamEvent(type="plan", content=summarize_subtasks(subtasks))
-        answer = self.invoke_compound(user_id, asset_id, query, history=history, top_k=top_k)
-        final_payload = answer.model_dump(mode="json")
-        cards = getattr(answer, "_compound_cards", [])
-        if cards:
-            final_payload["cards"] = cards
-        yield StreamEvent(type="final", content=answer.answer, payload=final_payload)
-
-    def _invoke_state(
-        self,
-        user_id: str,
-        asset_id: str | None,
-        query: str,
-        history: list[dict[str, Any]] | None = None,
-        top_k: int = 5,
-    ) -> AgentState:
-        state: AgentState = {
-            "user_id": user_id,
-            "asset_id": asset_id,
-            "query": query,
-            "history": history or [],
-            "top_k": top_k,
-            "_refine_count": 0,
-        }
-        if self.compiled is not None:
-            return self.compiled.invoke(state)
-        return _fallback_invoke(self.agent, state)
+        payload = answer.model_dump(mode="json")
+        merged_cards = _dedupe_cards(cards)
+        if merged_cards:
+            payload["cards"] = merged_cards
+        yield StreamEvent(type="final", content=text, payload=payload)
 
 
 def build_agent_graph(agent: AudioVisualAgent) -> AgentGraphRunner:
     return AgentGraphRunner(agent)
 
 
-def _run_compound_subtasks(
-    runner: AgentGraphRunner,
-    subtasks: list[SubTask],
-    scratchpad: dict[str, Any],
-    user_id: str,
-    asset_id: str | None,
-    history: list[dict[str, Any]] | None,
-    top_k: int,
-) -> list[tuple[int, SubTask, str, AgentState]]:
-    if not settings.enable_parallel_tools or len(subtasks) <= 1:
-        completed: list[tuple[int, SubTask, str, AgentState]] = []
-        for index, task in enumerate(subtasks, start=1):
-            item = _run_one_compound_subtask(runner, index, task, scratchpad, user_id, asset_id, history, top_k)
-            completed.append(item)
-            _update_scratchpad(scratchpad, task, item[3], index, len(subtasks))
-        return completed
-
-    completed: list[tuple[int, SubTask, str, AgentState]] = []
-    batch: list[tuple[int, SubTask, str]] = []
-
-    def flush_batch() -> None:
-        nonlocal batch
-        if not batch:
-            return
-        tasks = [
-            (
-                f"compound:{index}:{task.intent}",
-                lambda index=index, task=task, task_query=task_query: _invoke_compound_subtask_state(
-                    runner, index, task, task_query, user_id, asset_id, history, top_k
-                ),
-            )
-            for index, task, task_query in batch
-        ]
-        default = None
-        batch_results = []
-        for result in run_parallel(tasks, timeout=30.0, default=default):
-            if result is not None:
-                batch_results.append(result)
-        batch_results.sort(key=lambda item: item[0])
-        for item in batch_results:
-            completed.append(item)
-        for index, task, _task_query, state in batch_results:
-            _update_scratchpad(scratchpad, task, state, index, len(subtasks))
-        batch = []
-
-    for index, task in enumerate(subtasks, start=1):
-        if task.depends_on_prev:
-            flush_batch()
-            item = _run_one_compound_subtask(runner, index, task, scratchpad, user_id, asset_id, history, top_k)
-            completed.append(item)
-            _update_scratchpad(scratchpad, task, item[3], index, len(subtasks))
-        else:
-            batch.append((index, task, _hydrate_subtask_query(task, scratchpad)))
-    flush_batch()
-    completed.sort(key=lambda item: item[0])
-    return completed
-
-
-def _run_one_compound_subtask(
-    runner: AgentGraphRunner,
-    index: int,
-    task: SubTask,
-    scratchpad: dict[str, Any],
-    user_id: str,
-    asset_id: str | None,
-    history: list[dict[str, Any]] | None,
-    top_k: int,
-) -> tuple[int, SubTask, str, AgentState]:
-    task_query = _hydrate_subtask_query(task, scratchpad)
-    return _invoke_compound_subtask_state(runner, index, task, task_query, user_id, asset_id, history, top_k)
-
-
-def _invoke_compound_subtask_state(
-    runner: AgentGraphRunner,
-    index: int,
-    task: SubTask,
-    task_query: str,
-    user_id: str,
-    asset_id: str | None,
-    history: list[dict[str, Any]] | None,
-    top_k: int,
-) -> tuple[int, SubTask, str, AgentState]:
-    state = runner._invoke_state(user_id, asset_id, task_query, history=history, top_k=top_k)
-    return index, task, task_query, state
-
-
-def _fallback_invoke(agent: AudioVisualAgent, state: AgentState) -> AgentState:
-    """无 langgraph 时的等价执行：复刻条件路由（execute → [web_fallback] → reflect → finalize）。"""
-    state = load_context(agent, state)
-    state = plan_intent(agent, state)
-    while True:
-        state = execute_tools(agent, state)
-        if route_after_execute(state) == "web_fallback":
-            state = web_fallback(agent, state)
-        state = reflect(agent, state)
-        if route_after_reflect(state) != "refine":
-            break
-    state = finalize(agent, state)
-    return state
-
-
-def _try_build_langgraph(agent: AudioVisualAgent):
+def _try_build_streaming_langgraph(agent: AudioVisualAgent, checkpointer=None):
     try:
+        from langgraph.config import get_stream_writer
         from langgraph.graph import END, StateGraph
     except Exception:
         return None
 
+    def emitting(node):
+        def wrapped(state: AgentState) -> AgentState:
+            before = len(state.get("events", []))
+            next_state = node(agent, state)
+            writer = get_stream_writer()
+            for event in next_state.get("events", [])[before:]:
+                writer(event.model_dump(mode="json"))
+            return next_state
+
+        return wrapped
+
+    def emitting_async(node):
+        async def wrapped(state: AgentState) -> AgentState:
+            before = len(state.get("events", []))
+            next_state = await node(agent, state)
+            writer = get_stream_writer()
+            for event in next_state.get("events", [])[before:]:
+                writer(event.model_dump(mode="json"))
+            return next_state
+
+        return wrapped
+
+    async def stream_finalize(state: AgentState) -> AgentState:
+        writer = get_stream_writer()
+        final_event = None
+        async for event in finalize_stream_async(agent, state):
+            writer(event.model_dump(mode="json"))
+            final_event = event
+        if final_event and final_event.type == "final":
+            try:
+                answer = AgentAnswer.model_validate(final_event.payload)
+                return {**state, "answer": answer}
+            except Exception:
+                pass
+        return state
+
     graph = StateGraph(AgentState)
-    graph.add_node("load_context", lambda state: load_context(agent, state))
-    graph.add_node("plan_intent", lambda state: plan_intent(agent, state))
-    graph.add_node("execute_tools", lambda state: execute_tools(agent, state))
-    graph.add_node("web_fallback", lambda state: web_fallback(agent, state))
-    graph.add_node("reflect", lambda state: reflect(agent, state))
-    graph.add_node("finalize", lambda state: finalize(agent, state))
+    graph.add_node("load_context", emitting(load_context))
+    graph.add_node("plan_intent", emitting_async(plan_intent_async))
+    graph.add_node("execute_tools", emitting_async(execute_tools_async))
+    graph.add_node("web_fallback", emitting_async(web_fallback_async))
+    graph.add_node("reflect", emitting_async(reflect_async))
+    graph.add_node("finalize", stream_finalize)
     graph.set_entry_point("load_context")
     graph.add_edge("load_context", "plan_intent")
     graph.add_edge("plan_intent", "execute_tools")
-    graph.add_conditional_edges(
-        "execute_tools",
-        lambda state: route_after_execute(state),
-        {"web_fallback": "web_fallback", "reflect": "reflect"},
-    )
+    graph.add_conditional_edges("execute_tools", lambda state: route_after_execute(state), {"web_fallback": "web_fallback", "reflect": "reflect"})
     graph.add_edge("web_fallback", "reflect")
-    graph.add_conditional_edges(
-        "reflect",
-        lambda state: route_after_reflect(state),
-        {"refine": "execute_tools", "finalize": "finalize"},
-    )
+    graph.add_conditional_edges("reflect", lambda state: route_after_reflect(state), {"refine": "execute_tools", "finalize": "finalize"})
     graph.add_edge("finalize", END)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
 
 
 def _hydrate_subtask_query(task: SubTask, scratchpad: dict[str, Any]) -> str:
@@ -342,25 +301,23 @@ def _hydrate_subtask_query(task: SubTask, scratchpad: dict[str, Any]) -> str:
     return "\n\n".join(lines)
 
 
-def _update_scratchpad(
+def _update_compound_scratchpad(
     scratchpad: dict[str, Any],
     task: SubTask,
-    state: AgentState,
+    answer: AgentAnswer,
     index: int,
     total: int,
 ) -> None:
-    answer = state["answer"]
     scratchpad["last_query"] = task.query
     scratchpad["last_answer"] = answer.answer
     scratchpad["last_goal_progress"] = answer.goal_progress
-    scratchpad["last_cards"] = _extract_final_cards(state)
     summary = answer.answer.strip().splitlines()[0] if answer.answer.strip() else ""
     scratchpad["last_summary"] = summary
     scratchpad["completed_subtasks"] = index
     scratchpad["remaining_subtasks"] = max(total - index, 0)
 
 
-def _compose_compound_answer(
+async def _compose_compound_answer_async(
     agent: AudioVisualAgent,
     query: str,
     subtasks: list[Any],
@@ -370,13 +327,13 @@ def _compose_compound_answer(
         return "这轮没有拿到可交付结果。", {}, empty_runtime_metrics()
     if len(answers) == 1:
         return answers[0].answer, {}, empty_runtime_metrics()
-    synthesized, runtime_metrics = _synthesize_compound_answer(agent, query, subtasks, answers)
+    synthesized, runtime_metrics = await _synthesize_compound_answer_async(agent, query, subtasks, answers)
     if synthesized:
         return synthesized, {"compound_synth": COMPOUND_SYNTH_VERSION}, runtime_metrics
     return _compose_compound_fallback(query, subtasks, answers), {}, runtime_metrics
 
 
-def _synthesize_compound_answer(
+async def _synthesize_compound_answer_async(
     agent: AudioVisualAgent,
     query: str,
     subtasks: list[Any],
@@ -386,7 +343,7 @@ def _synthesize_compound_answer(
     if llm is None:
         return "", empty_runtime_metrics()
     try:
-        text = llm.generate(
+        text = await llm.agenerate(
             COMPOUND_SYNTH_USER(query, _format_compound_subtask_block(subtasks, answers)),
             system=COMPOUND_SYNTH_SYSTEM,
             temperature=0.2,
@@ -423,31 +380,19 @@ def _compose_compound_fallback(query: str, subtasks: list[Any], answers: list[Ag
     return "\n".join(lines)
 
 
-def _extract_final_cards(state: AgentState) -> list[dict[str, Any]]:
-    for event in reversed(state.get("events", [])):
-        if event.type != "final":
-            continue
-        cards = (event.payload or {}).get("cards")
-        if isinstance(cards, list):
-            return cards
-        return []
-    return []
-
-
-def _merge_compound_cards(states: list[AgentState]) -> list[dict[str, Any]]:
+def _dedupe_cards(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
-    for state in states:
-        for card in _extract_final_cards(state):
-            key = (
-                str(card.get("title", "")).lower(),
-                str(card.get("source", "")),
-                str(card.get("source_id", "")),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(card)
+    for card in items:
+        key = (
+            str(card.get("title", "")).lower(),
+            str(card.get("source", "")),
+            str(card.get("source_id", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(card)
     return merged
 
 

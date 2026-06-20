@@ -37,16 +37,9 @@ def run_parallel(
     """
     if not tasks:
         return []
-    if len(tasks) == 1:
-        label, thunk = tasks[0]
-        try:
-            return [thunk()]
-        except Exception:
-            logger.debug("并发任务 %s 失败，取默认值", label, exc_info=True)
-            return [default]
-
     results: list[Any] = [default] * len(tasks)
-    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+    pool = ThreadPoolExecutor(max_workers=len(tasks))
+    try:
         future_to_idx = {pool.submit(thunk): i for i, (_, thunk) in enumerate(tasks)}
         done, not_done = wait(future_to_idx, timeout=timeout, return_when=ALL_COMPLETED)
         for fut in future_to_idx:
@@ -60,4 +53,8 @@ def run_parallel(
                 results[idx] = fut.result(timeout=0)
             except (FuturesTimeout, Exception):
                 logger.debug("并发任务 %s 失败，取默认值", label, exc_info=True)
+    finally:
+        # `with ThreadPoolExecutor` 会在退出时 wait=True，令上面的 timeout 形同虚设。
+        # 超时任务可能仍在系统调用中，但不能继续阻塞当前 Agent 请求。
+        pool.shutdown(wait=False, cancel_futures=True)
     return results

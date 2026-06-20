@@ -5,11 +5,13 @@ reflect 在 mock 模式跳过（确定性 _filter_excluded 已跑），仅真实
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.agent import AudioVisualAgent
 from app.config import settings
-from app.graph.nodes import _drop_tracks_from_results, _track_key, reflect
+from app.graph.nodes import _drop_tracks_from_results, _track_key, reflect_async
 from app.models import AgentPlan, ExternalTrack
 from app.storage import JsonStore
 
@@ -56,7 +58,7 @@ def test_reflect_noop_when_mock(agent, monkeypatch):
         "results": [{"type": "web_music_search", "tracks": [t0, t1]}],
         "trace": [], "events": [],
     }
-    out = reflect(agent, state)
+    out = asyncio.run(reflect_async(agent, state))
     assert len(out["results"][0]["tracks"]) == 2  # 未改动
 
 
@@ -65,10 +67,10 @@ def test_reflect_drops_violating_track(agent, monkeypatch):
     monkeypatch.setattr(settings, "llm_api_key", "fake-key")  # mock_mode = False
     agent.memory.add_exclusion("u", "抖音热歌")  # 让 _gather_constraints 非空
 
-    def fake_generate(prompt, system=None, temperature=0.0):
+    async def fake_generate(prompt, system=None, temperature=0.0):
         return '{"drop": [0], "reason": "抖音神曲"}'
 
-    monkeypatch.setattr(agent.llm, "generate", fake_generate)
+    monkeypatch.setattr(agent.llm, "agenerate", fake_generate)
 
     t0, t1 = _track("Douyin Hit"), _track("Real Song")
     state = {
@@ -77,7 +79,7 @@ def test_reflect_drops_violating_track(agent, monkeypatch):
         "results": [{"type": "web_music_search", "tracks": [t0, t1]}],
         "trace": [], "events": [],
     }
-    out = reflect(agent, state)
+    out = asyncio.run(reflect_async(agent, state))
     assert len(out["results"][0]["tracks"]) == 1
     assert out["results"][0]["tracks"][0].title == "Real Song"
     assert any("[reflect]" in s for s in out["trace"])
@@ -87,13 +89,17 @@ def test_reflect_skips_non_listing_intent(agent, monkeypatch):
     """chat 等不列曲目的意图，reflect 不介入（不调 LLM）。"""
     monkeypatch.setattr(settings, "llm_api_key", "fake-key")
     called = {"gen": False}
-    monkeypatch.setattr(agent.llm, "generate", lambda *a, **k: called.update(gen=True) or "{}")
+    async def generate(*_args, **_kwargs):
+        called["gen"] = True
+        return "{}"
+
+    monkeypatch.setattr(agent.llm, "agenerate", generate)
     state = {
         "user_id": "u", "query": "你好",
         "plan": AgentPlan(intent="chat"),
         "results": [], "trace": [], "events": [],
     }
-    reflect(agent, state)
+    asyncio.run(reflect_async(agent, state))
     assert not called["gen"]
 
 
@@ -101,7 +107,11 @@ def test_reflect_no_constraints_skips_llm(agent, monkeypatch):
     """无任何约束时不调 LLM（没东西可核对）。"""
     monkeypatch.setattr(settings, "llm_api_key", "fake-key")
     called = {"gen": False}
-    monkeypatch.setattr(agent.llm, "generate", lambda *a, **k: called.update(gen=True) or "{}")
+    async def generate(*_args, **_kwargs):
+        called["gen"] = True
+        return "{}"
+
+    monkeypatch.setattr(agent.llm, "agenerate", generate)
     t0 = _track("A")
     state = {
         "user_id": "u", "query": "推荐几首",  # 无负面偏好，无排除规则
@@ -109,5 +119,5 @@ def test_reflect_no_constraints_skips_llm(agent, monkeypatch):
         "results": [{"type": "web_music_search", "tracks": [t0]}],
         "trace": [], "events": [],
     }
-    reflect(agent, state)
+    asyncio.run(reflect_async(agent, state))
     assert not called["gen"]

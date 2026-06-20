@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import requests
@@ -111,7 +111,7 @@ def get_playlist_detail(playlist_id: int, limit: int = 30) -> dict[str, Any] | N
     update_time = playlist.get("updateTime")
     updated_at = None
     if isinstance(update_time, (int, float)) and update_time > 0:
-        updated_at = datetime.fromtimestamp(update_time / 1000, tz=timezone.utc).isoformat()
+        updated_at = datetime.fromtimestamp(update_time / 1000, tz=UTC).isoformat()
     return {
         "id": str(playlist.get("id") or playlist_id),
         "name": str(playlist.get("name") or ""),

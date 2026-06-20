@@ -5,6 +5,7 @@ import { api } from "../api.js";
 import SongCard from "./SongCard.vue";
 
 const STORAGE_KEY = `sonicmind_chat_${store.userId}`;
+const newThreadId = () => globalThis.crypto?.randomUUID?.() || `thread-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
 const messages = ref([]);
 const input = ref("");
@@ -15,6 +16,7 @@ const savedAlbumIds = ref(new Set());
 const history = [];
 let msgId = 0;
 let abortController = null;
+let threadId = newThreadId();
 
 const QUICK = [
   { text: "🎵 推荐几首适合深夜的歌", prompt: "推荐几首适合深夜的歌" },
@@ -86,11 +88,14 @@ function saveToStorage() {
           id: a.id, name: a.name, artist: a.artist, image: a.image,
           track_count: a.track_count, tracks: a.tracks || [], saved: !!a.saved,
         })),
+        artists: m.artists || [],
         traceSummary: m.traceSummary || null,
         tasteExperiment: m.tasteExperiment || null,
+        pendingActions: m.pendingActions || [],
       })),
       history: history.slice(-20),
       msgId,
+      threadId,
     };
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch { /* quota exceeded etc */ }
@@ -106,6 +111,7 @@ function loadFromStorage() {
         ...m,
         cards: m.cards || [],
         albums: (m.albums || []).map(a => ({ ...a, loading: false, saving: false })),
+        artists: m.artists || [],
         traceSummary: m.traceSummary || null,
         tasteExperiment: m.tasteExperiment || null,
       }));
@@ -114,6 +120,7 @@ function loadFromStorage() {
     if (data.history?.length) {
       history.push(...data.history);
     }
+    threadId = data.threadId || threadId;
   } catch { /* corrupt data */ }
 }
 
@@ -121,6 +128,7 @@ function clearHistory() {
   messages.value = [];
   history.length = 0;
   msgId = 0;
+  threadId = newThreadId();
   localStorage.removeItem(STORAGE_KEY);
 }
 
@@ -232,15 +240,21 @@ async function send(text) {
   // 必须用 reactive：后续 candidates/song_card/final 事件会持续 push/splice botMsg.cards，
   // 若是普通对象，这些改动绕过响应式代理、Vue 检测不到，导致流式阶段只显示第一个
   // candidates 批次（约 5 张），final 的完整列表不刷新——只能靠刷新页面从 storage 重建。
-  const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [], albums: [], traceSummary: null, tasteExperiment: null });
+  const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [], albums: [], artists: [], traceSummary: null, tasteExperiment: null, pendingActions: [] });
   let finalText = "";
   abortController = new AbortController();
 
   try {
-    await api.streamChat({ userId: store.userId, message: msg, history }, {
+    await api.streamChat({ userId: store.userId, threadId, message: msg, history }, {
       onEvent: (event) => {
         if (event.type === "thinking" || event.type === "tool_start" || event.type === "plan") {
           thinking.value = event.content || "思考中...";
+        } else if (event.type === "refine") {
+          // 空结果恢复回环：换查询/换工具重试。流式过程中让用户看到"正在换个思路重试"。
+          thinking.value = event.content ? `重试中：${event.content}` : "换个思路重新检索…";
+        } else if (event.type === "eval") {
+          // 自省/核对节点：剔除违反约束的候选。仅在思考态提示，不污染最终气泡。
+          if (event.content) thinking.value = event.content;
         } else if (event.type === "candidates") {
           for (const c of event.payload?.cards || []) botMsg.cards.push(c);
           if (event.payload?.taste_experiment) botMsg.tasteExperiment = event.payload.taste_experiment;
@@ -250,6 +264,10 @@ async function send(text) {
           botMsg.cards.push(event.payload || {});
         } else if (event.type === "album_card") {
           botMsg.albums.push(normalizeAlbumCard(event.payload));
+          if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
+          scrollDown();
+        } else if (event.type === "artist_card") {
+          botMsg.artists.push(event.payload || {});
           if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
           scrollDown();
         } else if (event.type === "token") {
@@ -267,6 +285,10 @@ async function send(text) {
           }
           botMsg.traceSummary = event.payload?.trace_summary || null;
           botMsg.tasteExperiment = event.payload?.taste_experiment || botMsg.tasteExperiment;
+          if (Array.isArray(event.payload?.artists)) botMsg.artists.splice(0, botMsg.artists.length, ...event.payload.artists);
+        } else if (event.type === "confirmation_required") {
+          botMsg.pendingActions.push({ ...event.payload, text: event.content, resolved: false });
+          if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
         } else if (event.type === "error") {
           finalText = "⚠️ " + (event.content || "出错了，请重试");
         }
@@ -287,6 +309,22 @@ async function send(text) {
     abortController = null;
     scrollDown();
     saveToStorage();
+  }
+}
+
+async function resolveAction(action, approved) {
+  if (action.resolved) return;
+  action.resolved = true;
+  action.approved = approved;
+  try {
+    await api.resumeAgent({ userId: store.userId, threadId, actionId: action.action_id, approved }, {
+      onEvent: (event) => {
+        if (event.type === "tool_result" || event.type === "error") toast(event.content || "操作已处理");
+      },
+    });
+  } catch {
+    action.resolved = false;
+    toast("确认操作失败，请重试。");
   }
 }
 
@@ -347,6 +385,14 @@ function onKey(e) {
             <div class="body">
               <div class="role-label">{{ m.role === "user" ? "你" : "SonicMind" }}</div>
               <div v-if="m.text" class="text">{{ m.text }}</div>
+              <div v-for="action in m.pendingActions || []" :key="action.action_id" class="confirmation-card">
+                <span>{{ action.text || "需要确认账号操作" }}</span>
+                <div v-if="!action.resolved">
+                  <button @click="resolveAction(action, false)">取消</button>
+                  <button class="confirm" @click="resolveAction(action, true)">确认</button>
+                </div>
+                <small v-else>{{ action.approved ? "已确认" : "已取消" }}</small>
+              </div>
               <div v-if="m.tasteExperiment" class="taste-preview">
                 <div class="taste-preview-head">
                   <span>Taste Lab</span>
@@ -365,8 +411,13 @@ function onKey(e) {
                 <div class="trace-grid">
                   <span>意图</span><strong>{{ m.traceSummary.intent }}</strong>
                   <span>策略</span><strong>{{ m.traceSummary.strategy }}</strong>
-                  <span>工具</span><strong>{{ (m.traceSummary.tools || []).join(" / ") || "none" }}</strong>
-                  <span>来源</span><strong>{{ (m.traceSummary.sources || []).join(" / ") || "local" }}</strong>
+                  <span>工具状态</span><strong>{{ ({ ok: "执行成功", empty: "已执行，0 个候选", error: "执行失败", not_planned: "本轮未规划工具", planned_not_executed: "已规划但未执行" })[m.traceSummary.tool_execution_state] || "未知" }}</strong>
+                  <span>已规划</span><strong>{{ (m.traceSummary.tools_planned || []).join(" / ") || "—" }}</strong>
+                  <span>已执行</span><strong>{{ (m.traceSummary.tools_executed || m.traceSummary.tools || []).join(" / ") || "—" }}</strong>
+                  <span v-if="m.traceSummary.empty_results?.length">空结果</span><strong v-if="m.traceSummary.empty_results?.length">{{ m.traceSummary.empty_results.join(" / ") }}</strong>
+                  <span v-if="m.traceSummary.tool_errors?.length">失败</span><strong v-if="m.traceSummary.tool_errors?.length">{{ m.traceSummary.tool_errors.join(" / ") }}</strong>
+                  <span v-if="m.traceSummary.tool_error_details?.length">错误详情</span><strong v-if="m.traceSummary.tool_error_details?.length">{{ m.traceSummary.tool_error_details.map(item => `${item.tool}: ${item.message}`).join("；") }}</strong>
+                  <span>来源</span><strong>{{ (m.traceSummary.sources || []).join(" / ") || "无候选来源" }}</strong>
                   <span>卡片</span><strong>{{ m.traceSummary.final_cards }}</strong>
                 </div>
               </details>
@@ -375,6 +426,13 @@ function onKey(e) {
                   ▶ 全部播放（{{ m.cards.length }}首）
                 </button>
                 <SongCard v-for="(c, j) in m.cards" :key="`${m.id}-${j}`" :card="c" @toast="toast" />
+              </div>
+              <div v-if="m.artists?.length" class="artist-cards">
+                <button v-for="artist in m.artists" :key="artist.name" class="artist-card" @click="send(`介绍 ${artist.name}`)">
+                  <strong>{{ artist.name }}</strong>
+                  <span>{{ artist.reason || (artist.genres || []).join(" · ") }}</span>
+                  <small v-if="artist.representative_tracks?.length">{{ artist.representative_tracks.slice(0, 2).join(" / ") }}</small>
+                </button>
               </div>
               <div v-if="m.albums?.length" class="album-cards">
                 <div v-for="(album, j) in m.albums" :key="`${m.id}-album-${album.id || album.name}-${j}`" class="album-card">
@@ -597,6 +655,18 @@ function onKey(e) {
 
 .cards { margin-top: 14px; }
 
+.confirmation-card {
+  margin-top: 12px; padding: 12px 14px; max-width: 560px;
+  border: 1px solid rgba(245, 166, 35, 0.45); border-radius: var(--radius);
+  background: rgba(245, 166, 35, 0.08); color: var(--text);
+}
+.confirmation-card > div { display: flex; gap: 8px; margin-top: 10px; }
+.confirmation-card button {
+  padding: 6px 12px; border-radius: var(--radius-pill); background: var(--bg-hover); color: var(--text);
+}
+.confirmation-card button.confirm { background: var(--accent); color: #07130b; }
+.confirmation-card small { display: block; margin-top: 8px; color: var(--text-muted); }
+
 .taste-preview {
   margin-top: 12px;
   width: min(100%, 620px);
@@ -705,6 +775,31 @@ function onKey(e) {
   gap: 10px;
   margin-top: 14px;
 }
+
+.artist-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.artist-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 13px 14px;
+  text-align: left;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color var(--transition), transform var(--transition);
+}
+
+.artist-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.artist-card strong { color: var(--text); font-family: var(--font-display); }
+.artist-card span { color: var(--text-sub); font-size: 0.82rem; }
+.artist-card small { color: var(--text-muted); font-size: 0.74rem; }
 
 .album-card {
   display: grid;

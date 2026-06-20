@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +18,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from app.agent import AudioVisualAgent
 from app.config import settings
 from app.models import (
+    AgentResumeRequest,
     AlbumTracksRequest,
     AlbumTracksResponse,
     ArtistInfoRequest,
@@ -45,10 +49,33 @@ from app.models import (
 
 logger = logging.getLogger(__name__)
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    from app.tools.service import checkpoint_store, trace_store
+
+    checkpoint_store.cleanup()
+    trace_store.cleanup()
+    if settings.agent_checkpoints and agent.graph is not None:
+        await agent.graph.initialize_checkpointing(settings.agent_checkpoint_path)
+    try:
+        yield
+    finally:
+        from app.llm.client import close_shared_async_client
+        from app.sources.http_transport import source_transport
+        from app.tools.service import tool_runtime
+
+        if agent.graph is not None:
+            await agent.graph.close()
+        await source_transport.close()
+        await close_shared_async_client()
+        await tool_runtime.close()
+
 app = FastAPI(
     title="智能影音推荐助手 API",
     description="音视频内容分析、个性化推荐、每日歌单、LLM 语义搜索。",
     version="0.3.0",
+    lifespan=_lifespan,
 )
 app.add_middleware(
     CORSMiddleware,
@@ -296,42 +323,111 @@ def listen(payload: ListenRequest, request: Request):
 
 
 @app.post("/chat")
-def chat(payload: ChatRequest, request: Request):
+async def chat(payload: ChatRequest, request: Request):
     history = [{"role": m.role, "content": m.content} for m in payload.history]
-    return agent.chat(_effective_user_id(request, payload.user_id), payload.message, history=history or None)
+    return await agent.chat_async(
+        _effective_user_id(request, payload.user_id), payload.message,
+        history=history or None, thread_id=payload.thread_id,
+    )
 
 
 @app.post("/agent/run")
-def agent_run(payload: ChatRequest, request: Request):
+async def agent_run(payload: ChatRequest, request: Request):
     history = [{"role": m.role, "content": m.content} for m in payload.history]
-    return agent.chat(_effective_user_id(request, payload.user_id), payload.message, history=history or None)
-
-
-_SENTINEL = object()
-
-
-def _safe_next(gen):
-    """Wrap next() so StopIteration doesn't leak into run_in_executor."""
-    try:
-        return next(gen)
-    except StopIteration:
-        return _SENTINEL
+    return await agent.chat_async(
+        _effective_user_id(request, payload.user_id), payload.message,
+        history=history or None, thread_id=payload.thread_id,
+    )
 
 
 @app.post("/agent/stream")
 async def agent_stream(payload: ChatRequest, request: Request):
     uid = _effective_user_id(request, payload.user_id)
+    thread_id = payload.thread_id or f"{uid}:default"
     history = [{"role": m.role, "content": m.content} for m in payload.history]
 
     async def events():
-        loop = asyncio.get_event_loop()
-        gen = agent.stream_chat(uid, payload.message, history=history or None)
-        while True:
-            event = await loop.run_in_executor(None, _safe_next, gen)
-            if event is _SENTINEL:
-                break
-            yield f"data: {json.dumps(event.model_dump(mode='json'), ensure_ascii=False)}\n\n"
-            yield ": heartbeat\n\n"
+        from app.tools.service import checkpoint_store, trace_store
+
+        run_id = hashlib.sha256(f"{thread_id}:{time.time_ns()}".encode()).hexdigest()[:24]
+        started = time.monotonic()
+        checkpoint_store.touch_thread(thread_id)
+        trace_store.start_run(run_id, thread_id, uid, payload.message)
+        status = "ok"
+        try:
+            async for event in agent.stream_chat_async(
+                uid, payload.message, history=history or None, thread_id=thread_id, run_id=run_id
+            ):
+                if await request.is_disconnected():
+                    status = "cancelled"
+                    break
+                yield f"data: {json.dumps(event.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+                yield ": heartbeat\n\n"
+        except asyncio.CancelledError:
+            status = "cancelled"
+            raise
+        except Exception:
+            status = "error"
+            logger.exception("Agent stream failed")
+            raise
+        finally:
+            trace_store.finish_run(run_id, status, (time.monotonic() - started) * 1000)
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@app.post("/agent/resume")
+async def agent_resume(payload: AgentResumeRequest, request: Request):
+    from app.tools.contracts import ToolCall, ToolContext
+    from app.tools.service import checkpoint_store, tool_runtime
+
+    uid = _effective_user_id(request, payload.user_id)
+    resolved = checkpoint_store.resolve(payload.action_id, payload.thread_id, uid, payload.approved)
+
+    async def events():
+        if resolved is None:
+            event = {"type": "error", "content": "确认请求不存在、已处理或不属于当前会话。", "payload": {}}
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            return
+        yield f"data: {json.dumps({'type': 'resumed', 'content': '已恢复操作。', 'payload': {'action_id': payload.action_id, 'approved': payload.approved}}, ensure_ascii=False)}\n\n"
+        graph_resumed = False
+        if agent.graph is not None and agent.graph.checkpointing_ready:
+            try:
+                async for event in agent.graph.resume(
+                    thread_id=payload.thread_id,
+                    action_id=payload.action_id,
+                    approved=payload.approved,
+                ):
+                    graph_resumed = True
+                    yield f"data: {json.dumps(event.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+            except Exception:
+                logger.debug(
+                    "LangGraph resume unavailable for action %s; using compatibility path",
+                    payload.action_id,
+                    exc_info=True,
+                )
+            if graph_resumed:
+                return
+        if not payload.approved:
+            return
+        # Compatibility for pending actions created before graph interrupts were enabled.
+        arguments = {**resolved["arguments"], "confirm": True}
+        result = await tool_runtime.execute(
+            ToolCall(call_id=payload.action_id, name=resolved["tool"], arguments=arguments),
+            ToolContext(
+                thread_id=payload.thread_id,
+                user_id=uid,
+                query="恢复已确认的账号操作",
+                confirmation={"action_id": payload.action_id, "approved": True},
+                agent=agent,
+            ),
+        )
+        event = {
+            "type": "tool_result",
+            "content": result.summary or (result.error.message if result.error else "操作完成。"),
+            "payload": result.model_dump(mode="json"),
+        }
+        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import random
 import re
 import uuid
@@ -68,6 +69,15 @@ _TOOL_RULES: list[tuple[list[str], str]] = [
 
 
 class MockLLM:
+    async def agenerate(self, prompt, system=None, temperature=0.7, thinking=None):
+        await asyncio.sleep(0)
+        return self.generate(prompt, system=system, temperature=temperature, thinking=thinking)
+
+    async def agenerate_stream(self, prompt, system=None, temperature=0.7, thinking=None):
+        await asyncio.sleep(0)
+        for piece in self.generate_stream(prompt, system=system, temperature=temperature, thinking=thinking):
+            yield piece
+
     def __init__(self) -> None:
         self._tool_call_history: dict[str, list[str]] = {}
         self.last_stats: dict[str, float | int | str] = {}

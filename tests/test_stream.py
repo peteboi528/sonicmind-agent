@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 
 import pytest
 
 from app.agent import AudioVisualAgent
+from app.models import DailyRecommendation
 from app.storage import JsonStore
 
 
@@ -16,7 +18,10 @@ def agent():
 
 
 def _stream_types(agent, query, user_id="u-stream"):
-    events = list(agent.stream_chat(user_id, query))
+    async def collect():
+        return [event async for event in agent.stream_chat_async(user_id, query)]
+
+    events = asyncio.run(collect())
     return events, [e.type for e in events]
 
 
@@ -63,9 +68,28 @@ def test_taste_experiment_stream_payload(agent):
     assert "taste_experiment" in final.payload["trace_summary"]["tools"]
 
 
+def test_stream_trace_exposes_tools_that_executed_with_zero_candidates(agent, monkeypatch):
+    monkeypatch.setattr(agent, "search_web_music", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        agent,
+        "recommend_for_query",
+        lambda user_id, *args, **kwargs: DailyRecommendation(user_id=user_id, tracks=[]),
+    )
+
+    events, _ = _stream_types(agent, "推荐几首适合专注的歌")
+    summary = events[-1].payload["trace_summary"]
+
+    assert summary["tool_execution_state"] == "empty"
+    assert "web_music_search" in summary["tools_planned"]
+    assert "web_music_search" in summary["tools_executed"]
+    assert "web_music_search" in summary["empty_results"]
+    assert summary["tool_errors"] == []
+    assert summary["sources"] == []
+
+
 def test_stream_chat_matches_chat_answer(agent):
     """流式最终答案应与非流式 chat 一致（同一图、同一逻辑）。"""
-    streamed = list(agent.stream_chat("u-eq", "分析我的音乐品味"))
+    streamed, _ = _stream_types(agent, "分析我的音乐品味", "u-eq")
     final = streamed[-1]
     assert final.type == "final"
     assert final.content

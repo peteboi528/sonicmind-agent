@@ -26,7 +26,13 @@ from app.answer import (
 from app.config import settings
 from app.context import ContextBudgetManager, ContextSource
 from app.graph.tag_rules import extract_tags
-from app.intents import get_intent, is_continuation, match_intent_by_keywords
+from app.intents import (
+    expand_content_negation,
+    extract_content_negations,
+    get_intent,
+    is_continuation,
+    match_intent_by_keywords,
+)
 from app.llm.observability import (
     capture_llm_stats,
     empty_runtime_metrics,
@@ -35,14 +41,26 @@ from app.llm.observability import (
 )
 from app.llm.routing import select_llm
 from app.llm.structured import extract_json_dict
-from app.models import AgentAnswer, AgentPlan, ExternalTrack, QueryPlanPayload, RetrievalPlan, StreamEvent
-from app.prompts import QUERY_PLAN_REPAIR_SYSTEM, QUERY_PLAN_REPAIR_USER, QUERY_PLAN_SYSTEM, QUERY_PLAN_VERSION
+from app.models import (
+    AgentAnswer,
+    AgentPlan,
+    ExternalTrack,
+    QueryPlanPayload,
+    RecoveryDecision,
+    RetrievalPlan,
+    StreamEvent,
+    ToolOutcome,
+    ToolStage,
+)
+from app.prompts import QUERY_PLAN_SYSTEM, QUERY_PLAN_VERSION
 from app.prompts.reflect import (
     CANDIDATE_REFLECTION_SYSTEM,
     CANDIDATE_REFLECTION_USER,
     CANDIDATE_REFLECTION_VERSION,
 )
-from app.tools.registry import get_handler
+from app.tools.contracts import ToolCall, ToolError, ToolResult, ToolRisk, ToolStatus
+from app.tools.handlers import _apply_language_filter  # noqa: F401  # re-export: tests/test_query_rewrite 从本模块导入
+from app.tools.registry import get_handler, get_tool_spec
 
 logger = logging.getLogger(__name__)
 
@@ -89,28 +107,58 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         **state,
         "context": context,
         "results": [],
+        "tool_outcomes": [],
         "trace": ["[load_context] 载入记忆、目标和资源库摘要。", *recall_lines, *report.as_lines()],
         "events": [StreamEvent(type="plan", content="正在读取记忆和资源库状态。")],
     }
 
 
-def plan_intent(agent: AudioVisualAgent, state: AgentState) -> AgentState:
+async def plan_intent_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
+    context = state.get("context") or {}
+    plan, prompt_versions, runtime_metrics = await plan_with_llm_with_meta_async(
+        agent,
+        state["query"],
+        context.get("history_text", ""),
+        context.get("memory_query", ""),
+    )
+    return _finish_plan_intent(agent, state, plan, prompt_versions, runtime_metrics)
+
+
+def _finish_plan_intent(
+    agent: AudioVisualAgent,
+    state: AgentState,
+    plan: AgentPlan | None,
+    prompt_versions: dict[str, str],
+    runtime_metrics: dict[str, float | int],
+) -> AgentState:
     query = state["query"]
     context = state.get("context") or {}
-    history_text = context.get("history_text", "")
-    plan, prompt_versions, runtime_metrics = plan_with_llm_with_meta(agent, query, history_text)
     plan = plan or build_agent_plan(query)
+    plan = _sanitize_retrieval_entities(plan)
     # 明确的旅程信号由确定性意图兜底，不能被 LLM 偶发误判成普通学习推荐。
     if match_intent_by_keywords(query) == "journey" and plan.intent != "journey":
         plan = build_agent_plan(query)
+    if match_intent_by_keywords(query) == "similar_artists" and plan.intent != "similar_artists":
+        spec = get_intent("similar_artists")
+        plan = plan.model_copy(update={
+            "intent": "similar_artists",
+            "strategy": spec.strategy_for(False),
+            "tools_needed": spec.tools_for(False),
+            "online_required": False,
+            "reasoning_summary": spec.summary,
+        })
     plan, inherited = _apply_dialogue_continuation(plan, query, context.get("dialogue_state"))
     # 安全网：LLM 可能把介绍/百科类问题误判为 discuss，检查关键词自动升级
     plan = _upgrade_artist_info(plan, query)
     state = _attach_semantic_recall_if_needed(agent, state, plan)
     context = state.get("context") or {}
+    plan, memory_seeds = _inject_preference_seeds(plan, query, context)
+    plan = _materialize_tool_stages(plan, query, state.get("top_k", 5))
     trace_line = f"[plan] {plan.reasoning_summary}"
     if inherited:
         trace_line += f"（延续上一轮：继承 {inherited}）"
+    if memory_seeds:
+        trace_line += f"（记忆检索种子：{'、'.join(memory_seeds)}）"
     if prompt_versions:
         trace_line += f" [prompt] {_format_prompt_versions(prompt_versions)}"
     return {
@@ -127,6 +175,145 @@ def plan_intent(agent: AudioVisualAgent, state: AgentState) -> AgentState:
             StreamEvent(type="plan", content=plan.reasoning_summary, payload=plan.model_dump(mode="json")),
         ],
     }
+
+
+_GENERIC_ENTITY_WORDS = {
+    "随便", "好听", "歌曲", "音乐", "推荐", "来点", "来几首", "一些",
+    "深夜", "放松", "专注", "学习", "工作", "跑步", "睡前", "chill",
+}
+_ENTITY_REQUEST_SIGNALS = ("来点", "来些", "推荐", "适合", "搜索", "搜一下", "找点", "歌曲", "音乐")
+
+
+def _sanitize_retrieval_entities(plan: AgentPlan) -> AgentPlan:
+    entities: list[str] = []
+    for item in plan.retrieval_plan.entities:
+        value = str(item or "").strip()
+        key = _constraint_key(value)
+        tags = extract_tags(value)
+        is_request_phrase = any(signal in value.lower() for signal in _ENTITY_REQUEST_SIGNALS)
+        is_pure_tag = bool(tags["genre"] or tags["mood"] or tags["scenario"]) and len(value) <= 12
+        if not value or key in {_constraint_key(word) for word in _GENERIC_ENTITY_WORDS}:
+            continue
+        if is_request_phrase or is_pure_tag:
+            continue
+        entities.append(value)
+    if entities == plan.retrieval_plan.entities:
+        return plan
+    return plan.model_copy(update={
+        "retrieval_plan": plan.retrieval_plan.model_copy(update={"entities": entities}),
+    })
+
+
+def _inject_preference_seeds(
+    plan: AgentPlan,
+    query: str,
+    context: dict[str, Any],
+) -> tuple[AgentPlan, list[str]]:
+    """Add low-specificity taste tags to broad retrieval without creating hard artist anchors."""
+    if plan.intent not in {"recommend", "playlist"}:
+        return plan, []
+    retrieval = plan.retrieval_plan
+    query_tags = extract_tags(query)
+    constraints = extract_content_negations(query)
+    explicit_genres = _without_negative_constraints(query_tags["genre"], constraints)
+    # An explicit artist/song or genre is authoritative; memory still participates in ranking,
+    # but must not redirect the retrieval query.
+    if retrieval.entities or explicit_genres:
+        return plan, []
+
+    memory_text = str(context.get("memory_query") or "").strip()
+    if not memory_text:
+        return plan, []
+    memory_tags = extract_tags(memory_text)
+    blocked = {_constraint_key(item) for item in constraints}
+    seeds: list[str] = []
+
+    def add(values: list[str], *, allowed: bool) -> None:
+        if not allowed:
+            return
+        explicit = [value for value in values if value.lower() in memory_text.lower()]
+        for value in [*explicit, *values]:
+            key = _constraint_key(value)
+            if key and key not in blocked and value not in seeds:
+                seeds.append(value)
+                break
+
+    add(memory_tags["genre"], allowed=True)
+    add(memory_tags["mood"], allowed=not query_tags["mood"])
+    seeds = seeds[:2]
+    if not seeds:
+        return plan, []
+
+    base = _strip_negative_query(retrieval.search_query or query, constraints)
+    parts = [base, *seeds]
+    merged: list[str] = []
+    seen: set[str] = set()
+    for value in parts:
+        value = str(value or "").strip()
+        key = _constraint_key(value)
+        if value and key and key not in seen:
+            merged.append(value)
+            seen.add(key)
+    revised_query = " ".join(merged).strip()
+    revised = retrieval.model_copy(update={
+        "use_vector": retrieval.use_vector or bool(seeds),
+        "search_query": revised_query,
+        "search_variants": _cap_search_variants([*retrieval.search_variants, " ".join(seeds)], revised_query),
+    })
+    return plan.model_copy(update={"retrieval_plan": revised}), seeds
+
+
+def _materialize_tool_stages(plan: AgentPlan, query: str, top_k: int) -> AgentPlan:
+    """Turn compatibility tool names into explicit calls and dependency stages."""
+    stages: list[ToolStage] = []
+    parallel_calls: list[ToolCall] = []
+    previous: list[str] = []
+
+    def flush() -> None:
+        nonlocal parallel_calls
+        if parallel_calls:
+            stages.append(ToolStage(calls=parallel_calls, parallel=len(parallel_calls) > 1))
+            parallel_calls = []
+
+    for name in plan.tools_needed:
+        call = ToolCall(name=name, arguments=_planned_arguments(name, query, plan, top_k))
+        if _tool_depends_on_prior_results(name, previous):
+            flush()
+            stages.append(ToolStage(calls=[call], parallel=False))
+        else:
+            parallel_calls.append(call)
+        previous.append(name)
+    flush()
+    return plan.model_copy(update={"stages": stages})
+
+
+def _planned_arguments(name: str, query: str, plan: AgentPlan, top_k: int) -> dict[str, Any]:
+    handler = get_handler(name) or name
+    count = plan.target_count or top_k
+    entity_query = _query_with_entities(query, plan)
+    if handler == "recommend":
+        return {"query": entity_query, "top_k": count}
+    if handler == "search":
+        return {"query": entity_query, "include_external": True}
+    if handler == "web_music_search":
+        return {"query": entity_query, "top_k": count}
+    if handler == "playlist":
+        return {"instruction": entity_query, "target_count": plan.target_count}
+    if handler == "taste_experiment":
+        return {"prompt": query, "total": plan.target_count or 12}
+    if handler in {"artist_albums", "video_search", "web_info_search"}:
+        return {"query": plan.retrieval_plan.entities[0] if handler == "artist_albums" and plan.retrieval_plan.entities else entity_query}
+    if handler == "similar_artists":
+        artist = plan.retrieval_plan.entities[0] if plan.retrieval_plan.entities else ""
+        return {"artist": artist, "top_k": plan.target_count or 6}
+    if handler == "import_netease_playlist":
+        return {"playlist_ref": query, "limit": plan.target_count or 100}
+    if handler in {
+        "feedback", "listening_history", "list_my_playlists", "find_on_platform",
+        "lyrics", "audio_features", "save_to_playlist", "favorite_track", "concert_events",
+    }:
+        return _infer_aux_arguments(handler, query, plan)
+    return {}
 
 
 def _attach_semantic_recall_if_needed(agent: AudioVisualAgent, state: AgentState, plan: AgentPlan) -> AgentState:
@@ -180,11 +367,20 @@ def _apply_dialogue_continuation(
         return p
 
     rp = plan.retrieval_plan
-    # 本轮已自带实体（用户重提了对象）→ 不继承旧实体，但排除集照挂，去重照常生效。
-    if rp.entities:
+    negative_constraints = extract_content_negations(query)
+    current_entities = _without_negative_constraints(rp.entities, negative_constraints)
+    if plan.intent == "similar_artists":
+        generic_refs = {"同类型", "同风格", "类似", "相似", "同类", "相似歌手", "类似歌手"}
+        current_entities = [item for item in current_entities if _constraint_key(item) not in generic_refs]
+    # 本轮正向实体代表话题切换；但“不要越南”里被 LLM 抽出的“越南”不是正向实体。
+    if current_entities:
+        if current_entities != rp.entities:
+            plan = plan.model_copy(update={
+                "retrieval_plan": rp.model_copy(update={"entities": current_entities}),
+            })
         return _mount_excluded(plan), ""
 
-    prev_entities = dialogue_state.get("entities") or []
+    prev_entities = _without_negative_constraints(dialogue_state.get("entities") or [], negative_constraints)
     prev_intent = dialogue_state.get("last_intent") or plan.intent
     if not prev_entities and prev_intent in {"chat"}:
         return _mount_excluded(plan), ""
@@ -201,11 +397,11 @@ def _apply_dialogue_continuation(
         genre_filter=rp.genre_filter or dialogue_state.get("genre_tags") or [],
         mood_filter=rp.mood_filter or dialogue_state.get("mood_tags") or [],
         scenario_filter=rp.scenario_filter or dialogue_state.get("scenario_tags") or [],
-        # search_query/language 由 LLM 在 query_plan 阶段已合并了多轮上下文，
-        # 程序化延续只兜底保留本轮 LLM 给的值（不回退覆盖，避免丢"转正向"结果）。
-        search_query=rp.search_query,
-        search_variants=rp.search_variants,
-        language_filter=rp.language_filter,
+        # LLM 改写为空、仍含否定或丢失前文种子时，程序化合并上一轮正向上下文。
+        search_query=_continuation_search_query(rp, dialogue_state, negative_constraints, prev_entities),
+        search_variants=_continuation_search_variants(rp.search_variants, negative_constraints),
+        language_filter=_continuation_language_filter(rp.language_filter, negative_constraints),
+        excluded_terms=list(dict.fromkeys([*rp.excluded_terms, *negative_constraints])),
     )
     new_plan = plan.model_copy(update={
         "intent": intent,
@@ -215,6 +411,84 @@ def _apply_dialogue_continuation(
         "retrieval_plan": merged,
     })
     return _mount_excluded(new_plan), "、".join(prev_entities) or prev_intent
+
+
+def _constraint_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9一-龥]+", "", value.lower())
+
+
+def _without_negative_constraints(values: list[str], constraints: list[str]) -> list[str]:
+    blocked = [
+        _constraint_key(alias)
+        for item in constraints
+        for alias in expand_content_negation(item)
+        if _constraint_key(alias)
+    ]
+    if not blocked:
+        return list(values)
+    return [
+        value for value in values
+        if not any(block in _constraint_key(value) or _constraint_key(value) in block for block in blocked)
+    ]
+
+
+def _strip_negative_query(text: str, constraints: list[str]) -> str:
+    cleaned = re.sub(
+        r"(?:不要|别放|别推|别推荐|不想听|排除|避开|去掉|no\s+|without\s+|exclude\s+|avoid\s+)"
+        r"[^，。,.!?！？]*",
+        " ", text, flags=re.IGNORECASE,
+    )
+    for constraint in constraints:
+        for alias in sorted(expand_content_negation(constraint), key=len, reverse=True):
+            cleaned = re.sub(re.escape(alias), " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(?:帮我|给我|推荐|来点|来些|找点|想听|几首|一些)", " ", cleaned)
+    cleaned = re.sub(r"(?:歌曲|音乐)", " ", cleaned)
+    return " ".join(cleaned.split()).strip()
+
+
+def _continuation_search_query(
+    retrieval: RetrievalPlan,
+    dialogue_state: dict[str, Any],
+    constraints: list[str],
+    inherited_entities: list[str],
+) -> str:
+    llm_query = _strip_negative_query(retrieval.search_query, constraints)
+    inherited = [
+        *inherited_entities,
+        *(dialogue_state.get("genre_tags") or []),
+        *(dialogue_state.get("mood_tags") or []),
+        *(dialogue_state.get("scenario_tags") or []),
+    ]
+    prior_query = _strip_negative_query(str(dialogue_state.get("last_query") or ""), constraints)
+    parts = [llm_query, *inherited]
+    if prior_query and not llm_query and not any(str(item).strip() for item in inherited):
+        parts.append(prior_query)
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        part = part.strip()
+        key = _constraint_key(part)
+        if not part or not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(part)
+    return " ".join(deduped).strip() or "音乐"
+
+
+def _continuation_search_variants(variants: list[str], constraints: list[str]) -> list[str]:
+    cleaned = [_strip_negative_query(item, constraints) for item in variants]
+    return list(dict.fromkeys(item for item in cleaned if item))
+
+
+def _continuation_language_filter(current: str, constraints: list[str]) -> str:
+    if current:
+        return current
+    normalized = " ".join(constraints).lower()
+    if any(token in normalized for token in ("中文", "华语", "国语", "chinese")):
+        return "en"
+    if any(token in normalized for token in ("英文", "英语", "欧美", "english")):
+        return "zh"
+    return ""
 
 
 # artist_info 安全网信号——命中时从 discuss 升级到 artist_info
@@ -242,102 +516,6 @@ def _upgrade_artist_info(plan: AgentPlan, query: str) -> AgentPlan:
     return plan
 
 
-def execute_tools(agent: AudioVisualAgent, state: AgentState) -> AgentState:
-    plan = state["plan"]
-    query = state["query"]
-    user_id = state["user_id"]
-    top_k = state.get("top_k", 5)
-    results = list(state.get("results", []))
-    trace = list(state.get("trace", []))
-    events = list(state.get("events", []))
-    refine_count = state.get("_refine_count", 0)
-    if state.get("_need_refine"):
-        refine_count += 1
-
-    executed = _execute_tool_chain(agent, plan.tools_needed, plan, query, user_id, top_k, results, trace, events)
-
-    # 标记是否需要 web_fallback（由 route_after_execute 条件边消费）。
-    need_fallback = _needs_web_fallback(plan, results, executed)
-    return {
-        **state,
-        "results": results,
-        "trace": trace,
-        "events": events,
-        "_need_web_fallback": need_fallback,
-        "_need_refine": False,
-        "_refine_count": refine_count,
-    }
-
-
-def _execute_tool_chain(
-    agent: AudioVisualAgent,
-    tools: list[str],
-    plan: AgentPlan,
-    query: str,
-    user_id: str,
-    top_k: int,
-    results: list[dict[str, Any]],
-    trace: list[str],
-    events: list[StreamEvent],
-) -> set[str]:
-    executed: set[str] = set()
-    if not settings.enable_parallel_tools or len(tools) <= 1:
-        for tool in tools:
-            if _run_tool_safely(agent, tool, plan, query, user_id, top_k, results, trace, events):
-                executed.add(tool)
-        return executed
-
-    batch: list[str] = []
-
-    def flush_batch() -> None:
-        nonlocal batch
-        if not batch:
-            return
-        for tool, ok, local_results, local_trace, local_events in _run_independent_tools_parallel(
-            agent, batch, plan, query, user_id, top_k
-        ):
-            results.extend(local_results)
-            trace.extend(local_trace)
-            events.extend(local_events)
-            if ok:
-                executed.add(tool)
-        batch = []
-
-    for index, tool in enumerate(tools):
-        if _tool_depends_on_prior_results(tool, tools[:index]):
-            flush_batch()
-            if _run_tool_safely(agent, tool, plan, query, user_id, top_k, results, trace, events):
-                executed.add(tool)
-        else:
-            batch.append(tool)
-    flush_batch()
-    return executed
-
-
-def _run_independent_tools_parallel(
-    agent: AudioVisualAgent,
-    tools: list[str],
-    plan: AgentPlan,
-    query: str,
-    user_id: str,
-    top_k: int,
-) -> list[tuple[str, bool, list[dict[str, Any]], list[str], list[StreamEvent]]]:
-    from app.concurrency import run_parallel
-
-    def make_task(tool: str):
-        def run_one() -> tuple[str, bool, list[dict[str, Any]], list[str], list[StreamEvent]]:
-            local_results: list[dict[str, Any]] = []
-            local_trace: list[str] = []
-            local_events: list[StreamEvent] = []
-            ok = _run_tool_safely(agent, tool, plan, query, user_id, top_k, local_results, local_trace, local_events)
-            return tool, ok, local_results, local_trace, local_events
-
-        return tool, run_one
-
-    default = ("", False, [], [], [])
-    return run_parallel([make_task(tool) for tool in tools], timeout=12.0, default=default)
-
-
 def _tool_depends_on_prior_results(tool: str, prior_tools: list[str] | None = None) -> bool:
     handler = get_handler(tool)
     if handler == "playlist":
@@ -350,21 +528,30 @@ def _tool_depends_on_prior_results(tool: str, prior_tools: list[str] | None = No
     )
 
 
-def web_fallback(agent: AudioVisualAgent, state: AgentState) -> AgentState:
-    """web_fallback 节点（对齐 SoulTuner route_after_search / _need_web_fallback）：
-    本地/检索类候选不足时联网兜底补搜。"""
+async def web_fallback_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     plan = state["plan"]
     query = state["query"]
     user_id = state["user_id"]
     top_k = state.get("top_k", 5)
     results = list(state.get("results", []))
-    trace = list(state.get("trace", []))
-    events = list(state.get("events", []))
-
-    trace.append("[web_fallback] 本地候选不足，触发联网兜底补搜。")
-    events.append(StreamEvent(type="eval", content="本地候选不足，联网兜底补搜。"))
-    _run_tool_safely(agent, "web_music_search", plan, query, user_id, top_k, results, trace, events)
-    return {**state, "results": results, "trace": trace, "events": events, "_need_web_fallback": False}
+    trace = [*state.get("trace", []), "[web_fallback] 本地候选不足，触发联网兜底补搜。"]
+    events = [*state.get("events", []), StreamEvent(type="eval", content="本地候选不足，联网兜底补搜。")]
+    outcomes = list(state.get("tool_outcomes", []))
+    call = ToolCall(name="web_music_search", arguments=_planned_arguments("web_music_search", query, plan, top_k))
+    local_results: list[dict[str, Any]] = []
+    runtime_result = await _run_tool_async_safely(
+        agent, call, plan, query, user_id, top_k, results,
+        local_results, trace, events,
+        state.get("thread_id") or f"{user_id}:default", state.get("run_id") or "",
+        bool(state.get("_interrupt_enabled")),
+    )
+    results.extend(local_results)
+    if runtime_result is not None:
+        outcomes.append(_tool_outcome(call, runtime_result, state.get("_refine_count", 0)))
+    return {
+        **state, "results": results, "trace": trace, "events": events,
+        "tool_outcomes": outcomes, "_need_web_fallback": False,
+    }
 
 
 def route_after_execute(state: AgentState) -> str:
@@ -410,252 +597,301 @@ def _query_with_entities(query: str, plan: AgentPlan) -> str:
     return " ".join([base, *extra]).strip()
 
 
-def _apply_language_filter(tracks: list[Any], language_filter: str, target: int) -> list[Any]:
-    """按语言偏好对候选做安全后过滤（detect_language 仅判 zh/en）。
-
-    安全原则：仅在 zh/en 两种可判定语言上过滤；过滤后candidate 太少（<目标一半）
-    时回退不过滤，避免把结果删空——语言偏好是"倾向"不是"硬删到空"。
-    LLM 已把语言需求转进 search_query 做正向检索，这里只是兜底纠偏。
-    """
-    if language_filter not in {"zh", "en"} or not tracks:
-        return tracks
-    from app.recommend.rerank import detect_language
-    kept = [t for t in tracks if detect_language(t) == language_filter]
-    if len(kept) < max(1, target // 2):
-        return tracks  # 过滤过狠，宁可不过滤也不删空
-    return kept
-
-
-def _filter_excluded(tracks: list[Any], excluded: list[dict[str, str]]) -> list[Any]:
-    """过滤掉上一轮已展示给用户的歌曲，避免延续指令时推荐重复曲目。
-
-    匹配策略：(title, source_id) 组合键，source_id 为空时退化为 title 匹配。
-    """
-    if not excluded:
-        return tracks
-    seen_keys: set[tuple[str, str]] = set()
-    seen_titles: set[str] = set()
-    for ex in excluded:
-        title = ex.get("title", "").lower().strip()
-        sid = ex.get("source_id", "").strip()
-        if title:
-            seen_titles.add(title)
-            if sid:
-                seen_keys.add((title, sid))
-    filtered = []
-    for t in tracks:
-        t_title = (getattr(t, "title", "") or "").lower().strip()
-        t_sid = getattr(t, "external_id", "") or getattr(t, "asset_id", "") or ""
-        # source_id 精确匹配
-        if t_title and t_sid and (t_title, t_sid) in seen_keys:
-            continue
-        # title 退化匹配
-        if t_title and t_title in seen_titles:
-            continue
-        filtered.append(t)
-    return filtered
-
-
-def _run_tool_safely(
-    agent: AudioVisualAgent,
-    tool: str,
-    plan: AgentPlan,
-    query: str,
-    user_id: str,
-    top_k: int,
+def _record_runtime_result(
+    handler: str,
+    call: ToolCall,
+    arguments: dict[str, Any],
+    runtime_result: ToolResult,
     results: list[dict[str, Any]],
     trace: list[str],
     events: list[StreamEvent],
-) -> bool:
-    try:
-        _run_tool(agent, tool, plan, query, user_id, top_k, results, trace, events)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        message = f"[tool_error] {tool} 失败，已跳过：{exc}"
-        trace.append(message)
+    *,
+    checkpoint_store: Any,
+    thread_id: str,
+    user_id: str,
+    query: str,
+) -> ToolResult:
+    summary = runtime_result.summary or handler
+    if runtime_result.data:
+        results.append(runtime_result.data)
+    if runtime_result.status == ToolStatus.ERROR:
+        error_message = runtime_result.error.message if runtime_result.error else f"{handler} failed"
+        trace.append(f"[tool_error] {handler} 失败，已跳过：{error_message}")
         events.append(StreamEvent(
             type="error",
-            content=f"{tool} 暂时不可用，已跳过该工具。",
-            payload={"tool": tool, "error": str(exc)},
+            content=f"{handler} 暂时不可用，已跳过该工具。",
+            payload={"tool": handler, "error": error_message},
         ))
-        return False
+    else:
+        trace.append(f"[{handler}] {summary}")
+    trace.append(
+        f"[tool_status] tool={handler} status={runtime_result.status.value} "
+        f"candidates={len(runtime_result.cards)}"
+    )
+    if runtime_result.status == ToolStatus.CONFIRMATION_REQUIRED:
+        checkpoint_store.put(
+            call.call_id, thread_id, user_id, handler, arguments, query,
+        )
+        events.append(StreamEvent(
+            type="confirmation_required",
+            content=summary,
+            payload={"action_id": call.call_id, "tool": handler, "arguments": arguments},
+        ))
+    if handler == "artist_albums":
+        for album in runtime_result.data.get("albums", []):
+            events.append(StreamEvent(type="album_card", content=album.get("name", ""), payload={"album": album}))
+    if handler == "similar_artists":
+        for artist in runtime_result.data.get("artists", []):
+            events.append(StreamEvent(type="artist_card", content=artist.get("name", ""), payload=artist))
+    if runtime_result.cards:
+        payload: dict[str, Any] = {"count": len(runtime_result.cards), "cards": runtime_result.cards}
+        if handler == "taste_experiment":
+            experiment = runtime_result.data.get("experiment")
+            payload["taste_experiment"] = experiment.model_dump(mode="json") if hasattr(experiment, "model_dump") else experiment
+        if handler == "journey":
+            payload["journey"] = runtime_result.data.get("journey")
+        events.append(StreamEvent(type="candidates", content=f"{handler} {len(runtime_result.cards)} 个结果", payload=payload))
+    events.append(StreamEvent(
+        type="tool_result", content=summary,
+        payload={"tool": handler, "status": runtime_result.status.value},
+    ))
+    return runtime_result
 
 
-def _run_tool(
+async def execute_tools_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
+    """Native async stage executor used by the streaming LangGraph."""
+    import asyncio
+
+    plan = state["plan"]
+    query = state["query"]
+    user_id = state["user_id"]
+    top_k = state.get("top_k", 5)
+    results = list(state.get("results", []))
+    trace = list(state.get("trace", []))
+    events = list(state.get("events", []))
+    outcomes = list(state.get("tool_outcomes", []))
+    thread_id = state.get("thread_id") or f"{user_id}:default"
+    run_id = state.get("run_id") or ""
+    interrupt_enabled = bool(state.get("_interrupt_enabled"))
+    refine_count = state.get("_refine_count", 0) + (1 if state.get("_need_refine") else 0)
+    executed: set[str] = set()
+
+    async def run_call(call: ToolCall, shared_results: list[dict[str, Any]]):
+        local_results: list[dict[str, Any]] = []
+        local_trace: list[str] = []
+        local_events: list[StreamEvent] = []
+        result = await _run_tool_async_safely(
+            agent, call, plan, query, user_id, top_k, shared_results,
+            local_results, local_trace, local_events,
+            thread_id, run_id, interrupt_enabled,
+        )
+        return call, result, local_results, local_trace, local_events
+
+    for stage in plan.stages or [ToolStage(calls=[], parallel=True)]:
+        if stage.parallel and len(stage.calls) > 1:
+            completed = await asyncio.gather(*(run_call(call, list(results)) for call in stage.calls))
+        else:
+            completed = []
+            for call in stage.calls:
+                completed.append(await run_call(call, results))
+                _, runtime_result, local_results, local_trace, local_events = completed[-1]
+                results.extend(local_results)
+                trace.extend(local_trace)
+                events.extend(local_events)
+                if runtime_result is not None:
+                    outcomes.append(_tool_outcome(call, runtime_result, refine_count))
+                    executed.add(call.name)
+            continue
+        for call, runtime_result, local_results, local_trace, local_events in completed:
+            results.extend(local_results)
+            trace.extend(local_trace)
+            events.extend(local_events)
+            if runtime_result is not None:
+                outcomes.append(_tool_outcome(call, runtime_result, refine_count))
+                executed.add(call.name)
+    return {
+        **state,
+        "results": results,
+        "trace": trace,
+        "events": events,
+        "tool_outcomes": outcomes,
+        "_need_web_fallback": _needs_web_fallback(plan, results, executed),
+        "_need_refine": False,
+        "_refine_count": refine_count,
+        "_evaluated": False,
+    }
+
+
+async def _run_tool_async_safely(
     agent: AudioVisualAgent,
-    tool: str,
+    call: ToolCall,
     plan: AgentPlan,
     query: str,
     user_id: str,
     top_k: int,
+    prior_results: list[dict[str, Any]],
     results: list[dict[str, Any]],
     trace: list[str],
     events: list[StreamEvent],
-) -> None:
-    handler = get_handler(tool)
+    thread_id: str,
+    run_id: str,
+    interrupt_enabled: bool,
+) -> ToolResult | None:
+    import asyncio
+
+    try:
+        return await _run_tool_async(
+            agent, call, plan, query, user_id, top_k, prior_results,
+            results, trace, events, thread_id, run_id, interrupt_enabled,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        if any(base.__name__ == "GraphBubbleUp" for base in type(exc).__mro__):
+            raise
+        handler = get_handler(call.name) or call.name
+        result = ToolResult(
+            tool=handler, status=ToolStatus.ERROR,
+            error=ToolError(kind=type(exc).__name__, message=str(exc)),
+        )
+        trace.extend([
+            f"[tool_error] {handler} 失败，已跳过：{exc}",
+            f"[tool_status] tool={handler} status=error candidates=0",
+        ])
+        events.append(StreamEvent(
+            type="error", content=f"{handler} 暂时不可用，已跳过该工具。",
+            payload={"tool": handler, "error": str(exc)},
+        ))
+        return result
+
+
+async def _run_tool_async(
+    agent: AudioVisualAgent,
+    call: ToolCall,
+    plan: AgentPlan,
+    query: str,
+    user_id: str,
+    top_k: int,
+    prior_results: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    trace: list[str],
+    events: list[StreamEvent],
+    thread_id: str,
+    run_id: str,
+    interrupt_enabled: bool,
+) -> ToolResult:
+    handler = get_handler(call.name)
     if handler is None:
-        raise ValueError(f"Unknown tool: {tool}")
-    events.append(StreamEvent(type="tool_start", content=f"调用 {tool}", payload={"tool": tool}))
-    # P1 查询改写：优先用 LLM 在 query_plan 阶段合成的自包含正向 search_query
-    # （已融合多轮上下文 + 把"不要中文"这类否定转成正向词）。为空才降级回
-    # _extract_search_query 关键词切词路径（mock/无 key/旧 plan 不破）。
-    from app.agent import _extract_search_query as _extract_core
-    llm_search_query = (getattr(plan.retrieval_plan, "search_query", "") or "").strip()
-    search_core = llm_search_query or _extract_core(query) or query
-    language_filter = (getattr(plan.retrieval_plan, "language_filter", "") or "").strip().lower()
-    # 延续指令时从 plan 中提取上一轮已展示的曲目（用于去重）
-    excluded_tracks = getattr(plan, "_excluded_tracks", None) or []
-    if handler == "web_music_search":
-        # 搜索用核心词 + plan 实体（LLM 抽取的歌手/歌名），相关性过滤只用核心词
-        search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
-        search_variants = getattr(plan.retrieval_plan, "search_variants", []) or []
-        # 延续去重时翻页：offset=已展示数，跳过那批最热结果，取更深位次新歌。
-        # 不翻页的话同一查询永远返回 top-N，排除已展示后很快就无新歌可给。
-        rec_offset = len(excluded_tracks) if excluded_tracks else 0
-        tracks = agent.search_web_music(
-            search_q, top_k=max(plan.target_count or top_k, top_k),
-            relevance_query=search_core, offset=rec_offset, variants=search_variants,
-        )
-        # 去除上一轮已展示的歌曲
-        if excluded_tracks:
-            tracks = _filter_excluded(tracks, excluded_tracks)
-        tracks = _apply_language_filter(tracks, language_filter, plan.target_count or top_k)
-        for track in tracks:
-            if hasattr(agent, "library"):
-                agent.library.upsert_external(track)
-        results.append({"type": "web_music_search", "tracks": tracks})
-        trace.append(f"[web_music_search] 获取 {len(tracks)} 个线上/候选结果。")
-        # 先吐候选卡片（对齐 SoulTuner __songs__ 先于解释文本的体验）。
-        cards = [_song_card(t) for t in tracks]
-        events.append(StreamEvent(type="candidates", content=f"候选 {len(tracks)} 个", payload={"count": len(tracks), "cards": cards}))
-    elif handler == "recommend":
-        # 延续指令（"多来几首"）本身不含实体，但 plan 从上一轮继承了实体；
-        # 拼进 query 让 recommend_for_query 走精确搜索而非情绪/场景路由（否则搜空）。
-        seed_tracks = _collect_tracks(results)
-        rec = agent.recommend_for_query(
-            user_id,
-            _query_with_entities(query, plan),
-            top_k=top_k,
-            excluded_tracks=excluded_tracks,
-            search_variants=getattr(plan.retrieval_plan, "search_variants", []) or [],
-            seed_tracks=seed_tracks,
-        )
-        results.append({"type": "daily_recommend", "recommendation": rec})
-        trace.append(f"[recommend] 生成 {len(rec.tracks)} 首推荐。")
-        cards = [_song_card(item.asset, reason=item.reason, score=item.score, components=item.components) for item in rec.tracks]
-        events.append(StreamEvent(type="candidates", content=f"推荐 {len(cards)} 首", payload={"count": len(cards), "cards": cards}))
-    elif handler == "playlist":
-        seed_tracks = _collect_tracks(results)
-        playlist = agent.generate_playlist(user_id, _query_with_entities(query, plan), seed_tracks=seed_tracks, target_count=plan.target_count)
-        # 延续指令去重：过滤掉上一轮已展示的曲目
-        if excluded_tracks and playlist.tracks:
-            playlist.tracks = _filter_excluded(playlist.tracks, excluded_tracks)
-        results.append({"type": "playlist", "playlist": playlist})
-        trace.append(f"[playlist] 生成 {len(playlist.tracks)} 首歌单。")
-        cards = [_song_card(t) for t in playlist.tracks]
-        events.append(StreamEvent(type="candidates", content=f"歌单 {len(cards)} 首", payload={"count": len(cards), "cards": cards}))
-    elif handler == "search":
-        rec_offset = len(excluded_tracks) if excluded_tracks else 0
-        search = agent.search(
-            user_id, _query_with_entities(query, plan),
-            include_external=True, top_k=max(top_k, 12), offset=rec_offset,
-        )
-        # 延续指令去重：过滤掉上一轮已展示的曲目
-        if excluded_tracks:
-            search.external = _filter_excluded(search.external, excluded_tracks)
-        results.append({"type": "search", "response": search})
-        trace.append(f"[search] 本地 {len(search.local)} 首，外部 {len(search.external)} 首。")
-        cards = [_song_card(track) for track in _collect_tracks([results[-1]])]
-        events.append(StreamEvent(
-            type="candidates",
-            content=f"搜索结果 {len(cards)} 首",
-            payload={"count": len(cards), "cards": cards},
+        raise ValueError(f"Unknown tool: {call.name}")
+    spec = get_tool_spec(handler)
+    from app.tools.contracts import ToolContext
+    from app.tools.service import checkpoint_store, tool_runtime
+
+    arguments = call.arguments or _planned_arguments(handler, query, plan, top_k)
+    call = call.model_copy(update={"name": handler, "arguments": arguments})
+    plan_payload = plan.model_dump(mode="json")
+    plan_payload["_excluded_tracks"] = getattr(plan, "_excluded_tracks", None) or []
+    events.append(StreamEvent(type="tool_start", content=f"调用 {handler}", payload={"tool": handler}))
+    confirmation: dict[str, Any] | None = None
+    runtime_result: ToolResult | None = None
+    if interrupt_enabled and spec is not None and spec.risk == ToolRisk.EXTERNAL_WRITE:
+        try:
+            arguments = spec.args_model.model_validate(arguments).model_dump(exclude_none=True)
+            call = call.model_copy(update={"arguments": arguments})
+        except Exception:
+            pass
+        else:
+            from langgraph.config import get_stream_writer
+            from langgraph.types import interrupt
+
+            action_payload = {
+                "action_id": call.call_id, "tool": handler,
+                "arguments": arguments, "query": query[:200],
+            }
+            created = checkpoint_store.put(
+                call.call_id, thread_id, user_id, handler, arguments, query,
+            )
+            if created:
+                get_stream_writer()(StreamEvent(
+                    type="confirmation_required",
+                    content="这是外部账号写操作，需要明确确认后执行。",
+                    payload=action_payload,
+                ).model_dump(mode="json"))
+            decision = interrupt(action_payload)
+            approved = (
+                isinstance(decision, dict)
+                and decision.get("action_id") == call.call_id
+                and decision.get("approved") is True
+            )
+            if not approved:
+                runtime_result = ToolResult(
+                    tool=handler, status=ToolStatus.CANCELLED,
+                    summary="用户已拒绝该外部写操作。",
+                    data={"action_id": call.call_id},
+                )
+            else:
+                confirmation = {"action_id": call.call_id, "approved": True}
+                if "confirm" in spec.args_schema:
+                    arguments = {**arguments, "confirm": True}
+                    call = call.model_copy(update={"arguments": arguments})
+    context_kwargs = {"run_id": run_id} if run_id else {}
+    if runtime_result is None:
+        runtime_result = await tool_runtime.execute(call, ToolContext(
+            thread_id=thread_id, user_id=user_id, query=query, plan=plan_payload,
+            prior_results=prior_results, confirmation=confirmation, agent=agent,
+            **context_kwargs,
         ))
-    elif handler == "artist_albums":
-        # 专辑推荐：直接取网易云真实专辑（带 album_id，可整张播放），不走单曲搜索
-        # （避开单曲端点限流导致的 netease-fallback 假候选）。实体优先用 LLM 抽取的
-        # entities（已解析"他"等共指），否则回退到核心检索词。
-        artist = (plan.retrieval_plan.entities[0].strip()
-                  if plan.retrieval_plan.entities and plan.retrieval_plan.entities[0].strip()
-                  else search_core)
-        albums = agent.recommend_artist_albums(user_id, artist, limit=min(plan.target_count or 6, 12))
-        results.append({"type": "artist_albums", "albums": albums})
-        trace.append(f"[artist_albums] 获取 {len(albums)} 张《{artist}》的专辑。")
-        for al in albums:
-            events.append(StreamEvent(
-                type="album_card",
-                content=al.get("name", ""),
-                payload={"album": al, "artist": artist},
-            ))
-    elif handler == "taste":
-        summary = agent.summarize_taste(user_id)
-        results.append({"type": "taste", "summary": summary})
-        trace.append("[taste] 已总结用户品味。")
-    elif handler == "taste_experiment":
-        experiment = agent.generate_taste_experiment(user_id, query, total=plan.target_count or 12)
-        results.append({"type": "taste_experiment", "experiment": experiment})
-        cards = [_taste_experiment_card(item) for segment in experiment.segments for item in segment.tracks]
-        trace.append(f"[taste_experiment] 生成 {len(cards)} 首三档品味实验候选。")
-        events.append(StreamEvent(
-            type="candidates",
-            content=f"品味实验 {len(cards)} 首",
-            payload={
-                "count": len(cards),
-                "cards": cards,
-                "taste_experiment": experiment.model_dump(mode="json"),
-            },
-        ))
-    elif handler == "import_netease_playlist":
-        imported = agent.import_netease_playlist(query, user_id=user_id, limit=plan.target_count or 100)
-        results.append({"type": "import_netease_playlist", "result": imported})
-        trace.append(f"[import] 导入歌单《{imported.get('name', '')}》：新增 {imported.get('imported', 0)} 首。")
-        imported_tracks = imported.get("tracks", [])
-        cards = [_song_card(track) for track in imported_tracks[: plan.target_count or 12]]
-        events.append(StreamEvent(
-            type="candidates",
-            content=f"已导入 {len(imported_tracks)} 首",
-            payload={"count": len(cards), "cards": cards},
-        ))
-    elif handler == "journey":
-        journey = agent.generate_music_journey(user_id, query)
-        results.append({"type": "journey", "journey": journey})
-        cards = []
-        for phase in journey.get("phases", []):
-            for raw_track in phase.get("tracks", []):
-                track = ExternalTrack.model_validate(raw_track)
-                card = _song_card(track, reason=f"{phase['name']}：{phase['goal']}")
-                card["journey_phase"] = phase["name"]
-                cards.append(card)
-        trace.append(
-            f"[journey] 生成 {len(journey.get('phases', []))} 个阶段、{len(cards)} 首曲目。"
-        )
-        events.append(StreamEvent(
-            type="candidates",
-            content=f"音乐旅程 {len(cards)} 首",
-            payload={"count": len(cards), "cards": cards, "journey": journey},
-        ))
-    elif handler == "video_search":
-        # video 意图：直接搜 B站/YouTube，不走网易云
-        search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
-        tracks = agent.search_videos(search_q, top_k=plan.target_count or top_k)
-        for track in tracks:
-            if hasattr(agent, "library"):
-                agent.library.upsert_external(track)
-        results.append({"type": "video_search", "tracks": tracks})
-        trace.append(f"[video_search] 获取 {len(tracks)} 个视频结果（B站+YouTube）。")
-        cards = [_song_card(t) for t in tracks]
-        events.append(StreamEvent(type="candidates", content=f"视频 {len(tracks)} 个", payload={"count": len(tracks), "cards": cards}))
-    elif handler == "web_info_search":
-        # artist_info 意图：用搜索引擎查百科
-        search_q = " ".join(filter(None, [search_core, *plan.retrieval_plan.entities])).strip()
-        search_results = agent.search_artist_info(search_q)
-        results.append({"type": "web_info_search", "search_results": search_results})
-        trace.append(f"[web_info_search] 获取 {len(search_results)} 条搜索结果。")
-    elif handler == "fetch_metadata":
-        data = agent.fetch_track_metadata(use_network=True)
-        results.append({"type": "fetch_metadata", "metadata": data})
-        trace.append("[fetch_metadata] 已尝试补全真实元数据。")
-    events.append(StreamEvent(type="tool_result", content=trace[-1], payload={"tool": tool}))
+    return _record_runtime_result(
+        handler, call, arguments, runtime_result, results, trace, events,
+        checkpoint_store=checkpoint_store, thread_id=thread_id,
+        user_id=user_id, query=query,
+    )
+
+
+def _tool_outcome(call: ToolCall, result: ToolResult, attempt: int) -> dict[str, Any]:
+    return ToolOutcome(
+        call_id=call.call_id,
+        tool=result.tool,
+        status=result.status.value,
+        arguments=call.arguments,
+        summary=result.summary or "",
+        error=result.error.model_dump(mode="json") if result.error else None,
+        card_count=len(result.cards),
+        provenance=result.provenance,
+        metrics=result.metrics,
+        attempt=attempt,
+    ).model_dump(mode="json")
+
+
+def _infer_aux_arguments(handler: str, query: str, plan: AgentPlan) -> dict[str, Any]:
+    """Deterministic fallback arguments, materialized into ToolCall during planning."""
+    entities = [item.strip() for item in plan.retrieval_plan.entities if item.strip()]
+    lowered = query.lower()
+    if handler == "feedback":
+        if any(token in lowered for token in ("不喜欢", "别再", "讨厌")):
+            action = "dislike"
+        elif any(token in lowered for token in ("跳过", "切歌", "skip")):
+            action = "skip"
+        elif any(token in lowered for token in ("播放了", "听过", "played")):
+            action = "played"
+        else:
+            action = "like"
+        return {"action": action, "title": entities[0] if entities else "", "reason": query}
+    if handler == "listening_history":
+        window = "week" if "上周" in query or "最近一周" in query else "month" if "本月" in query or "最近一个月" in query else "recent"
+        return {"window": window, "group_by": "artist" if "歌手" in query else "track", "top_k": plan.target_count or 10}
+    if handler == "list_my_playlists":
+        return {}
+    if handler == "find_on_platform":
+        platform = "youtube" if "youtube" in lowered else "bilibili" if any(token in lowered for token in ("b站", "bilibili")) else "netease"
+        return {"title": entities[0] if entities else query, "artist": entities[1] if len(entities) > 1 else "", "platform": platform}
+    if handler == "lyrics":
+        return {"title": entities[0] if entities else query, "artist": entities[1] if len(entities) > 1 else ""}
+    if handler == "audio_features":
+        return {"title": entities[0] if entities else query}
+    if handler == "concert_events":
+        return {"artist": entities[0] if entities else query}
+    return {"confirm": False}
 
 
 def evaluate(agent: AudioVisualAgent, state: AgentState) -> AgentState:
@@ -682,41 +918,42 @@ def _ensure_evaluated_state(state: AgentState) -> AgentState:
     }
 
 
-def reflect(agent: AudioVisualAgent, state: AgentState) -> AgentState:
+async def reflect_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     state = _ensure_evaluated_state(state)
     try:
-        return _reflect_impl(agent, state)
+        recovery = await _prepare_empty_result_recovery_async(agent, state)
+        if recovery is not None:
+            return recovery
+        plan = state["plan"]
+        if plan.intent not in {"recommend", "search", "playlist", "video"} or settings.mock_mode:
+            return {**state, "_need_refine": False}
+        tracks = _collect_tracks(state.get("results", []))
+        constraints = _gather_constraints(agent, state)
+        if not tracks or not constraints:
+            return {**state, "_need_refine": False}
+        reflected = await _llm_reflect_tracks_async(agent, tracks, constraints)
+        return _apply_reflection_result(state, tracks, *reflected)
     except Exception as exc:  # noqa: BLE001
-        trace = [*state.get("trace", []), f"[reflect_error] 自省节点失败，已跳过：{exc}"]
-        events = [*state.get("events", []), StreamEvent(
-            type="eval",
-            content="自省节点暂时不可用，已跳过并继续生成回答。",
-            payload={"error": str(exc)},
-        )]
-        return {**state, "trace": trace, "events": events, "_need_refine": False}
+        return {
+            **state,
+            "trace": [*state.get("trace", []), f"[reflect_error] 自省节点失败，已跳过：{exc}"],
+            "events": [*state.get("events", []), StreamEvent(
+                type="eval", content="自省节点暂时不可用，已跳过并继续生成回答。",
+                payload={"error": str(exc)},
+            )],
+            "_need_refine": False,
+        }
 
 
-def _reflect_impl(agent: AudioVisualAgent, state: AgentState) -> AgentState:
-    """P1-F：finalize 前的自省节点——LLM 语义核对候选是否违反用户约束，剔除违规者。
-
-    把质量控制从「事后清理」（guard_answer 删幻觉歌名）升级到「交付前自查」。
-    - 仅对会列曲目的意图（recommend/search/playlist/video）生效。
-    - mock 模式（无真实 LLM）跳过：确定性 _filter_excluded 已在 execute_tools 跑过子串过滤。
-    - LLM 调用失败/无违反时不改动 results（安全降级，不阻塞主流程）。
-    """
+def _apply_reflection_result(
+    state: AgentState,
+    tracks: list[Any],
+    drop_indices: list[int],
+    used_reflection_prompt: bool,
+    llm_metrics: dict[str, float | int],
+) -> AgentState:
     plan = state["plan"]
-    if plan.intent not in {"recommend", "search", "playlist", "video"}:
-        return {**state, "_need_refine": False}
-    if settings.mock_mode:
-        return {**state, "_need_refine": False}
     results = state.get("results", [])
-    tracks = _collect_tracks(results)
-    if not tracks:
-        return {**state, "_need_refine": False}
-    constraints = _gather_constraints(agent, state)
-    if not constraints:
-        return {**state, "_need_refine": False}
-    drop_indices, used_reflection_prompt, llm_metrics = _llm_reflect_tracks(agent, tracks, constraints)
     trace = list(state.get("trace", []))
     events = list(state.get("events", []))
     context = dict(state.get("context") or {})
@@ -755,6 +992,236 @@ def _reflect_impl(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     trace.append(note)
     events.append(StreamEvent(type="eval", content=note))
     return {**state, "results": results, "trace": trace, "events": events, "context": context, "_need_refine": need_refine}
+
+
+_RECOVERY_INTENTS = {"recommend", "search", "playlist"}
+_NO_AUTO_RECOVERY = {
+    ToolStatus.AUTH_REQUIRED.value,
+    ToolStatus.CONFIRMATION_REQUIRED.value,
+    ToolStatus.UNSUPPORTED.value,
+    ToolStatus.CANCELLED.value,
+}
+_NETWORK_ERROR_KINDS = {
+    "timeout", "timeouterror", "connectionerror", "connecterror", "readerror",
+    "remoteprotocolerror", "oserror",
+}
+
+
+async def _prepare_empty_result_recovery_async(
+    agent: AudioVisualAgent,
+    state: AgentState,
+) -> AgentState | None:
+    if not settings.enable_empty_result_recovery:
+        return None
+    attempt = int(state.get("_refine_count", 0))
+    if attempt >= settings.empty_result_recovery_max_attempts or state["plan"].intent not in _RECOVERY_INTENTS:
+        return None
+    current = [item for item in state.get("tool_outcomes", []) if int(item.get("attempt", 0)) == attempt]
+    if not current:
+        return None
+    statuses = {str(item.get("status") or "") for item in current}
+    if statuses and statuses.issubset(_NO_AUTO_RECOVERY):
+        return None
+    decision = _deterministic_recovery_decision(state, current)
+    context = dict(state.get("context") or {})
+    if decision is None and not context.get("recovery_llm_used"):
+        decision = await _llm_recovery_decision_async(agent, state, current)
+        context["recovery_llm_used"] = True
+    if decision is None or decision.action != "retry" or not decision.calls:
+        return None
+    return _apply_recovery_decision(state, current, decision, context)
+
+
+def _apply_recovery_decision(
+    state: AgentState,
+    current: list[dict[str, Any]],
+    decision: RecoveryDecision,
+    context: dict[str, Any],
+) -> AgentState | None:
+    plan = state["plan"]
+    attempt = int(state.get("_refine_count", 0))
+
+    blocked_tools = {
+        str(item.get("tool") or "")
+        for item in current
+        if item.get("status") in {*_NO_AUTO_RECOVERY, ToolStatus.ERROR.value}
+    }
+    calls = [name for name in _safe_recovery_calls(decision.calls) if name not in blocked_tools]
+    if not calls:
+        return None
+    old_query = _query_with_entities(state["query"], plan)
+    search_query = decision.search_query.strip() or old_query
+    retrieval = plan.retrieval_plan.model_copy(update={"search_query": search_query})
+    network_calls = {"web_music_search", "web_info_search", "video_search"}
+    online = any((get_handler(name) or name) in network_calls for name in calls)
+    revised = plan.model_copy(update={
+        "tools_needed": calls,
+        "stages": [],
+        "strategy": "online_first" if online else "library_first",
+        "online_required": online,
+        "retrieval_plan": retrieval.model_copy(update={"use_web": online}),
+        "reasoning_summary": f"{plan.reasoning_summary}；恢复策略：{decision.reason}",
+    })
+    revised = _materialize_tool_stages(revised, state["query"], state.get("top_k", 5))
+    event_payload = {
+        "reason": decision.reason,
+        "old_query": old_query,
+        "search_query": search_query,
+        "tools": calls,
+        "attempt": attempt + 1,
+    }
+    note = f"[refine] {decision.reason}；query={search_query}；tools={'/'.join(calls)}"
+    return {
+        **state,
+        "plan": revised,
+        "context": context,
+        "trace": [*state.get("trace", []), note],
+        "events": [*state.get("events", []), StreamEvent(
+            type="refine", content=decision.reason, payload=event_payload,
+        )],
+        "_need_refine": True,
+    }
+
+
+def _deterministic_recovery_decision(
+    state: AgentState,
+    outcomes: list[dict[str, Any]],
+) -> RecoveryDecision | None:
+    plan = state["plan"]
+    tracks = _collect_tracks(state.get("results", []))
+    by_tool = {str(item.get("tool")): item for item in outcomes}
+    recommend_outcome = by_tool.get("recommend")
+    if tracks and recommend_outcome and recommend_outcome.get("status") == ToolStatus.EMPTY.value:
+        return RecoveryDecision(
+            action="retry", reason="搜索候选已存在，仅重新执行推荐排序。",
+            search_query=_query_with_entities(state["query"], plan), calls=["recommend"],
+        )
+
+    failures = [item for item in outcomes if item.get("status") == ToolStatus.ERROR.value]
+    network_failed = any(
+        item.get("tool") == "web_music_search"
+        and str((item.get("error") or {}).get("kind") or "").lower() in _NETWORK_ERROR_KINDS
+        for item in failures
+    )
+    if network_failed:
+        return RecoveryDecision(
+            action="retry",
+            reason="在线搜索连接失败，切换到可追溯的本地检索。",
+            search_query=_positive_recovery_query(state),
+            calls=_local_recovery_calls(plan.intent),
+        )
+
+    web_empty = any(
+        item.get("tool") == "web_music_search" and item.get("status") == ToolStatus.EMPTY.value
+        for item in outcomes
+    )
+    all_empty = not tracks and any(item.get("status") == ToolStatus.EMPTY.value for item in outcomes)
+    if web_empty or all_empty:
+        attempted = {
+            str((item.get("arguments") or {}).get("query") or "").strip().lower()
+            for item in state.get("tool_outcomes", []) if item.get("tool") == "web_music_search"
+        }
+        candidates = [_positive_recovery_query(state), *plan.retrieval_plan.search_variants]
+        revised_query = next(
+            (value.strip() for value in candidates if value.strip() and value.strip().lower() not in attempted),
+            "",
+        )
+        if revised_query:
+            calls = ["web_music_search", *_downstream_recovery_calls(plan.intent)]
+            return RecoveryDecision(
+                action="retry", reason="首轮没有候选，使用正向检索词和未尝试变体重新搜索。",
+                search_query=revised_query, calls=calls,
+            )
+        return RecoveryDecision(
+            action="retry", reason="在线检索无候选，切换到可追溯的本地检索。",
+            search_query=_positive_recovery_query(state), calls=_local_recovery_calls(plan.intent),
+        )
+    return None
+
+
+def _positive_recovery_query(state: AgentState) -> str:
+    plan = state["plan"]
+    constraints = extract_content_negations(state["query"])
+    retrieval = plan.retrieval_plan
+    base = _strip_negative_query(retrieval.search_query or state["query"], constraints)
+    dialogue = (state.get("context") or {}).get("dialogue_state") or {}
+    parts = [
+        base,
+        *retrieval.entities,
+        *retrieval.mood_filter,
+        *retrieval.genre_filter,
+        *retrieval.scenario_filter,
+        *(dialogue.get("entities") or []),
+        *(dialogue.get("mood_tags") or []),
+        *(dialogue.get("genre_tags") or []),
+        *(dialogue.get("scenario_tags") or []),
+    ]
+    values: list[str] = []
+    seen: set[str] = set()
+    blocked = {
+        _constraint_key(alias)
+        for constraint in constraints
+        for alias in expand_content_negation(constraint)
+        if _constraint_key(alias)
+    }
+    for part in parts:
+        value = str(part or "").strip()
+        key = _constraint_key(value)
+        is_blocked = any(item in key or key in item for item in blocked) if key else False
+        if value and key not in seen and not is_blocked:
+            values.append(value)
+            seen.add(key)
+    return " ".join(values).strip()
+
+
+def _downstream_recovery_calls(intent: str) -> list[str]:
+    return {"recommend": ["recommend"], "search": ["search"], "playlist": ["playlist"]}.get(intent, [])
+
+
+def _local_recovery_calls(intent: str) -> list[str]:
+    return {"recommend": ["recommend"], "search": ["search"], "playlist": ["search", "playlist"]}.get(intent, [])
+
+
+def _safe_recovery_calls(calls: list[str]) -> list[str]:
+    safe: list[str] = []
+    for name in calls[:3]:
+        spec = get_tool_spec(name)
+        if spec is None or spec.risk != ToolRisk.READ:
+            continue
+        if spec.name not in safe:
+            safe.append(spec.name)
+    return safe
+
+
+async def _llm_recovery_decision_async(
+    agent: AudioVisualAgent,
+    state: AgentState,
+    outcomes: list[dict[str, Any]],
+) -> RecoveryDecision | None:
+    if settings.mock_mode:
+        return None
+    allowed = [
+        name for name in ("web_music_search", "search", "recommend", "playlist")
+        if (spec := get_tool_spec(name)) is not None and spec.risk == ToolRisk.READ
+    ]
+    prompt = (
+        f"用户请求：{state['query']}\n当前正向查询：{_positive_recovery_query(state)}\n"
+        f"工具观察：{str(outcomes)[:2400]}\n可选只读工具：{', '.join(allowed)}\n"
+        "最多重试一次。若值得改变查询或工具则 retry，否则 finalize。"
+    )
+    system = (
+        "你是音乐 Agent 的失败恢复规划器。只输出 JSON："
+        '{"action":"retry|finalize","reason":"...","search_query":"...","calls":["..."]}。'
+        "禁止选择给定列表外的工具，禁止写操作。"
+    )
+    try:
+        llm = select_llm(agent, "fast")
+        payload = extract_json_dict(await llm.agenerate(prompt, system=system, temperature=0.0))
+        decision = RecoveryDecision.model_validate(payload)
+    except Exception:
+        return None
+    decision.calls = _safe_recovery_calls(decision.calls)
+    return decision if decision.action == "finalize" or decision.calls else None
 
 
 def _gather_constraints(agent: AudioVisualAgent, state: AgentState) -> list[str]:
@@ -834,12 +1301,11 @@ def _merge_excluded_tracks(existing: list[dict[str, str]], new_items: list[dict[
     return merged
 
 
-def _llm_reflect_tracks(
+async def _llm_reflect_tracks_async(
     agent: AudioVisualAgent,
     tracks: list[Any],
     constraints: list[str],
 ) -> tuple[list[int], bool, dict[str, float | int]]:
-    """让 LLM 核对候选 vs 约束，返回该剔除的下标。失败/无违反返回 []。"""
     catalog = "\n".join(
         f"[{i}] {_track_label(t)} | 曲风:{'/'.join(getattr(t, 'genre', []) or [])} "
         f"情绪:{'/'.join(getattr(t, 'mood', []) or [])}"
@@ -847,17 +1313,17 @@ def _llm_reflect_tracks(
     )
     cons = "；".join(f"({i + 1}) {c}" for i, c in enumerate(constraints[:8]))
     prompt = CANDIDATE_REFLECTION_USER.format(catalog=catalog, constraints=cons)
+    llm = select_llm(agent, "strong")
     try:
-        llm = select_llm(agent, "strong")
-        raw = llm.generate(prompt, system=CANDIDATE_REFLECTION_SYSTEM, temperature=0.0)
-        metrics = capture_llm_stats(llm)
+        raw = await llm.agenerate(prompt, system=CANDIDATE_REFLECTION_SYSTEM, temperature=0.0)
         data = extract_json_dict(raw)
         drop = data.get("drop") if isinstance(data, dict) else None
         if isinstance(drop, list):
-            return [int(x) for x in drop if isinstance(x, (int, float)) and 0 <= int(x) < len(tracks)], True, metrics
+            indices = [int(x) for x in drop if isinstance(x, (int, float)) and 0 <= int(x) < len(tracks)]
+            return indices, True, capture_llm_stats(llm)
     except Exception:
-        logger.debug("reflect LLM 核对失败，跳过", exc_info=True)
-    return [], True, capture_llm_stats(select_llm(agent, "strong"))
+        logger.debug("reflect async LLM 核对失败，跳过", exc_info=True)
+    return [], True, capture_llm_stats(llm)
 
 
 def _drop_tracks_from_results(results: list[dict[str, Any]], drop_keys: set[str]) -> list[dict[str, Any]]:
@@ -896,38 +1362,18 @@ def _drop_tracks_from_results(results: list[dict[str, Any]], drop_keys: set[str]
     return results
 
 
-def finalize(agent: AudioVisualAgent, state: AgentState) -> AgentState:
-    try:
-        return _finalize_impl(agent, state)
-    except Exception as exc:  # noqa: BLE001
-        return _finalize_fallback(state, exc)
-
-
-def _finalize_impl(agent: AudioVisualAgent, state: AgentState) -> AgentState:
-    memory_query = (state.get("context") or {}).get("memory_query", "")
-    history_text = (state.get("context") or {}).get("history_text", "")
-    answer_text = compose_answer(
-        state["query"], state.get("results", []), state["plan"],
-        agent=agent, memory_query=memory_query, history_text=history_text,
-        user_id=state["user_id"],
-    )
-    answer, final_payload, trace = _finalize_tail(agent, state, answer_text)
-    return {
-        **state,
-        "answer": answer,
-        "trace": trace,
-        "events": [*state.get("events", []), StreamEvent(type="final", content=answer.answer, payload=final_payload)],
-    }
-
-
-def _finalize_tail(agent: AudioVisualAgent, state: AgentState, answer_text: str) -> tuple[AgentAnswer, dict[str, Any], list[str]]:
+async def _finalize_tail_async(
+    agent: AudioVisualAgent, state: AgentState, answer_text: str,
+) -> tuple[AgentAnswer, dict[str, Any], list[str]]:
     """answer_text 已知后的收尾：guard / 记忆自学习 / 目标推进 / 持久化 / 构建 AgentAnswer + final_payload。
 
     流式与非流式共用，副作用只跑一次。
     """
     known = collect_known_titles(state.get("results", []))
     answer_text, removed = guard_answer(answer_text, known)
-    memory_updated = agent.memory.auto_learn_from_turn(state["user_id"], state["query"], state.get("results", []))
+    memory_updated = await agent.memory.auto_learn_from_turn_async(
+        state["user_id"], state["query"], state.get("results", []),
+    )
     goal = None
     if state["plan"].intent != "chat":
         goal = agent.memory.ensure_goal(state["user_id"], state["query"])
@@ -961,40 +1407,37 @@ def _finalize_tail(agent: AudioVisualAgent, state: AgentState, answer_text: str)
     experiment_payload = _taste_experiment_payload(state.get("results", []))
     if experiment_payload:
         final_payload["taste_experiment"] = experiment_payload
-    final_payload["trace_summary"] = _trace_summary(state["plan"], state.get("results", []), trace, aligned_cards)
+    artists_payload = _similar_artists_payload(state.get("results", []))
+    if artists_payload:
+        final_payload["artists"] = artists_payload
+    final_payload["trace_summary"] = _trace_summary(
+        state["plan"], state.get("results", []), trace, aligned_cards,
+        state.get("tool_outcomes", []),
+    )
     return answer, final_payload, trace
 
 
-def finalize_stream(agent: AudioVisualAgent, state: AgentState):
-    """流式 finalize：逐 token 吐答案（token 事件），最后吐 final（权威）。
-
-    供 builder.stream 增量驱动——让用户在答案生成时就能看到正文，不必干等整段算完。
-    收尾副作用（记忆自学习/目标推进/对话态持久化）在 _finalize_tail 内执行，只跑一次。
-    异常时降级到 _finalize_fallback，仍吐一个 final 事件保证前端能收尾。
-    """
+async def finalize_stream_async(agent: AudioVisualAgent, state: AgentState):
+    """Native async finalize used by the production SSE graph."""
     try:
-        memory_query = (state.get("context") or {}).get("memory_query", "")
-        history_text = (state.get("context") or {}).get("history_text", "")
+        context = state.get("context") or {}
         parts: list[str] = []
-        for delta in compose_answer_stream(
+        async for delta in compose_answer_stream_async(
             state["query"], state.get("results", []), state["plan"],
-            agent=agent, memory_query=memory_query, history_text=history_text,
+            agent=agent,
+            memory_query=context.get("memory_query", ""),
+            history_text=context.get("history_text", ""),
             user_id=state["user_id"],
         ):
-            if not delta:
-                continue
-            parts.append(delta)
-            yield StreamEvent(type="token", content=delta)
-        answer_text = "".join(parts)
-        answer, final_payload, _trace = _finalize_tail(agent, state, answer_text)
+            if delta:
+                parts.append(delta)
+                yield StreamEvent(type="token", content=delta)
+        answer, final_payload, _trace = await _finalize_tail_async(agent, state, "".join(parts))
         yield StreamEvent(type="final", content=answer.answer, payload=final_payload)
     except Exception as exc:  # noqa: BLE001
-        fb_state = _finalize_fallback(state, exc)
-        for ev in fb_state.get("events", []):
-            if ev.type == "final":
-                yield ev
-                return
-        yield StreamEvent(type="final", content="这轮处理出错了，请重试。", payload={})
+        fallback = _finalize_fallback(state, exc)
+        final_event = next((ev for ev in fallback.get("events", []) if ev.type == "final"), None)
+        yield final_event or StreamEvent(type="final", content="这轮处理出错了，请重试。", payload={})
 
 
 def _finalize_fallback(state: AgentState, exc: Exception) -> AgentState:
@@ -1135,6 +1578,23 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         agent.memory.clear_dialogue_state(user_id)
         return
     rp = plan.retrieval_plan
+    # DialogueState must not depend solely on LLM-populated plan fields.  Recover
+    # deterministic genre/mood/scenario seeds from the raw turn and preserve prior
+    # positive tags on a continuation when one side is incomplete.
+    turn_tags = extract_tags(state["query"])
+    prior_dialogue = (state.get("context") or {}).get("dialogue_state") or {}
+
+    def merged_tags(current: list[str], derived: list[str], prior: list[str]) -> list[str]:
+        values = [*current, *derived]
+        if is_continuation(state["query"]):
+            values.extend(prior)
+        return list(dict.fromkeys(item for item in values if item))
+
+    genre_tags = merged_tags(rp.genre_filter, turn_tags["genre"], prior_dialogue.get("genre_tags") or [])
+    mood_tags = merged_tags(rp.mood_filter, turn_tags["mood"], prior_dialogue.get("mood_tags") or [])
+    scenario_tags = merged_tags(
+        rp.scenario_filter, turn_tags["scenario"], prior_dialogue.get("scenario_tags") or [],
+    )
     # 收集本轮最终展示的曲目摘要，用于下一轮去重
     listed = _select_listed_tracks(state.get("results", []), plan)
     shown = [
@@ -1147,8 +1607,7 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         for t in listed
     ]
     # 跨轮累积：延续指令时并入前轮记录（继承实体也算同一话题），否则视为新话题重置。
-    context = state.get("context") or {}
-    prev_shown = (context.get("dialogue_state") or {}).get("shown_tracks") or []
+    prev_shown = prior_dialogue.get("shown_tracks") or []
     if is_continuation(state["query"]):
         merged_shown = _merge_excluded_tracks(prev_shown, shown)
     else:
@@ -1159,83 +1618,79 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         intent=plan.intent,
         query=state["query"],
         entities=rp.entities,
-        genre_tags=rp.genre_filter,
-        mood_tags=rp.mood_filter,
-        scenario_tags=rp.scenario_filter,
+        genre_tags=genre_tags,
+        mood_tags=mood_tags,
+        scenario_tags=scenario_tags,
         shown_tracks=merged_shown,
     )
 
 
-def plan_with_llm(agent: AudioVisualAgent, query: str, history_text: str = "") -> AgentPlan | None:
-    plan, _, _ = plan_with_llm_with_meta(agent, query, history_text)
-    return plan
-
-
-def plan_with_llm_with_meta(
+async def plan_with_llm_async(
     agent: AudioVisualAgent,
     query: str,
     history_text: str = "",
-) -> tuple[AgentPlan | None, dict[str, str], dict[str, float | int]]:
-    """用 LLM 产出结构化 AgentPlan：LLM 判意图 + 抽实体，标签走确定性规则。
+    memory_text: str = "",
+) -> AgentPlan | None:
+    plan, _, _ = await plan_with_llm_with_meta_async(agent, query, history_text, memory_text)
+    return plan
 
-    history_text 非空时拼进 prompt，让意图规划理解多轮指代（如"再来几首"
-    需沿用上一轮的歌手/场景实体）。失败（解析错误 / LLM 不可用）返回 None，
-    调用方降级到关键词 build_agent_plan。
-    """
+
+async def plan_with_llm_with_meta_async(
+    agent: AudioVisualAgent,
+    query: str,
+    history_text: str = "",
+    memory_text: str = "",
+) -> tuple[AgentPlan | None, dict[str, str], dict[str, float | int]]:
     try:
+        sections: list[str] = []
         if history_text.strip():
-            user_prompt = f"【最近对话】\n{history_text}\n\n【本轮输入】\n{query}"
-        else:
-            user_prompt = query
+            sections.append(f"【最近对话】\n{history_text}")
+        if memory_text.strip() and not settings.mock_mode:
+            sections.append(
+                "【长期音乐偏好（仅作软参考，不得覆盖本轮明确要求）】\n"
+                f"{memory_text[:500]}"
+            )
+        sections.append(f"【本轮输入】\n{query}" if sections else query)
         llm = select_llm(agent, "fast")
-        raw = llm.generate(user_prompt, system=QUERY_PLAN_SYSTEM, temperature=0.1)
+        raw = await llm.agenerate(
+            "\n\n".join(sections), system=QUERY_PLAN_SYSTEM, temperature=0.1,
+        )
     except Exception:
         return None, {}, empty_runtime_metrics()
-
     payload = _parse_query_plan_payload(raw)
-    prompt_versions: dict[str, str] = {"query_plan": QUERY_PLAN_VERSION}
-    runtime_metrics = capture_llm_stats(llm)
+    metrics = capture_llm_stats(llm)
     if payload is None:
-        payload, repair_metrics = _repair_query_plan_payload(agent, query, history_text, raw)
-        runtime_metrics = merge_runtime_metrics(runtime_metrics, repair_metrics)
-        if payload is not None:
-            prompt_versions["query_plan_repair"] = QUERY_PLAN_VERSION
-    if payload is None:
-        return None, {}, runtime_metrics
+        return None, {}, metrics
+    plan = _plan_from_query_payload(payload, query)
+    return plan, {"query_plan": QUERY_PLAN_VERSION}, metrics
 
+
+def _plan_from_query_payload(payload: QueryPlanPayload, query: str) -> AgentPlan:
     intent = payload.intent
     spec = get_intent(intent)
-    entities = payload.entities
-    use_local = payload.use_local
-    use_vector = payload.use_vector
-    use_web = payload.use_web if payload.use_web is not None else spec.online_default
-    target = payload.target_count or _infer_count(query)
-
     tags = extract_tags(query)
     search_query = payload.search_query.strip()
-    search_variants = _cap_search_variants(payload.search_variants, search_query)
-    language_filter = payload.language.strip().lower()
     retrieval = RetrievalPlan(
-        use_local=use_local,
-        use_vector=use_vector,
-        use_web=use_web,
-        entities=entities,
+        use_local=payload.use_local,
+        use_vector=payload.use_vector,
+        use_web=payload.use_web if payload.use_web is not None else spec.online_default,
+        entities=payload.entities,
         genre_filter=tags["genre"],
         mood_filter=tags["mood"],
         scenario_filter=tags["scenario"],
         search_query=search_query,
-        search_variants=search_variants,
-        language_filter=language_filter,
+        search_variants=_cap_search_variants(payload.search_variants, search_query),
+        language_filter=payload.language.strip().lower(),
     )
     return AgentPlan(
         intent=intent,
-        strategy=spec.strategy_for(use_web),
-        tools_needed=spec.tools_for(use_web),
-        target_count=target,
-        online_required=use_web,
+        strategy=spec.strategy_for(retrieval.use_web),
+        tools_needed=spec.tools_for(retrieval.use_web),
+        target_count=payload.target_count or _infer_count(query),
+        online_required=retrieval.use_web,
         reasoning_summary=payload.reasoning.strip() or spec.summary,
         retrieval_plan=retrieval,
-    ), prompt_versions, runtime_metrics
+    )
 
 
 def _merge_prompt_versions(existing: Any, incoming: dict[str, str] | None) -> dict[str, str]:
@@ -1258,24 +1713,6 @@ def _parse_query_plan_payload(raw: str) -> QueryPlanPayload | None:
         return QueryPlanPayload.model_validate(data)
     except Exception:
         return None
-
-
-def _repair_query_plan_payload(
-    agent: AudioVisualAgent,
-    query: str,
-    history_text: str,
-    raw_output: str,
-) -> tuple[QueryPlanPayload | None, dict[str, float | int]]:
-    try:
-        llm = select_llm(agent, "fast")
-        repaired = llm.generate(
-            QUERY_PLAN_REPAIR_USER(query, history_text, raw_output),
-            system=QUERY_PLAN_REPAIR_SYSTEM,
-            temperature=0.0,
-        )
-    except Exception:
-        return None, empty_runtime_metrics()
-    return _parse_query_plan_payload(repaired), capture_llm_stats(llm)
 
 
 def _keyword_retrieval_plan(query: str, use_web: bool) -> RetrievalPlan:
@@ -1382,16 +1819,24 @@ def _completed_actions(results: list[dict[str, Any]]) -> list[str]:
         "import_netease_playlist": "import_netease_playlist",
         "video_search": "video_search",
         "web_info_search": "web_info_search",
+        "similar_artists": "similar_artists",
     }
     return [mapping.get(result.get("type", ""), result.get("type", "")) for result in results]
 
 
-def _trace_summary(plan: AgentPlan, results: list[dict[str, Any]], trace: list[str], cards: list[dict[str, Any]]) -> dict[str, Any]:
+def _trace_summary(
+    plan: AgentPlan,
+    results: list[dict[str, Any]],
+    trace: list[str],
+    cards: list[dict[str, Any]],
+    outcomes: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     """稳定的 Agent 摘要，供 UI 透明度面板和 smoke 报告断言使用。"""
     tracks = _select_listed_tracks(results, plan) or _collect_tracks(results)
     sources = {getattr(track, "source", "") for track in tracks if getattr(track, "source", "")}
     experiment_cards = 0
     album_cards = 0
+    artist_cards = 0
     for result in results:
         if result.get("type") == "taste_experiment":
             exp = result.get("experiment")
@@ -1402,15 +1847,68 @@ def _trace_summary(plan: AgentPlan, results: list[dict[str, Any]], trace: list[s
                 sources.add("netease")
         elif result.get("type") == "import_netease_playlist":
             sources.add("netease")
+        elif result.get("type") == "similar_artists":
+            artist_cards += len(result.get("artists") or [])
+            if result.get("artists"):
+                sources.add("local_library")
+    observed_tools = [str(item.get("tool") or "") for item in outcomes or [] if item.get("tool")]
+    planned = list(dict.fromkeys([
+        *observed_tools,
+        *(get_handler(name) or name for name in plan.tools_needed),
+    ]))
+    tool_statuses: dict[str, str] = {}
+    for item in outcomes or []:
+        tool = str(item.get("tool") or "")
+        status = str(item.get("status") or "")
+        if tool and status:
+            tool_statuses[tool] = status
+    if not tool_statuses:
+        for line in trace:
+            match = re.match(r"\[tool_status\]\s+tool=(\S+)\s+status=(\S+)", line)
+            if match:
+                tool_statuses[match.group(1)] = match.group(2)
+    completed = list(dict.fromkeys([*tool_statuses, *_completed_actions(results)]))
+    error_details = [
+        {
+            "tool": str(item.get("tool") or ""),
+            "message": str((item.get("error") or {}).get("message") or "unknown error"),
+        }
+        for item in outcomes or [] if item.get("status") == ToolStatus.ERROR.value
+    ]
+    if not error_details:
+        for line in trace:
+            match = re.match(r"\[tool_error\]\s+(\S+)\s+失败，已跳过：(.*)", line)
+            if match:
+                error_details.append({"tool": match.group(1), "message": match.group(2) or "unknown error"})
+    errors = list(dict.fromkeys(item["tool"] for item in error_details))
+    empty = [tool for tool, status in tool_statuses.items() if status == "empty"]
+    if not planned:
+        execution_state = "not_planned"
+    elif errors:
+        execution_state = "error"
+    elif empty:
+        execution_state = "empty"
+    elif completed:
+        execution_state = "ok"
+    else:
+        execution_state = "planned_not_executed"
     return {
         "intent": plan.intent,
         "strategy": plan.strategy,
-        "tools": _completed_actions(results),
+        "tools": completed,
+        "tools_planned": planned,
+        "tools_executed": completed,
+        "tool_statuses": tool_statuses,
+        "tool_errors": errors,
+        "tool_error_details": error_details,
+        "empty_results": empty,
+        "tool_execution_state": execution_state,
         "sources": sorted(sources),
         "used_fallback": any("fallback" in line.lower() for line in trace),
         "guard_removed": sum(1 for line in trace if line.startswith("[guard]")),
         "reflection": any("[reflect]" in line for line in trace),
-        "final_cards": len(cards) or experiment_cards or album_cards,
+        "recovery": any("[refine]" in line for line in trace),
+        "final_cards": len(cards) or experiment_cards or album_cards or artist_cards,
     }
 
 
@@ -1425,27 +1923,18 @@ def _taste_experiment_payload(results: list[dict[str, Any]]) -> dict[str, Any] |
     return None
 
 
-def compose_answer(
-    query: str,
-    results: list[dict[str, Any]],
-    plan: AgentPlan,
-    agent: AudioVisualAgent | None = None,
-    memory_query: str = "",
-    history_text: str = "",
-    user_id: str = "",
-) -> str:
-    if plan.intent == "chat":
-        return _compose_chat_response(query, agent, history_text, user_id=user_id) or "你好，我在。有什么音乐上的事可以帮你?"
-    if plan.intent == "discuss":
-        tracks = _collect_tracks(results)
-        return _compose_discussion(query, tracks, agent, history_text) or "抱歉，我暂时无法讨论这个话题。"
-    if plan.intent == "video":
-        tracks = _collect_tracks(results)
-        return _compose_video_answer(query, tracks, agent, history_text) or "这轮没有搜到视频结果。"
-    if plan.intent == "artist_info":
-        return _compose_artist_info_answer(query, results, agent, history_text) or "抱歉，暂时没找到相关信息。"
+def _similar_artists_payload(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    for result in results:
+        if result.get("type") == "similar_artists":
+            return list(result.get("artists") or [])
+    return []
+
+
+def _compose_deterministic_answer(results: list[dict[str, Any]], plan: AgentPlan) -> str:
     if plan.intent == "artist_albums":
-        return _compose_artist_albums_answer(query, results, agent, history_text)
+        return _compose_artist_albums_answer(results)
+    if plan.intent == "similar_artists":
+        return _compose_similar_artists_answer(results)
     if plan.intent == "taste_experiment":
         return _compose_taste_experiment_answer(results)
     if plan.intent == "taste":
@@ -1459,28 +1948,10 @@ def compose_answer(
             titles = "、".join(f"《{t['title']}》" for t in phase["tracks"])
             lines.append(f"- {phase['name']}：{phase['goal']}。{titles or '暂无候选'}")
         return "\n".join(lines)
-    # 歌单意图：用 LLM 精选的 playlist 结果，保留歌单名和描述
-    if plan.intent == "playlist":
-        return _compose_playlist_answer(query, results, plan, agent, memory_query, history_text)
-    # recommend/search/import 的权威结果由 intent 明确指定，不能让前置
-    # web_music_search 的原始顺序覆盖精排或正式搜索结果。
-    tracks = _select_listed_tracks(results, plan) or _collect_tracks(results)
-    if not tracks:
-        return "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。"
-    if plan.target_count:
-        tracks = tracks[: plan.target_count]
-    shortfall = bool(plan.target_count and len(tracks) < plan.target_count)
-    # 引言：优先让 LLM 结合记忆+历史生成有温度的开场；失败回退确定性模板。
-    # 歌曲清单始终由真实候选确定性拼接——LLM 绝不参与歌名生成（防幻觉）。
-    intro = _compose_intro(query, tracks, plan, agent, memory_query, shortfall, history_text)
-    lines = [
-        f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}（{getattr(track, 'source', 'local')}）"
-        for idx, track in enumerate(tracks[: plan.target_count or 12], start=1)
-    ]
-    return intro + "\n" + "\n".join(lines)
+    return "这轮没有拿到可交付的结构化结果。"
 
 
-def compose_answer_stream(
+async def compose_answer_stream_async(
     query: str,
     results: list[dict[str, Any]],
     plan: AgentPlan,
@@ -1489,91 +1960,79 @@ def compose_answer_stream(
     history_text: str = "",
     user_id: str = "",
 ):
-    """compose_answer 的流式同构：逐块 yield 答案文本。
-
-    LLM 生成的部分（chat/discuss/artist_info/intro）用 generate_stream 真流式，首字几百毫秒即达；
-    确定性部分（曲目/视频/专辑清单）作为单个块 yield。
-    流式不做逐 token 校验——权威文本由 finalize 的 guard_answer + final 事件兜底，
-    前端收到 final 后用权威文本替换流式预览。
-    """
     llm = select_llm(agent, "default") if agent is not None else None
 
-    def stream_llm(prompt: str, fallback: str = "", temp: float = settings.dialog_temperature):
-        """流式产出 LLM 文本；无 LLM 或失败时 yield fallback。"""
-        if llm is None:
-            if fallback:
-                yield fallback
-            return
+    async def stream_llm(prompt: str, fallback: str, temp: float = settings.dialog_temperature):
         got = False
-        try:
-            for piece in llm.generate_stream(prompt, temperature=temp):
-                if piece:
-                    got = True
-                    yield piece
-        except Exception:
-            logger.debug("compose_answer_stream: LLM 流式失败，回退兜底", exc_info=True)
+        if llm is not None:
+            try:
+                async for piece in llm.agenerate_stream(prompt, temperature=temp):
+                    if piece:
+                        got = True
+                        yield piece
+            except Exception:
+                logger.debug("compose_answer_stream_async: LLM 流式失败，回退兜底", exc_info=True)
         if not got and fallback:
             yield fallback
 
     intent = plan.intent
-
     if intent == "chat":
-        yield from stream_llm(_chat_prompt(query, agent, history_text, user_id),
-                              fallback="你好，我在。有什么音乐上的事可以帮你?")
+        async for piece in stream_llm(
+            _chat_prompt(query, agent, history_text, user_id),
+            "你好，我在。有什么音乐上的事可以帮你?",
+        ):
+            yield piece
         return
-
     if intent == "discuss":
-        tracks = _collect_tracks(results)
-        prompt, refuse = _discussion_prompt(query, tracks, history_text)
+        prompt, refuse = _discussion_prompt(query, _collect_tracks(results), history_text)
         if prompt is None:
             yield refuse
             return
-        yield from stream_llm(prompt, fallback=refuse)
+        async for piece in stream_llm(prompt, refuse):
+            yield piece
         return
-
     if intent == "video":
         tracks = _collect_tracks(results)
         if not tracks:
             yield "这轮没有搜到视频结果。"
             return
         prompt, fallback = _video_intro_prompt(query, tracks, history_text)
-        yield from stream_llm(prompt, fallback=fallback)
-        yield "\n"
-        for line in _video_list_lines(tracks):
-            yield line + "\n"
+        async for piece in stream_llm(prompt, fallback):
+            yield piece
+        yield "\n" + "\n".join(_video_list_lines(tracks))
         return
-
     if intent == "artist_info":
         prompt, fallback, source_urls = _artist_info_prompt(query, results, history_text)
         if prompt is None:
             yield "抱歉，暂时没找到相关信息。"
             return
-        yield from stream_llm(prompt, fallback=fallback)
+        async for piece in stream_llm(prompt, fallback):
+            yield piece
         if source_urls:
             yield "\n\n📎 参考来源：\n" + "\n".join(f"- {url}" for url in source_urls[:3])
         return
-
-    # 纯确定性意图（含 playlist：其引言 LLM 调用在非流式 compose_answer 内完成）：
-    # 整段产出为一个块，复用已测试的 compose_answer。
-    if intent in {"artist_albums", "taste_experiment", "taste", "journey", "playlist"}:
-        yield compose_answer(query, results, plan, agent, memory_query, history_text, user_id)
+    if intent in {"artist_albums", "similar_artists", "taste_experiment", "taste", "journey"}:
+        yield _compose_deterministic_answer(results, plan)
         return
 
-    # recommend/search/import：引言（流式）+ 曲目清单（确定性）
     tracks = _select_listed_tracks(results, plan) or _collect_tracks(results)
     if not tracks:
         yield "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。"
         return
-    if plan.target_count:
-        tracks = tracks[: plan.target_count]
+    tracks = tracks[: plan.target_count or (30 if intent == "playlist" else 12)]
     shortfall = bool(plan.target_count and len(tracks) < plan.target_count)
-    prompt, _full_fallback = _intro_prompt(query, tracks, plan, memory_query, shortfall, history_text)
-    # 引言兜底只用前半句；shortfall 说明单独作为一个块接在引言后，避免与 LLM 引言或兜底重复。
-    yield from stream_llm(prompt, fallback=f"我按在线优先策略整理了 {len(tracks)} 个可追溯候选：")
-    if shortfall:
-        yield f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
+    prompt, fallback = _intro_prompt(query, tracks, plan, memory_query, shortfall, history_text)
+    async for piece in stream_llm(prompt, fallback):
+        yield piece
+    if intent == "playlist":
+        playlist = next((r.get("playlist") for r in results if r.get("type") == "playlist"), None)
+        if playlist is not None:
+            header = f"歌单《{playlist.name}》"
+            if playlist.description:
+                header += f"：{playlist.description}"
+            yield "\n" + header
     yield "\n"
-    for idx, track in enumerate(tracks[: plan.target_count or 12], start=1):
+    for idx, track in enumerate(tracks, start=1):
         yield f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}（{getattr(track, 'source', 'local')}）\n"
 
 
@@ -1615,32 +2074,6 @@ def _intro_prompt(
     return prompt, fallback
 
 
-def _compose_intro(
-    query: str,
-    tracks: list[Any],
-    plan: AgentPlan,
-    agent: AudioVisualAgent | None,
-    memory_query: str,
-    shortfall: bool,
-    history_text: str = "",
-) -> str:
-    """生成推荐引言。LLM 可用时结合记忆+对话历史个性化，否则用确定性模板。"""
-    prompt, fallback = _intro_prompt(query, tracks, plan, memory_query, shortfall, history_text)
-    llm = select_llm(agent, "strong") if agent is not None else None
-    if llm is None:
-        return fallback
-    try:
-        text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
-    except Exception:
-        return fallback
-    # LLM 兜底：异常输出（空/过长/含书名号疑似编造歌名）一律回退模板
-    if not text or len(text) > 200 or "《" in text:
-        return fallback
-    if shortfall:
-        text += f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
-    return text
-
-
 def _chat_prompt(query: str, agent: AudioVisualAgent | None, history_text: str = "", user_id: str = "") -> str:
     """构造 chat 回复的 prompt（注入用户画像作为事实锚，供流式/非流式共用）。"""
     history_hint = ""
@@ -1666,21 +2099,6 @@ def _chat_prompt(query: str, agent: AudioVisualAgent | None, history_text: str =
         "不要每次用同一句话，语气要自然口语化。50-100字。\n"
         "不要编造排名、发行时间、销量等你不确定的具体数据。"
     )
-
-
-def _compose_chat_response(query: str, agent: AudioVisualAgent | None, history_text: str = "", user_id: str = "") -> str | None:
-    """让 LLM 自然回复寒暄/闲聊，注入用户画像作为事实锚。"""
-    llm = select_llm(agent, "strong") if agent is not None else None
-    if llm is None:
-        return None
-    prompt = _chat_prompt(query, agent, history_text, user_id)
-    try:
-        text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
-    except Exception:
-        return None
-    if not text or len(text) > 300:
-        return None
-    return text
 
 
 def _discussion_prompt(
@@ -1719,34 +2137,6 @@ def _discussion_prompt(
     return prompt, refuse
 
 
-def _compose_discussion(
-    query: str,
-    tracks: list[Any],
-    agent: AudioVisualAgent | None,
-    history_text: str = "",
-) -> str | None:
-    """让 LLM 基于搜到的真实曲目讨论音乐话题。
-
-    关键反幻觉策略（对齐 SoulTuner + 比它更严格）：
-    - 没有搜到真实数据 → 直接拒绝回答，不编造
-    - 搜到了 → LLM 只能基于真实曲目回答，不确定的说不知道
-    - 限制 100 字（SoulTuner 的 general_chat 也是 100 字）
-    """
-    llm = select_llm(agent, "strong") if agent is not None else None
-    if llm is None:
-        return None
-    prompt, refuse = _discussion_prompt(query, tracks, history_text)
-    if prompt is None:
-        return refuse
-    try:
-        text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
-    except Exception:
-        return None
-    if not text or len(text) > 300:
-        return None
-    return text
-
-
 def _video_intro_prompt(query: str, tracks: list[Any], history_text: str = "") -> tuple[str, str]:
     """构造视频推荐开场白的 prompt + 兜底文本（供流式/非流式共用）。"""
     fallback = "我帮你搜到了这些视频："
@@ -1774,33 +2164,8 @@ def _video_list_lines(tracks: list[Any]) -> list[str]:
     ]
 
 
-def _compose_video_answer(
-    query: str,
-    tracks: list[Any],
-    agent: AudioVisualAgent | None,
-    history_text: str = "",
-) -> str | None:
-    """video 意图专用回答：视频推荐开场白 + 视频列表。"""
-    if not tracks:
-        return None
-    prompt, intro = _video_intro_prompt(query, tracks, history_text)
-    llm = select_llm(agent, "strong") if agent is not None else None
-    if llm is not None:
-        try:
-            text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
-            if text and len(text) <= 150 and "《" not in text:
-                intro = text
-        except Exception:
-            pass
-    # 视频列表（确定性拼接）
-    return f"{intro}\n" + "\n".join(_video_list_lines(tracks))
-
-
 def _compose_artist_albums_answer(
-    query: str,
     results: list[dict[str, Any]],
-    agent: AudioVisualAgent | None,
-    history_text: str = "",
 ) -> str:
     """artist_albums 意图回答：列出真实专辑清单。
 
@@ -1825,6 +2190,21 @@ def _compose_artist_albums_answer(
         tail = f"（{count} 首）" if count else ""
         lines.append(f"{idx}. 专辑《{name}》 - {a.get('artist') or artist or '未知'}{tail}")
     return f"{intro}\n" + "\n".join(lines)
+
+
+def _compose_similar_artists_answer(results: list[dict[str, Any]]) -> str:
+    result = next((item for item in results if item.get("type") == "similar_artists"), None)
+    artists = list((result or {}).get("artists") or [])
+    seed = str((result or {}).get("seed_artist") or "这位歌手")
+    if not artists:
+        return f"当前曲库里没有足够标签支持判断与 {seed} 相似的歌手；我不会凭印象硬列名单。"
+    lines = [f"按曲库中真实歌曲的曲风与情绪标签，和 {seed} 接近的歌手有："]
+    for index, artist in enumerate(artists, start=1):
+        reason = artist.get("reason") or "曲库标签相近"
+        tracks = "、".join(artist.get("representative_tracks") or [])
+        suffix = f"；曲库代表作：{tracks}" if tracks else ""
+        lines.append(f"{index}. {artist.get('name', '')}（{reason}{suffix}）")
+    return "\n".join(lines)
 
 
 def _compose_taste_experiment_answer(results: list[dict[str, Any]]) -> str:
@@ -1884,80 +2264,6 @@ def _artist_info_prompt(
         "5. 末尾附上参考来源链接"
     )
     return prompt, search_context, source_urls
-
-
-def _compose_artist_info_answer(
-    query: str,
-    results: list[dict[str, Any]],
-    agent: AudioVisualAgent | None,
-    history_text: str = "",
-) -> str | None:
-    """artist_info 意图专用回答：基于搜索引擎结果生成百科式介绍。"""
-    prompt, fallback, source_urls = _artist_info_prompt(query, results, history_text)
-    if prompt is None:
-        # 搜索无结果，降级到 discuss 模式
-        return None
-    llm = select_llm(agent, "strong") if agent is not None else None
-    if llm is None:
-        # 无 LLM，直接输出搜索摘要
-        return fallback
-    try:
-        text = llm.generate(prompt, temperature=settings.dialog_temperature).strip()
-    except Exception:
-        return fallback
-    if not text or len(text) > 800:
-        return fallback
-    # 追加来源链接
-    if source_urls:
-        text += "\n\n📎 参考来源：\n" + "\n".join(f"- {url}" for url in source_urls[:3])
-    return text
-
-
-def _compose_playlist_answer(
-    query: str,
-    results: list[dict[str, Any]],
-    plan: AgentPlan,
-    agent: AudioVisualAgent | None,
-    memory_query: str,
-    history_text: str,
-) -> str:
-    """歌单意图专用回答：保留歌单名/描述，只用 LLM 精选的 playlist 曲目，
-    不混入原始搜索结果。
-
-    compose_answer 的通用路径会 _collect_tracks(results) 把 web_music_search
-    的原始结果和 playlist 的精选结果混在一起，且丢弃歌单名和描述。
-    歌单场景需要区分：用户要的是「LLM 精心挑选的歌单」，不是「一堆搜索结果」。
-    """
-    playlist_result = next((r for r in results if r.get("type") == "playlist"), None)
-    if not playlist_result:
-        # 没有 playlist 结果，降级到通用路径
-        tracks = _collect_tracks(results)
-        if not tracks:
-            return "这轮没有生成可追溯的歌单。"
-        return "歌单生成未成功，以下是搜索到的候选：\n" + "\n".join(
-            f"{i}. 《{getattr(t, 'title', '')}》 - {getattr(t, 'artist', '') or '未知'}"
-            for i, t in enumerate(tracks[:12], 1)
-        )
-
-    pl = playlist_result["playlist"]
-    tracks = pl.tracks
-    if not tracks:
-        return f"歌单《{pl.name}》生成了但暂无可追溯曲目。"
-
-    # 引言：用 LLM 生成有温度的歌单介绍
-    intro = _compose_intro(query, tracks, plan, agent, memory_query,
-                           shortfall=bool(plan.target_count and len(tracks) < plan.target_count),
-                           history_text=history_text)
-    # 歌单元信息
-    header = f"歌单《{pl.name}》"
-    if pl.description:
-        header += f"：{pl.description}"
-
-    lines = [
-        f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}（{getattr(track, 'source', 'local')}）"
-        for idx, track in enumerate(tracks[: plan.target_count or 30], start=1)
-    ]
-    return f"{intro}\n{header}\n" + "\n".join(lines)
 
 
 def _is_smalltalk(text: str) -> bool:

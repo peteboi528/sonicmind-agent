@@ -41,7 +41,11 @@ class IntentDef:
 # 关键词 fallback 的匹配优先级（从具体到泛化）：journey/import 要早于
 # playlist（"导入歌单""音乐旅程"含子串），discuss 作为音乐知识类兜底放在
 # recommend 之后、chat 之前。
-_INTENT_PRIORITY = ("journey", "import", "playlist", "video", "search", "taste_experiment", "taste", "artist_albums", "recommend", "artist_info", "discuss")
+_INTENT_PRIORITY = (
+    "feedback", "listening_history", "my_playlists", "lyrics", "audio_features",
+    "find_on_platform", "concert_events", "journey", "import", "playlist", "video",
+    "search", "taste_experiment", "taste", "artist_albums", "similar_artists", "recommend", "artist_info", "discuss",
+)
 
 _DISCUSS_KEYWORDS = (
     "牛逼", "怎么样", "评价", "风格是", "什么水平", "好听吗",
@@ -52,6 +56,58 @@ _DISCUSS_KEYWORDS = (
 )
 
 INTENT_REGISTRY: dict[str, IntentDef] = {
+    "feedback": IntentDef(
+        name="feedback",
+        summary="用户在评价刚刚展示或曲库中的真实歌曲，记录结构化反馈并更新排序信号。",
+        prompt_desc="feedback：喜欢/不喜欢/跳过/听过某首歌或某位歌手",
+        base_tools=("feedback",),
+        strategy_web="memory_only", strategy_no_web="memory_only", online_default=False,
+        keyword_signals=("不喜欢", "讨厌", "别再放", "这首不错", "喜欢这首", "跳过", "切歌", "听过这首"),
+    ),
+    "listening_history": IntentDef(
+        name="listening_history",
+        summary="只读用户听歌历史并做聚合统计。",
+        prompt_desc="listening_history：最近听了什么 / 循环最多的歌或歌手",
+        base_tools=("listening_history",),
+        strategy_web="memory_only", strategy_no_web="memory_only", online_default=False,
+        keyword_signals=("听歌历史", "最近在听", "最近听了", "循环最多", "上周听", "本月听"),
+    ),
+    "my_playlists": IntentDef(
+        name="my_playlists",
+        summary="读取当前登录用户的网易云歌单列表。",
+        prompt_desc="my_playlists：看看我的网易云歌单 / 我的收藏歌单",
+        base_tools=("list_my_playlists",),
+        prepend_web_search=False,
+        keyword_signals=("我的歌单", "我收藏的歌单", "网易云歌单列表", "看看歌单"),
+    ),
+    "lyrics": IntentDef(
+        name="lyrics",
+        summary="解析真实 song_id 后获取网易云歌词，失败时不编造。",
+        prompt_desc="lyrics：查询某首歌的歌词",
+        base_tools=("lyrics",), prepend_web_search=False,
+        keyword_signals=("歌词", "lyrics", "唱的什么"),
+    ),
+    "audio_features": IntentDef(
+        name="audio_features",
+        summary="读取已有真实 BPM、能量等音频特征，缺失时保持未知。",
+        prompt_desc="audio_features：查询歌曲 BPM、调性、能量或舞蹈性",
+        base_tools=("audio_features",), prepend_web_search=False, online_default=False,
+        keyword_signals=("BPM", "bpm", "调性", "音频特征", "能量值", "danceability"),
+    ),
+    "find_on_platform": IntentDef(
+        name="find_on_platform",
+        summary="在用户指定的平台定位真实歌曲或视频。",
+        prompt_desc="find_on_platform：把某首歌定位到网易云、YouTube 或 B站",
+        base_tools=("find_on_platform",), prepend_web_search=False,
+        keyword_signals=("在youtube", "在 youtube", "在b站", "在 b站", "在网易云", "换个平台"),
+    ),
+    "concert_events": IntentDef(
+        name="concert_events",
+        summary="查找带网页来源的公开演出或巡演信息。",
+        prompt_desc="concert_events：查某歌手近期演出或巡演信息",
+        base_tools=("concert_events",), prepend_web_search=False,
+        keyword_signals=("巡演信息", "近期演出", "演出日期", "演出安排", "tour dates"),
+    ),
     "recommend": IntentDef(
         name="recommend",
         summary="用户要推荐音乐，优先获取真实线上候选，再结合记忆排序。",
@@ -59,6 +115,17 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         base_tools=("recommend",),
         prepend_web_search=True,
         keyword_signals=("推荐", "适合", "recommend", "chill", "来点", "来几首", "给我来", "放松", "类似", "像"),
+    ),
+    "similar_artists": IntentDef(
+        name="similar_artists",
+        summary="基于上一轮或当前歌手，在可追溯曲库中寻找风格相近的其他艺人。",
+        prompt_desc="similar_artists：推荐与某歌手同类型、同风格或相似的其他歌手",
+        base_tools=("similar_artists",),
+        prepend_web_search=False,
+        strategy_web="library_first",
+        strategy_no_web="library_first",
+        online_default=False,
+        keyword_signals=("同类型的歌手", "同类型歌手", "同风格歌手", "相似歌手", "类似的歌手", "类似歌手"),
     ),
     "artist_albums": IntentDef(
         name="artist_albums",
@@ -205,7 +272,7 @@ def match_intent_by_keywords(query: str) -> str | None:
 _CONTINUATION_SIGNALS = (
     "再来", "再推", "再给", "换一批", "换一首", "换几首", "还要", "还想", "还有",
     "多来", "多给", "类似", "差不多", "类似这个", "像这样", "像这个", "继续",
-    "更多", "再来点", "再来些",
+    "更多", "再来点", "再来些", "同类型", "同风格", "相似歌手", "类似的歌手",
     # 反重复信号：用户明确表示上一轮给重了，要换没看过的。
     "不要重复", "别重复", "不重复", "重复了", "又重复", "换新的", "来点新的", "来些新的",
     "more", "another", "similar", "same vibe", "keep going",
@@ -225,6 +292,60 @@ _COREFERENCE_PATTERNS = [
     # 反重复的否定表达（"不要重复/别一样/不要相同"），substring 信号兜不全时这层兜底。
     re.compile(r"(不|别)(?:要|用|会)?(?:重复|重样|一样|相同)"),
 ]
+
+_CONTENT_NEGATION = re.compile(
+    r"(?:不要|别放|别推|别推荐|不想听|排除|避开|去掉|no\s+|without\s+|exclude\s+|avoid\s+)"
+    r"\s*([^，。,.!?！？]{1,24})",
+    re.IGNORECASE,
+)
+_NON_CONTENT_NEGATIONS = {
+    "", "了", "啦", "吧", "重复", "重样", "一样", "相同", "其他", "其他的",
+    "别的", "别的歌", "这个", "那个",
+}
+
+_LANGUAGE_NEGATION_GROUPS: dict[str, tuple[str, ...]] = {
+    "中文": ("中文", "华语", "国语", "汉语", "chinese", "mandarin"),
+    "英文": ("英文", "英语", "欧美", "english"),
+    "日语": ("日语", "日文", "日本语", "日本", "japanese"),
+    "韩语": ("韩语", "韩文", "韩国语", "韩国", "korean"),
+    "越南": ("越南", "越南语", "越南文", "vietnamese"),
+    "粤语": ("粤语", "广东话", "cantonese"),
+    "法语": ("法语", "法文", "french"),
+    "西班牙语": ("西班牙语", "西语", "西班牙文", "spanish"),
+    "泰语": ("泰语", "泰文", "thai"),
+}
+
+
+def normalize_content_negation(value: str) -> str:
+    """Normalize language/country aliases while leaving arbitrary content exclusions intact."""
+    key = value.strip().lower()
+    for canonical, aliases in _LANGUAGE_NEGATION_GROUPS.items():
+        if any(alias.lower() == key for alias in aliases):
+            return canonical
+    return value.strip()
+
+
+def expand_content_negation(value: str) -> tuple[str, ...]:
+    """Return all removable aliases for a normalized exclusion."""
+    canonical = normalize_content_negation(value)
+    return _LANGUAGE_NEGATION_GROUPS.get(canonical, (value,))
+
+
+def extract_content_negations(query: str) -> list[str]:
+    """抽取“不要越南/别放中文歌”这类依赖前文的内容排除条件。"""
+    constraints: list[str] = []
+    for match in _CONTENT_NEGATION.finditer(query.strip()):
+        value = match.group(1).strip()
+        value = re.sub(r"^(?:推荐|播放|放|听)", "", value).strip()
+        value = re.sub(r"(?:的)?(?:歌曲|音乐|风格|语种|语言|歌)?[吧呀啊啦了呢]*$", "", value).strip()
+        value = re.sub(r"\s+(?:songs?|music|tracks?)$", "", value, flags=re.IGNORECASE).strip()
+        value = normalize_content_negation(value)
+        if value in _NON_CONTENT_NEGATIONS or not value:
+            continue
+        if any(token in value for token in ("重复", "重样", "一样", "相同")):
+            continue
+        constraints.append(value)
+    return list(dict.fromkeys(constraints))
 
 # 纯数量延续："我需要12首""再来几首""要多首"——只给数字+量词、省略实体，
 # 依赖上一轮的歌手/歌单上下文。必须确认去掉语气/动词/数字量词后基本无实体残留，
@@ -276,6 +397,7 @@ def is_continuation(query: str) -> bool:
         any(sig in q or sig in query for sig in _CONTINUATION_SIGNALS)
         or any(pat.search(query) for pat in _COREFERENCE_PATTERNS)
         or _is_count_continuation(query)
+        or bool(extract_content_negations(query))
     )
     if has_continuation_signal:
         return True

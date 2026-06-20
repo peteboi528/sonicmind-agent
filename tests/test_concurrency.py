@@ -30,6 +30,7 @@ def test_failing_task_falls_back_to_default():
 
 
 def test_timeout_task_takes_default():
+    started = time.monotonic()
     def hang():
         time.sleep(5.0)
         return "never"
@@ -38,8 +39,10 @@ def test_timeout_task_takes_default():
         return "done"
 
     out = run_parallel([("hang", hang), ("quick", quick)], timeout=0.2, default="DEF")
+    elapsed = time.monotonic() - started
     assert out[0] == "DEF"
     assert out[1] == "done"
+    assert elapsed < 0.6  # timeout 不能被 executor shutdown(wait=True) 重新拖回 5 秒
 
 
 def test_single_task_runs_synchronously():

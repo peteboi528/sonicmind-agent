@@ -287,13 +287,17 @@ class MemoryManager:
                 deduped.append(p)
         return " ".join(deduped)
 
-    def auto_learn_from_turn(self, user_id: str, query: str, results: list[dict[str, Any]]) -> bool:
+    async def auto_learn_from_turn_async(
+        self, user_id: str, query: str, results: list[dict[str, Any]],
+    ) -> bool:
         """Conservatively learn from an agent turn without requiring an explicit memory tool call."""
+        explicit = extract_preference(query)
+        llm_preferences = [] if explicit else await self._llm_extract_preferences_async(query)
+        consolidation_memory: UserMemory | None = None
         with self.store.lock("memory", user_id):
             memory = self.get_memory(user_id)
             changed = False
 
-            explicit = extract_preference(query)
             if explicit:
                 if self._upsert_entry(memory, explicit, "auto_explicit"):
                     changed = True
@@ -302,10 +306,9 @@ class MemoryManager:
                     changed = True
 
             # P1-G：正则未命中绕口表述时，用 LLM 兜底抽结构化偏好。
-            if not explicit:
-                for pref in self._llm_extract_preferences(query):
-                    if self._upsert_entry(memory, pref, "llm_extract"):
-                        changed = True
+            for pref in llm_preferences:
+                if self._upsert_entry(memory, pref, "llm_extract"):
+                    changed = True
 
             # 从检索结果中提取歌手/歌名作为兴趣信号（即使没有明确说"喜欢"）
             entities_from_results = _extract_entities_from_results(results)
@@ -330,13 +333,25 @@ class MemoryManager:
 
             # P1-G：每 N 轮把零散偏好巩固成一句话画像。
             memory.turns_since_consolidation += 1
-            if self._maybe_consolidate(memory):
+            interval = max(1, settings.memory_consolidation_interval)
+            if self._llm_ready() and memory.turns_since_consolidation >= interval:
+                memory.turns_since_consolidation = 0
+                consolidation_memory = memory.model_copy(deep=True)
                 changed = True
 
             if changed:
                 memory.updated_at = utc_now_iso()
                 self.store.write_model("memory", user_id, memory)
-            return changed
+        if consolidation_memory is not None:
+            profile = await self._consolidate_profile_async(consolidation_memory)
+            if profile:
+                with self.store.lock("memory", user_id):
+                    latest = self.get_memory(user_id)
+                    latest.consolidated_profile = profile
+                    latest.updated_at = utc_now_iso()
+                    self.store.write_model("memory", user_id, latest)
+                changed = True
+        return changed
 
     # ── P1-G 记忆升级：LLM 抽取 / 语义召回 / 巩固 ─────────────────────
     def _llm_ready(self) -> bool:
@@ -347,13 +362,13 @@ class MemoryManager:
             and not settings.mock_mode
         )
 
-    def _llm_extract_preferences(self, query: str) -> list[str]:
+    async def _llm_extract_preferences_async(self, query: str) -> list[str]:
         """正则未命中时用 LLM 兜底抽结构化偏好；失败/不可用返回 []。"""
         if not self._llm_ready() or len((query or "").strip()) < 4:
             return []
         prompt = PREFERENCE_EXTRACTION_USER.format(utterance=query.strip())
         try:
-            raw = self.llm.generate(prompt, system=PREFERENCE_EXTRACTION_SYSTEM, temperature=0.0)
+            raw = await self.llm.agenerate(prompt, system=PREFERENCE_EXTRACTION_SYSTEM, temperature=0.0)
             data = extract_json_dict(raw)
             prefs = data.get("preferences") if isinstance(data, dict) else None
             if isinstance(prefs, list):
@@ -435,31 +450,23 @@ class MemoryManager:
                 break
         return recent
 
-    def _maybe_consolidate(self, memory: UserMemory) -> bool:
-        """每 N 轮把零散偏好巩固成一句话画像；仅真实 LLM 下触发。"""
-        if not self._llm_ready():
-            return False
-        interval = max(1, settings.memory_consolidation_interval)
-        if memory.turns_since_consolidation < interval:
-            return False
-        memory.turns_since_consolidation = 0
+    async def _consolidate_profile_async(self, memory: UserMemory) -> str:
         scored = score_entries(memory.structured_preferences)
         if not scored:
-            return False
+            return ""
         signals = "\n".join(f"- {entry.text}（权重 {weight:.1f}）" for entry, weight in scored[:10])
         prompt = CONSOLIDATION_USER.format(
             existing=memory.consolidated_profile or "（无）", signals=signals
         )
         try:
-            raw = self.llm.generate(prompt, system=CONSOLIDATION_SYSTEM, temperature=0.3)
+            raw = await self.llm.agenerate(prompt, system=CONSOLIDATION_SYSTEM, temperature=0.3)
             data = extract_json_dict(raw)
             profile = data.get("profile") if isinstance(data, dict) else None
             if isinstance(profile, str) and profile.strip():
-                memory.consolidated_profile = profile.strip()[:120]
-                return True
+                return profile.strip()[:120]
         except Exception:
             logger.debug("记忆巩固失败，跳过", exc_info=True)
-        return False
+        return ""
 
     def get_active_goal(self, user_id: str) -> AgentGoal | None:
         goal = self.store.read_model("goals", user_id, AgentGoal)

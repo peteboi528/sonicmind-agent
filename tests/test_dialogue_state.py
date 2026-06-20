@@ -1,10 +1,12 @@
 """DialogueState 多轮延续测试：继承 / 话题切换 / 持久化 / 多用户隔离。"""
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
-from app.graph.nodes import _apply_dialogue_continuation
-from app.intents import is_continuation
+from app.graph.nodes import _apply_dialogue_continuation, _query_with_entities
+from app.intents import extract_content_negations, is_continuation
 from app.memory import MemoryManager
 from app.models import AgentPlan, RetrievalPlan
 from app.storage import JsonStore
@@ -20,6 +22,9 @@ class TestContinuationDetection:
         "再来几首", "换一批", "类似这个", "还要", "more please",
         # Bug1① 回归：反重复信号 + 纯数量请求必须判为延续，否则跨轮去重永不触发。
         "不要重复", "别重复", "换新的", "我需要12首", "12首", "再多几首",
+        # 内容否定依赖上一轮正向上下文，不是独立的新搜索主题。
+        "不要越南", "不要中文歌曲", "别放日语歌",
+        "推荐同类型的歌手", "找几个同风格歌手",
     ])
     def test_continuation_signals(self, query):
         assert is_continuation(query)
@@ -31,9 +36,21 @@ class TestContinuationDetection:
         # Bug1① 回归：自带新实体的数量请求不算延续（话题切换）。
         "周杰伦12首",
         "推荐12首歌",
+        "不要了",
     ])
     def test_non_continuation(self, query):
         assert not is_continuation(query)
+
+    @pytest.mark.parametrize(("query", "expected"), [
+        ("不要越南语歌曲", "越南"),
+        ("别放日本语歌", "日语"),
+        ("排除韩文音乐", "韩语"),
+        ("without Vietnamese songs", "越南"),
+        ("no Cantonese music", "粤语"),
+    ])
+    def test_language_negation_aliases_are_normalized(self, query, expected):
+        assert extract_content_negations(query) == [expected]
+        assert is_continuation(query)
 
 
 class TestShownTracksAccumulation:
@@ -138,6 +155,25 @@ class TestPersistence:
         memory.save_dialogue_state("u1", intent="search", query="q2", entities=["B"])
         assert memory.get_dialogue_state("u1").turn_count == 2
 
+    def test_persist_derives_missing_positive_tags_from_raw_query(self, tmp_path):
+        from app.agent import AudioVisualAgent
+        from app.graph.nodes import _persist_dialogue_state
+
+        agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+        plan = AgentPlan(
+            intent="recommend", online_required=True,
+            retrieval_plan=RetrievalPlan(search_query="越南 chill R&B", use_web=True),
+        )
+        _persist_dialogue_state(agent, {
+            "user_id": "u-seeds", "query": "推荐越南 chill R&B 歌曲",
+            "plan": plan, "results": [], "events": [], "trace": [],
+            "context": {"dialogue_state": {}},
+        })
+
+        saved = agent.memory.get_dialogue_state("u-seeds")
+        assert "R&B" in saved.genre_tags
+        assert "放松" in saved.mood_tags
+
     def test_clear_state(self, memory):
         memory.save_dialogue_state("u1", intent="recommend", query="q", entities=["A"])
         memory.clear_dialogue_state("u1")
@@ -232,6 +268,51 @@ class TestContinuationInheritance:
         assert inherited == ""
         assert new_plan is plan
 
+    def test_content_negation_removes_negative_entity_and_inherits_positive_seed(self):
+        prev = {
+            "entities": ["越南"], "last_intent": "recommend",
+            "last_query": "推荐越南 chill R&B",
+            "genre_tags": ["R&B"], "mood_tags": ["chill"], "scenario_tags": [],
+            "shown_tracks": [{"title": "Old", "source_id": "1"}],
+        }
+        plan = AgentPlan(
+            intent="recommend",
+            tools_needed=["web_music_search", "recommend"],
+            online_required=True,
+            retrieval_plan=RetrievalPlan(
+                entities=["越南"], use_web=True, search_query="不要越南",
+                search_variants=["不要越南 chill"],
+            ),
+        )
+
+        new_plan, _ = _apply_dialogue_continuation(plan, "不要越南", prev)
+
+        rp = new_plan.retrieval_plan
+        assert rp.entities == []
+        assert "越南" not in rp.search_query
+        assert "不要" not in rp.search_query
+        assert "chill" in rp.search_query and "R&B" in rp.search_query
+        assert rp.excluded_terms == ["越南"]
+        assert "不要" not in _query_with_entities("不要越南", new_plan)
+        assert all("越南" not in variant and "不要" not in variant for variant in rp.search_variants)
+        assert new_plan._excluded_tracks
+
+    def test_content_negation_derives_language_and_keeps_prior_scenario(self):
+        prev = {
+            "entities": [], "last_intent": "recommend", "last_query": "推荐深夜中文歌曲",
+            "genre_tags": [], "mood_tags": ["放松"], "scenario_tags": ["深夜"],
+        }
+        plan = AgentPlan(
+            intent="recommend", online_required=True,
+            retrieval_plan=RetrievalPlan(search_query="", use_web=True),
+        )
+
+        new_plan, _ = _apply_dialogue_continuation(plan, "不要中文歌曲", prev)
+
+        assert new_plan.retrieval_plan.language_filter == "en"
+        assert "深夜" in new_plan.retrieval_plan.search_query
+        assert "中文" not in new_plan.retrieval_plan.search_query
+
 
 class TestEndToEndThroughGraph:
     """跑通 load_context→plan→finalize 一轮后，DialogueState 落盘且下一轮可继承。"""
@@ -241,7 +322,7 @@ class TestEndToEndThroughGraph:
         agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
 
         # 第一轮：明确推荐周杰伦
-        agent.chat("user-x", "推荐周杰伦的歌")
+        asyncio.run(agent.chat_async("user-x", "推荐周杰伦的歌"))
         saved = agent.memory.get_dialogue_state("user-x")
         assert saved.last_intent in {"recommend", "search"}
         assert saved.turn_count >= 1
@@ -250,6 +331,6 @@ class TestEndToEndThroughGraph:
         from app.agent import AudioVisualAgent
         agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
         agent.memory.save_dialogue_state("user-y", intent="recommend", query="q", entities=["周杰伦"])
-        agent.chat("user-y", "你好")
+        asyncio.run(agent.chat_async("user-y", "你好"))
         # chat 意图应清空旧延续状态
         assert agent.memory.get_dialogue_state("user-y").entities == []

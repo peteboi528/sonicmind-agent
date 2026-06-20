@@ -4,7 +4,9 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, PrivateAttr, field_validator
+from pydantic import BaseModel, Field, PrivateAttr, field_validator, model_validator
+
+from app.tools.contracts import ToolCall
 
 
 def utc_now_iso() -> str:
@@ -207,12 +209,6 @@ class SimilarSegmentResult(BaseModel):
     matching_modalities: list[str]
 
 
-class ReActStep(BaseModel):
-    thought: str
-    action: str
-    observation: str
-
-
 class AgentGoal(BaseModel):
     goal: str
     steps_done: list[str] = Field(default_factory=list)
@@ -263,6 +259,35 @@ class RetrievalPlan(BaseModel):
     search_query: str = ""
     search_variants: list[str] = Field(default_factory=list)
     language_filter: str = ""      # 语言偏好 zh/en/ja/ko/...，非空时对候选做安全后过滤
+    excluded_terms: list[str] = Field(default_factory=list)
+    """Hard content/language exclusions retained after positive query rewriting."""
+
+
+class ToolStage(BaseModel):
+    calls: list[ToolCall] = Field(default_factory=list)
+    parallel: bool = True
+
+
+class ToolOutcome(BaseModel):
+    """Serializable observation emitted by ToolRuntime and consumed by the graph."""
+
+    call_id: str
+    tool: str
+    status: str
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    summary: str = ""
+    error: dict[str, Any] | None = None
+    card_count: int = 0
+    provenance: list[dict[str, Any]] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    attempt: int = 0
+
+
+class RecoveryDecision(BaseModel):
+    action: Literal["retry", "finalize"] = "finalize"
+    reason: str = ""
+    search_query: str = ""
+    calls: list[str] = Field(default_factory=list)
 
 
 class AgentPlan(BaseModel):
@@ -273,6 +298,8 @@ class AgentPlan(BaseModel):
     intent: str = "chat"
     strategy: Literal["online_first", "library_first", "memory_only", "no_search"] = "online_first"
     tools_needed: list[str] = Field(default_factory=list)
+    stages: list[ToolStage] = Field(default_factory=list)
+    response_mode: Literal["grounded", "conversational", "cards"] = "grounded"
     target_count: int | None = None
     online_required: bool = True
     reasoning_summary: str = ""
@@ -285,6 +312,14 @@ class AgentPlan(BaseModel):
         from app.intents import is_valid_intent
         s = str(v or "chat")
         return s if is_valid_intent(s) else "chat"
+
+    @model_validator(mode="after")
+    def _keep_legacy_tools_and_stages_compatible(self) -> AgentPlan:
+        if self.stages and not self.tools_needed:
+            self.tools_needed = [call.name for stage in self.stages for call in stage.calls]
+        elif self.tools_needed and not self.stages:
+            self.stages = [ToolStage(calls=[ToolCall(name=name) for name in self.tools_needed], parallel=True)]
+        return self
 
 
 class QueryPlanPayload(BaseModel):
@@ -429,7 +464,8 @@ class TasteExperiment(BaseModel):
 class StreamEvent(BaseModel):
     type: Literal[
         "plan", "thinking", "tool_start", "tool_result", "candidates",
-        "song_card", "album_card", "eval", "token", "final", "guard", "error",
+        "song_card", "album_card", "artist_card", "eval", "token", "final", "guard", "error",
+        "checkpoint", "confirmation_required", "resumed", "refine",
     ]
     content: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -610,8 +646,16 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     user_id: str = "demo-user"
+    thread_id: str | None = None
     message: str
     history: list[ChatMessage] = Field(default_factory=list)
+
+
+class AgentResumeRequest(BaseModel):
+    user_id: str = "demo-user"
+    thread_id: str
+    action_id: str
+    approved: bool
 
 
 class DailyRequest(BaseModel):

@@ -256,12 +256,19 @@ def fetch_user_playlists(cookie: str, uid: str | None = None) -> list[dict]:
 
 # ── Persistence ─────────────────────────────────────────────────────────
 
-_STORE_DIR = Path("data/store/netease_auth")
-
-
 def _path(user_id: str) -> Path:
-    _STORE_DIR.mkdir(parents=True, exist_ok=True)
-    return _STORE_DIR / f"{user_id}.json"
+    # Keep auth data beside the active JsonStore.  A fixed data/store path used
+    # to make tools report "not logged in" while the web app used frontend/data/store.
+    from app.config import settings
+
+    store_dir = Path(settings.store_root) / "netease_auth"
+    store_dir.mkdir(parents=True, exist_ok=True)
+    # 目录含各用户的会话 cookie，收紧为仅属主可访问（0700）。Windows 无此语义则忽略。
+    try:
+        store_dir.chmod(0o700)
+    except OSError:
+        pass
+    return store_dir / f"{user_id}.json"
 
 
 def save_cookie(
@@ -279,7 +286,14 @@ def save_cookie(
         "vip_type": vip_type,
         "vip_label": vip_label,
     }
-    _path(user_id).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    path = _path(user_id)
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    # cookie 含长效会话令牌（MUSIC_U）。本地 agent 不加密，但收紧为仅属主可读写（0600），
+    # 避免同机其他用户读到。chmod 在 Windows 上无 0600 语义，失败则忽略。
+    try:
+        path.chmod(0o600)
+    except OSError:
+        logger.debug("无法收紧 cookie 文件权限：%s", path, exc_info=True)
 
 
 def load_cookie(user_id: str) -> dict | None:

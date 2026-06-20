@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import app.memory as memory_mod
 from app.agent import CineSonicAgent
 from app.config import settings
@@ -15,7 +17,7 @@ class StubLLM:
         self.responses = responses
         self.calls: list[str] = []
 
-    def generate(self, prompt: str, system: str | None = None, temperature: float = 0.7) -> str:
+    async def agenerate(self, prompt: str, system: str | None = None, temperature: float = 0.7) -> str:
         self.calls.append(f"{system or ''}\n{prompt}")
         sys = system or ""
         if "偏好抽取器" in sys:
@@ -32,11 +34,15 @@ def _force_real_llm(monkeypatch, mgr: MemoryManager, llm) -> None:
     monkeypatch.setattr(settings, "enable_semantic_memory", True, raising=False)
 
 
+def _learn(manager: MemoryManager, user_id: str, query: str) -> bool:
+    return asyncio.run(manager.auto_learn_from_turn_async(user_id, query, []))
+
+
 def test_regex_path_unchanged_without_llm(tmp_path):
     """无 key（mock 模式）时：LLM 抽取/巩固不触发，正则路径照常工作。"""
     agent = CineSonicAgent(JsonStore(tmp_path / "store"))
     assert settings.mock_mode  # 测试环境默认无 key
-    agent.memory.auto_learn_from_turn("u1", "我喜欢慵懒爵士", [])
+    _learn(agent.memory, "u1", "我喜欢慵懒爵士")
     mem = agent.memory.get_memory("u1")
     assert any("慵懒爵士" in e.text for e in mem.structured_preferences)
     # 巩固画像在 mock 下不应被 LLM 填充
@@ -49,7 +55,7 @@ def test_llm_extract_fallback_on_oblique_phrasing(tmp_path, monkeypatch):
     llm = StubLLM({"extract": '{"preferences": ["带电子元素的国摇"]}'})
     _force_real_llm(monkeypatch, mgr, llm)
     # 这句话不含"喜欢/偏好"等正则锚点
-    mgr.auto_learn_from_turn("u2", "最近上头那种带点电子的国摇", [])
+    _learn(mgr, "u2", "最近上头那种带点电子的国摇")
     mem = mgr.get_memory("u2")
     assert any("带电子元素的国摇" in e.text for e in mem.structured_preferences)
     assert any("偏好抽取器" in c for c in llm.calls)
@@ -60,7 +66,7 @@ def test_llm_extract_not_called_when_regex_hits(tmp_path, monkeypatch):
     mgr = MemoryManager(JsonStore(tmp_path / "store"))
     llm = StubLLM({"extract": '{"preferences": ["不该出现"]}'})
     _force_real_llm(monkeypatch, mgr, llm)
-    mgr.auto_learn_from_turn("u3", "我喜欢慵懒爵士", [])
+    _learn(mgr, "u3", "我喜欢慵懒爵士")
     mem = mgr.get_memory("u3")
     assert not any("不该出现" in e.text for e in mem.structured_preferences)
 
@@ -72,8 +78,8 @@ def test_consolidation_after_interval(tmp_path, monkeypatch):
     _force_real_llm(monkeypatch, mgr, llm)
     monkeypatch.setattr(settings, "memory_consolidation_interval", 2, raising=False)
     # 先种一条偏好，避免巩固时无信号
-    mgr.auto_learn_from_turn("u4", "我喜欢慵懒爵士", [])
-    mgr.auto_learn_from_turn("u4", "随便放点歌", [])  # 第 2 轮触发巩固
+    _learn(mgr, "u4", "我喜欢慵懒爵士")
+    _learn(mgr, "u4", "随便放点歌")  # 第 2 轮触发巩固
     mem = mgr.get_memory("u4")
     assert "慵懒爵士" in mem.consolidated_profile
     assert mem.turns_since_consolidation == 0
@@ -84,8 +90,8 @@ def test_recall_falls_back_to_recent_without_embeddings(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_mod.embeddings, "embeddings_available", lambda: False)
     mgr = MemoryManager(JsonStore(tmp_path / "store"))
     monkeypatch.setattr(settings, "enable_semantic_memory", True, raising=False)
-    mgr.auto_learn_from_turn("u5", "想听慵懒爵士", [])
-    mgr.auto_learn_from_turn("u5", "来点 city pop", [])
+    _learn(mgr, "u5", "想听慵懒爵士")
+    _learn(mgr, "u5", "来点 city pop")
     recalled = mgr.recall_episodes("u5", "爵士", top_k=2)
     assert recalled  # 退化路径仍返回最近条目
     assert "city pop" in recalled[0]  # 最近的在前
@@ -110,8 +116,8 @@ def test_semantic_recall_ranks_by_cosine(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_mod.embeddings, "encode", fake_encode)
     mgr = MemoryManager(JsonStore(tmp_path / "store"))
     monkeypatch.setattr(settings, "enable_semantic_memory", True, raising=False)
-    mgr.auto_learn_from_turn("u6", "想听慵懒爵士", [])
-    mgr.auto_learn_from_turn("u6", "来点硬核摇滚", [])
+    _learn(mgr, "u6", "想听慵懒爵士")
+    _learn(mgr, "u6", "来点硬核摇滚")
     recalled = mgr.recall_episodes("u6", "爵士乐推荐", top_k=1)
     assert recalled == ["想听慵懒爵士"]
 
@@ -122,7 +128,7 @@ def test_episodic_memory_capped(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "enable_semantic_memory", True, raising=False)
     monkeypatch.setattr(settings, "episodic_memory_cap", 10, raising=False)
     for i in range(20):
-        mgr.auto_learn_from_turn("u7", f"第 {i} 次想听不同的歌曲", [])
+        _learn(mgr, "u7", f"第 {i} 次想听不同的歌曲")
     mem = mgr.get_memory("u7")
     assert len(mem.episodic_memory) <= 10
 

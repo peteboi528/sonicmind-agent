@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 
 import pytest
@@ -43,7 +44,7 @@ def _run_case(agent, case):
         elif action.get("type") == "rate":
             agent.rate_asset(case.user_id, action["asset_id"], action["score"])
     history = [{"role": m["role"], "content": m["content"]} for m in case.history] or None
-    return agent.chat(case.user_id, case.query, history=history)
+    return asyncio.run(agent.chat_async(case.user_id, case.query, history=history))
 
 
 @pytest.mark.parametrize("case", EVAL_CASES, ids=lambda c: c.case_id)

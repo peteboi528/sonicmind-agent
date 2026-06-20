@@ -47,6 +47,23 @@ def test_agent_dense_library_fallback_returns_verified_tracks(monkeypatch):
     assert out[0].external_id == "sem-1"
 
 
+def test_agent_lexical_library_fallback_supports_offline_mood_queries():
+    from app.agent import AudioVisualAgent
+
+    agent = AudioVisualAgent.__new__(AudioVisualAgent)
+
+    class FakeLibrary:
+        def list_tracks(self, limit):
+            return [
+                ResourceTrack(title="Night Calm", artist="A", source="local", source_id="1", mood=["放松"], verified=True),
+                ResourceTrack(title="Morning Run", artist="B", source="local", source_id="2", mood=["热血"], verified=True),
+            ]
+
+    agent.library = FakeLibrary()
+    result = agent._lexical_resource_fallback("来点深夜放松的歌曲", limit=5)
+    assert [track.title for track in result] == ["Night Calm"]
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # verifier.py
 # ═══════════════════════════════════════════════════════════════════════
@@ -720,84 +737,21 @@ class TestRecommendForQueryRoutes:
 
 
 class TestComposeDiscussion:
-    """_compose_discussion: 讨论路径反幻觉测试。
-
-    注意：agent=None 时直接返回 None（在检查 tracks 之前），
-    所以测试拒绝回答需要传一个有 llm 的 agent。
-    """
+    """Async discussion path remains grounded in verified tracks."""
 
     def test_no_tracks_with_agent_refuses(self):
-        """有 agent 但没搜到真实曲目 → 拒绝回答。"""
-        from app.graph.nodes import _compose_discussion
+        from app.graph.nodes import _discussion_prompt
 
-        mock_agent = MagicMock()
-        mock_agent.llm = MagicMock()
-
-        result = _compose_discussion("Drake 的专辑评价", [], mock_agent)
-        assert result is not None
-        assert "不想编" in result or "没找到" in result
-
-    def test_no_agent_returns_none(self):
-        """agent=None → 直接返回 None，不进入讨论。"""
-        from app.graph.nodes import _compose_discussion
-
-        result = _compose_discussion("test", [MagicMock()], None)
-        assert result is None
-
-    def test_with_tracks_calls_llm(self):
-        """有真实曲目 → 调用 LLM，prompt 包含真实曲目。"""
-        from app.graph.nodes import _compose_discussion
-
-        mock_agent = MagicMock()
-        mock_agent.llm = MagicMock()
-        mock_agent.llm.generate.return_value = "Drake 的《Hotline Bling》是一首经典 R&B 单曲。"
-
-        tracks = [
-            ExternalTrack(external_id="1", title="Hotline Bling", artist="Drake", source="netease"),
-            ExternalTrack(external_id="2", title="God's Plan", artist="Drake", source="netease"),
-        ]
-
-        result = _compose_discussion("Drake 的专辑评价怎么样", tracks, mock_agent)
-        assert result is not None
-        prompt = mock_agent.llm.generate.call_args[0][0]
-        assert "Hotline Bling" in prompt
-        assert "真实曲目" in prompt
-
-    def test_rejects_too_long_response(self):
-        """超过 300 字的回复被丢弃。"""
-        from app.graph.nodes import _compose_discussion
-
-        mock_agent = MagicMock()
-        mock_agent.llm = MagicMock()
-        mock_agent.llm.generate.return_value = "这是一首非常好的歌" * 100  # 远超 300 字
-
-        tracks = [ExternalTrack(external_id="1", title="Test", artist="Test", source="netease")]
-        result = _compose_discussion("test", tracks, mock_agent)
-        assert result is None  # 被拒绝
-
-    def test_rejects_empty_response(self):
-        from app.graph.nodes import _compose_discussion
-
-        mock_agent = MagicMock()
-        mock_agent.llm = MagicMock()
-        mock_agent.llm.generate.return_value = ""
-
-        tracks = [ExternalTrack(external_id="1", title="Test", artist="Test", source="netease")]
-        result = _compose_discussion("test", tracks, mock_agent)
-        assert result is None
+        prompt, refuse = _discussion_prompt("Drake 的专辑评价", [])
+        assert prompt is None
+        assert "不想编" in refuse or "没找到" in refuse
 
     def test_prompt_includes_anti_hallucination_rules(self):
-        """Prompt 包含严格的反幻觉规则。"""
-        from app.graph.nodes import _compose_discussion
-
-        mock_agent = MagicMock()
-        mock_agent.llm = MagicMock()
-        mock_agent.llm.generate.return_value = "一首不错的歌。"
+        from app.graph.nodes import _discussion_prompt
 
         tracks = [ExternalTrack(external_id="1", title="Test", artist="Test", source="netease")]
-        _compose_discussion("test", tracks, mock_agent)
-
-        prompt = mock_agent.llm.generate.call_args[0][0]
+        prompt, _ = _discussion_prompt("test", tracks)
+        assert prompt is not None
         assert "不要编造" in prompt
         assert "100字" in prompt
         assert "真实曲目" in prompt

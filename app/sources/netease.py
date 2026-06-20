@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -8,6 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
+from functools import lru_cache
 from typing import Any
 
 from app.netease_auth import _cookie_header
@@ -32,8 +34,12 @@ _ALBUM_SEARCH_ENDPOINTS = (
     "https://music.163.com/api/search/get",
     "https://music.163.com/api/cloudsearch/pc",
 )
-_SEARCH_RETRIES = 2
-_SEARCH_BACKOFF = 0.5
+# _SEARCH_RETRIES 语义对齐 http_transport：表示"重试次数"，实际尝试 = retries + 1。
+# 异步路径 source_transport.request 即用 attempts = retries + 1；同步路径下方也照此展开，
+# 否则 1 在 range(1) 里只跑一次、退避 sleep 永不触发（旧 bug）。
+_SEARCH_RETRIES = 1
+_SEARCH_BACKOFF = 0.2
+_SEARCH_TIMEOUT = 3.0
 
 # 专辑详情进程内缓存：按 album_id 缓存完整曲目，重复点击同一专辑不再重复打网易云。
 # FIFO + 上限，避免长跑实例无限增长；FIFO 而非 LRU 是因为专辑曲目稳定、不需要按热度复用。
@@ -64,20 +70,33 @@ def _fetch_netease_songs(query: str, limit: int, offset: int = 0) -> list[dict[s
     encoded = urllib.parse.quote(query)
     offset = max(0, int(offset or 0))
 
-    for attempt in range(_SEARCH_RETRIES):
-        for base in _SEARCH_ENDPOINTS:
-            search_url = f"{base}?s={encoded}&type=1&limit={limit}&offset={offset}"
-            try:
-                req = urllib.request.Request(search_url, headers=headers)
-                with urllib.request.urlopen(req, timeout=8) as response:
-                    data = json.loads(response.read().decode())
-                songs = data.get("result", {}).get("songs", []) or []
-                if songs:
-                    return songs
-            except Exception:
-                logger.debug("NetEase search failed for %s via %s, attempt %d", query, base, attempt + 1, exc_info=True)
-        logger.debug("NetEase search empty (rate-limited?) for %s, attempt %d", query, attempt + 1)
-        if attempt < _SEARCH_RETRIES - 1:
+    from app.concurrency import run_parallel
+
+    def fetch(base: str) -> list[dict[str, Any]]:
+        search_url = f"{base}?s={encoded}&type=1&limit={limit}&offset={offset}"
+        try:
+            req = urllib.request.Request(search_url, headers=headers)
+            with urllib.request.urlopen(req, timeout=_SEARCH_TIMEOUT) as response:
+                data = json.loads(response.read().decode())
+            return data.get("result", {}).get("songs", []) or []
+        except Exception:
+            logger.debug("NetEase search failed for %s via %s", query, base, exc_info=True)
+            return []
+
+    # attempts = 重试次数 + 1（与 http_transport 异步路径一致）。每轮多端点并行，
+    # 任一端点非空即返回；全空（疑似限流）则退避后重试，次数用尽仍空才返回 []。
+    attempts = _SEARCH_RETRIES + 1
+    for attempt in range(attempts):
+        batches = run_parallel(
+            [(f"netease:{base}", lambda base=base: fetch(base)) for base in _SEARCH_ENDPOINTS],
+            timeout=_SEARCH_TIMEOUT + 0.2,
+            default=[],
+        )
+        for songs in batches:
+            if songs:
+                return songs
+        logger.debug("NetEase search empty (rate-limited?) for %s, attempt %d/%d", query, attempt + 1, attempts)
+        if attempt < attempts - 1:
             time.sleep(_SEARCH_BACKOFF * (attempt + 1))
     return []
 
@@ -87,6 +106,34 @@ def search_netease(query: str) -> str | None:
     if songs:
         return str(songs[0]["id"])
     return None
+
+
+@lru_cache(maxsize=128)
+def fetch_netease_lyrics(song_id: str) -> list[str]:
+    """Fetch verified NetEase lyrics and strip timestamp metadata.
+
+    Empty/failed responses return ``[]``.  The function never synthesizes text.
+    """
+    song_id = str(song_id or "").strip()
+    if not song_id.isdigit():
+        return []
+    url = f"https://music.163.com/api/song/lyric?id={song_id}&lv=-1&kv=-1&tv=-1"
+    try:
+        req = urllib.request.Request(url, headers=_HEADERS)
+        with urllib.request.urlopen(req, timeout=8) as response:
+            data = json.loads(response.read().decode())
+    except Exception:
+        logger.debug("NetEase lyric fetch failed for %s", song_id, exc_info=True)
+        return []
+    lyric = ((data.get("lrc") or {}).get("lyric") or "").strip()
+    if not lyric:
+        return []
+    lines: list[str] = []
+    for raw_line in lyric.splitlines():
+        text = re.sub(r"^(?:\[[^\]]+\])+", "", raw_line).strip()
+        if text and not re.match(r"^(作词|作曲|编曲|制作人|混音)[:：]", text):
+            lines.append(text)
+    return lines[:500]
 
 
 def search_netease_artist_image(artist: str) -> str | None:
@@ -235,6 +282,37 @@ def search_netease_artist_albums(artist: str, limit: int = 6) -> list[dict[str, 
     albums = _fetch_netease_albums(artist, limit=max(limit * 3, 12))
     if not albums:
         return []
+    return _normalize_artist_albums(albums, artist, limit)
+
+
+async def asearch_netease_artist_albums(artist: str, limit: int = 6) -> list[dict[str, Any]]:
+    artist = (artist or "").strip()
+    if not artist:
+        return []
+    from app.sources.http_transport import source_transport
+
+    params = {"s": artist, "type": 10, "limit": max(limit * 3, 12)}
+
+    async def fetch(endpoint: str) -> list[dict[str, Any]]:
+        try:
+            response = await source_transport.request(
+                "netease", "GET", endpoint, params=params, headers=_HEADERS,
+                retries=1, concurrency=4,
+            )
+            return response.json().get("result", {}).get("albums", []) or []
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return []
+
+    batches = await asyncio.gather(*(fetch(endpoint) for endpoint in _ALBUM_SEARCH_ENDPOINTS))
+    albums = next((batch for batch in batches if batch), [])
+    return _normalize_artist_albums(albums, artist, limit)
+
+
+def _normalize_artist_albums(
+    albums: list[dict[str, Any]], artist: str, limit: int,
+) -> list[dict[str, Any]]:
 
     wanted_artist = _normalize_music_name(artist)
 
@@ -296,6 +374,35 @@ def search_netease_many(query: str, limit: int = 20, offset: int = 0) -> list[di
     """
     songs = _fetch_netease_songs(query, limit=limit, offset=offset)
 
+    return _normalize_netease_songs(songs)
+
+
+async def asearch_netease_many(query: str, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
+    """Async pooled NetEase search with cancellation, source limits, retries and circuit breaking."""
+    from app.sources.http_transport import source_transport
+
+    params = {"s": query, "type": 1, "limit": limit, "offset": max(0, int(offset or 0))}
+
+    async def fetch(endpoint: str) -> list[dict[str, Any]]:
+        try:
+            response = await source_transport.request(
+                "netease", "GET", endpoint, params=params, headers=_HEADERS,
+                retries=_SEARCH_RETRIES, concurrency=4,
+            )
+            payload = response.json()
+            return payload.get("result", {}).get("songs", []) or []
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Async NetEase search failed for %s via %s", query, endpoint, exc_info=True)
+            return []
+
+    batches = await asyncio.gather(*(fetch(endpoint) for endpoint in _SEARCH_ENDPOINTS))
+    songs = next((batch for batch in batches if batch), [])
+    return _normalize_netease_songs(songs)
+
+
+def _normalize_netease_songs(songs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for song in songs:
         name = (song.get("name") or "").strip()

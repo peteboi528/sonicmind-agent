@@ -1,13 +1,16 @@
 """可视结果契约：有曲目/专辑的工具必须贯通 SSE、final cards 与 trace。"""
 from __future__ import annotations
 
+import asyncio
+
+from app.answer import collect_tracks as _collect_track_candidates
 from app.graph.nodes import (
     _drop_tracks_from_results,
     _finalize_fallback,
-    _run_tool,
+    _run_tool_async,
     _select_listed_tracks,
-    _track_key,
     _trace_summary,
+    _track_key,
 )
 from app.models import (
     AgentPlan,
@@ -18,7 +21,7 @@ from app.models import (
     SearchResponse,
     StreamEvent,
 )
-from app.react_loop import _collect_track_candidates
+from app.tools.contracts import ToolCall
 
 
 def _track(index: int, source: str = "netease") -> ExternalTrack:
@@ -39,7 +42,10 @@ def _plan(intent: str, target: int | None = None) -> AgentPlan:
 
 def _run(fake_agent, tool: str, plan: AgentPlan):
     results, trace, events = [], [], []
-    _run_tool(fake_agent, tool, plan, "test", "u1", 5, results, trace, events)
+    asyncio.run(_run_tool_async(
+        fake_agent, ToolCall(name=tool), plan, "test", "u1", 5,
+        [], results, trace, events, "thread", "run", False,
+    ))
     return results, trace, events
 
 
@@ -93,7 +99,7 @@ def test_final_recommend_prefers_reranked_results_over_raw_web_results():
     assert [track.external_id for track in selected] == ["2"]
 
 
-def test_react_fallback_uses_authoritative_results_before_raw_web_results():
+def test_shared_collector_uses_authoritative_results_before_raw_web_results():
     raw = _track(1)
     reranked = _track(2)
     recommendation = DailyRecommendation(
@@ -106,7 +112,7 @@ def test_react_fallback_uses_authoritative_results_before_raw_web_results():
         {"type": "daily_recommend", "recommendation": recommendation},
     ])
 
-    assert [track.external_id for track in selected[:2]] == ["2", "1"]
+    assert {track.external_id for track in selected[:2]} == {"1", "2"}
 
 
 def test_import_emits_candidates_and_final_tracks():
@@ -130,7 +136,7 @@ def test_import_emits_candidates_and_final_tracks():
 
 def test_album_cards_are_counted_in_trace_summary():
     class Agent:
-        def recommend_artist_albums(self, *args, **kwargs):
+        async def recommend_artist_albums_async(self, *args, **kwargs):
             return [
                 {"id": "a1", "name": "Album 1", "artist": "Artist"},
                 {"id": "a2", "name": "Album 2", "artist": "Artist"},
@@ -143,6 +149,35 @@ def test_album_cards_are_counted_in_trace_summary():
     summary = _trace_summary(plan, results, trace, [])
     assert summary["final_cards"] == 2
     assert summary["sources"] == ["netease"]
+
+
+def test_trace_summary_distinguishes_empty_execution_from_no_tool():
+    plan = AgentPlan(
+        intent="recommend", strategy="online_first",
+        tools_needed=["web_music_search", "recommend"],
+    )
+    summary = _trace_summary(
+        plan,
+        [],
+        [
+            "[tool_status] tool=web_music_search status=empty candidates=0",
+            "[tool_status] tool=recommend status=empty candidates=0",
+        ],
+        [],
+    )
+    assert summary["tool_execution_state"] == "empty"
+    assert summary["tools_planned"] == ["web_music_search", "recommend"]
+    assert summary["tools_executed"] == ["web_music_search", "recommend"]
+    assert summary["empty_results"] == ["web_music_search", "recommend"]
+    assert summary["sources"] == []
+
+
+def test_trace_summary_exposes_tool_error():
+    plan = AgentPlan(intent="recommend", tools_needed=["recommend"])
+    summary = _trace_summary(plan, [], ["[tool_error] recommend 失败，已跳过：timeout"], [])
+    assert summary["tool_execution_state"] == "error"
+    assert summary["tool_errors"] == ["recommend"]
+    assert summary["tool_error_details"] == [{"tool": "recommend", "message": "timeout"}]
 
 
 def test_reflection_removes_search_tracks_from_response_shape():

@@ -1,9 +1,9 @@
 """统一 answer 生成模块：候选收集/去重、已知标题白名单、Answer Guard、
 回复模板与歌曲卡片。
 
-Graph（live 路径）与 ReAct（fallback）共用同一套候选收集、去重、来源标签、
+LangGraph 各节点共用同一套候选收集、去重、来源标签、
 数量解析、Answer Guard 与目标进度序列化，避免三处逻辑漂移。本模块为唯一真源；
-`app.graph.nodes` 与 `app.react_loop` 从这里导入并按需 re-export，保持旧 import
+`app.graph.nodes` 从这里导入并按需 re-export，避免结果协议漂移。
 路径与测试不破裂。
 """
 from __future__ import annotations
@@ -13,7 +13,7 @@ from typing import Any
 
 from app.models import AgentGoal, ExternalTrack, TrackRef
 
-# ── 回复模板（集中管理，Graph 与 ReAct fallback 共用） ──────────────────
+# ── 回复模板（LangGraph 节点共用） ─────────────────────────────────────
 RESPONSE_TEMPLATES = {
     "no_candidates": "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。",
     "intro_verified": "我优先采用真实线上候选，先给你这 {n} 首可追溯结果：",
@@ -280,7 +280,7 @@ def goal_progress(goal: AgentGoal | None) -> list[str]:
     return lines
 
 
-# ── ReAct fallback 专用：grounded 答案模板 ──────────────────────────────
+# ── 兼容的 grounded 答案模板 ───────────────────────────────────────────
 def grounded_track_list(query: str, results: list[dict[str, Any]], candidates: list[Any]) -> str:
     """生成可追溯歌曲清单（作为 LLM 自然语言回答的附录）。
 

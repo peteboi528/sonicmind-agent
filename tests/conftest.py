@@ -80,6 +80,30 @@ def fake_online_music_search(monkeypatch):
 
     monkeypatch.setattr(AudioVisualAgent, "search_web_music", _fake_search_web_music)
 
+    async def _fake_search_web_music_async(
+        self, query: str, top_k: int = 5, relevance_query: str = "",
+        include_video_sources: bool = False, offset: int = 0, variants=None,
+    ):
+        return self.search_web_music(
+            query, top_k=top_k, relevance_query=relevance_query,
+            include_video_sources=include_video_sources, offset=offset, variants=variants,
+        )
+
+    monkeypatch.setattr(AudioVisualAgent, "search_web_music_async", _fake_search_web_music_async)
+
+    async def _fake_search_videos_async(self, query: str, top_k: int = 5):
+        return self.search_videos(query, top_k=top_k)
+
+    async def _fake_search_artist_info_async(self, query: str):
+        return self.search_artist_info(query)
+
+    async def _fake_recommend_artist_albums_async(self, user_id: str, artist: str, limit: int = 6):
+        return self.recommend_artist_albums(user_id, artist, limit)
+
+    monkeypatch.setattr(AudioVisualAgent, "search_videos_async", _fake_search_videos_async)
+    monkeypatch.setattr(AudioVisualAgent, "search_artist_info_async", _fake_search_artist_info_async)
+    monkeypatch.setattr(AudioVisualAgent, "recommend_artist_albums_async", _fake_recommend_artist_albums_async)
+
 
 @pytest.fixture(autouse=True)
 def _reset_netease_album_cache():

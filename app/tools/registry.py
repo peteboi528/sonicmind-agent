@@ -1,10 +1,45 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, create_model
+
+from app.tools.contracts import ToolContext, ToolResult, ToolRisk
+
+ToolHandler = Callable[[dict[str, Any], ToolContext], ToolResult | Awaitable[ToolResult]]
 
 
-@dataclass(frozen=True)
+def _python_type(schema: dict[str, Any]) -> Any:
+    kind = schema.get("type")
+    if "enum" in schema:
+        return Literal.__getitem__(tuple(schema["enum"]))
+    if kind == "integer":
+        return int
+    if kind == "number":
+        return float
+    if kind == "boolean":
+        return bool
+    if kind == "array":
+        return list[_python_type(schema.get("items", {}))]
+    if kind == "object":
+        return dict[str, Any]
+    return str
+
+
+def _args_model(name: str, schema: dict[str, Any], required: tuple[str, ...]) -> type[BaseModel]:
+    fields: dict[str, tuple[Any, Any]] = {}
+    for key, item in schema.items():
+        annotation = _python_type(item)
+        default = ... if key in required else item.get("default", None)
+        fields[key] = (annotation, Field(default=default, description=item.get("description")))
+    model = create_model(f"{''.join(part.title() for part in name.split('_'))}Args", **fields)
+    model.model_config = ConfigDict(extra="forbid")
+    return model
+
+
+@dataclass
 class ToolSpec:
     name: str
     description: str
@@ -13,18 +48,28 @@ class ToolSpec:
     llm_visible: bool = True
     graph_handler: str = ""
     aliases: tuple[str, ...] = ()
+    risk: ToolRisk = ToolRisk.READ
+    timeout_seconds: float = 8.0
+    max_retries: int = 1
+    max_concurrency: int = 20
+    idempotent: bool = True
+    source: str = "internal"
+    handler: ToolHandler | None = None
+    async_handler: ToolHandler | None = None
+    args_model: type[BaseModel] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.args_model = _args_model(self.name, self.args_schema, self.required)
 
     def openai_tool(self) -> dict[str, Any]:
+        parameters = self.args_model.model_json_schema()
+        parameters.pop("title", None)
         return {
             "type": "function",
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": {
-                    "type": "object",
-                    "properties": self.args_schema,
-                    "required": list(self.required),
-                },
+                "parameters": parameters,
             },
         }
 
@@ -58,6 +103,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
             "query": {"type": "string", "description": "歌手名或含歌手名的专辑请求，例如 'The Weeknd 的专辑'"},
         },
         required=("query",),
+    ),
+    "similar_artists": ToolSpec(
+        name="similar_artists",
+        aliases=("recommend_similar_artists",),
+        description="根据一个种子歌手，在可追溯曲库中寻找曲风和情绪标签相近的其他歌手。",
+        args_schema={
+            "artist": {"type": "string", "description": "种子歌手名"},
+            "top_k": {"type": "integer", "default": 6},
+        },
+        required=("artist",),
+        source="local_library",
     ),
     "playlist": ToolSpec(
         name="playlist",
@@ -126,6 +182,34 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         args_schema={"event": {"type": "string", "description": "用户原话或抽取的偏好文本"}},
         required=("event",),
     ),
+    "feedback": ToolSpec(
+        name="feedback",
+        aliases=("record_feedback", "rate_track"),
+        description="记录用户对真实曲目或歌手的反馈：like/dislike/skip/played。定位不到真实曲目时只记录文本偏好，不伪造曲目。",
+        args_schema={
+            "action": {"type": "string", "enum": ["like", "dislike", "skip", "played"]},
+            "title": {"type": "string", "description": "歌名，可选"},
+            "artist": {"type": "string", "description": "歌手，可选"},
+            "reason": {"type": "string", "description": "用户给出的原因，可选"},
+        },
+        required=("action",),
+    ),
+    "listening_history": ToolSpec(
+        name="listening_history",
+        aliases=("my_history",),
+        description="查询用户近期、近一周或近一月的听歌历史，并按曲目或歌手聚合。",
+        args_schema={
+            "window": {"type": "string", "enum": ["recent", "week", "month"], "default": "recent"},
+            "group_by": {"type": "string", "enum": ["track", "artist"], "default": "track"},
+            "top_k": {"type": "integer", "default": 10},
+        },
+    ),
+    "list_my_playlists": ToolSpec(
+        name="list_my_playlists",
+        aliases=("my_playlists",),
+        description="列出当前登录用户在网易云的歌单；未登录时返回扫码登录提示。",
+        args_schema={},
+    ),
     "web_music_search": ToolSpec(
         name="web_music_search",
         aliases=("search_web_music",),
@@ -165,16 +249,84 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "video_search": ToolSpec(
         name="video_search",
         description="搜索 B 站和 YouTube 上的 MV、现场和演唱会视频。",
-        args_schema={},
-        llm_visible=False,
+        args_schema={"query": {"type": "string", "description": "歌曲、歌手或视频关键词"}},
+        required=("query",),
+        llm_visible=True,
     ),
     "web_info_search": ToolSpec(
         name="web_info_search",
         description="用搜索引擎查找歌手、乐队和作品的背景资料。",
-        args_schema={},
-        llm_visible=False,
+        args_schema={"query": {"type": "string", "description": "要查证的歌手、乐队或作品"}},
+        required=("query",),
+        llm_visible=True,
+    ),
+    "find_on_platform": ToolSpec(
+        name="find_on_platform",
+        aliases=("locate_track",),
+        description="把一首已知歌曲定位到网易云、YouTube 或 B站；只返回经平台搜索命中的结果。",
+        args_schema={
+            "title": {"type": "string"},
+            "artist": {"type": "string"},
+            "platform": {"type": "string", "enum": ["netease", "youtube", "bilibili"]},
+        },
+        required=("title", "platform"),
+    ),
+    "lyrics": ToolSpec(
+        name="lyrics",
+        description="查询网易云真实歌词。先解析真实 song_id；获取失败时返回空，绝不编造。",
+        args_schema={
+            "title": {"type": "string"},
+            "artist": {"type": "string"},
+            "song_id": {"type": "string"},
+        },
+    ),
+    "audio_features": ToolSpec(
+        name="audio_features",
+        description="读取曲库中已有的 BPM、能量等真实音频特征；没有测量值时明确返回未知。",
+        args_schema={
+            "asset_id": {"type": "string"},
+            "title": {"type": "string"},
+            "artist": {"type": "string"},
+        },
+    ),
+    "save_to_playlist": ToolSpec(
+        name="save_to_playlist",
+        description="预览把曲目加入网易云歌单的写操作。必须 confirm=true 才可执行；当前无可靠写接口时会安全拒绝。",
+        args_schema={
+            "playlist_id": {"type": "string"},
+            "track_ids": {"type": "array", "items": {"type": "string"}},
+            "confirm": {"type": "boolean", "default": False},
+        },
+        required=("playlist_id", "track_ids"),
+    ),
+    "favorite_track": ToolSpec(
+        name="favorite_track",
+        description="预览收藏网易云歌曲的写操作。必须 confirm=true；无可靠写接口时安全拒绝。",
+        args_schema={
+            "track_id": {"type": "string"},
+            "confirm": {"type": "boolean", "default": False},
+        },
+        required=("track_id",),
+    ),
+    "concert_events": ToolSpec(
+        name="concert_events",
+        description="查找歌手公开演出信息并返回可追溯网页来源；不会臆测用户位置。",
+        args_schema={
+            "artist": {"type": "string"},
+            "city": {"type": "string"},
+        },
+        required=("artist",),
     ),
 }
+
+for _name in ("feedback", "memory_update"):
+    TOOL_REGISTRY[_name].risk = ToolRisk.LOCAL_WRITE
+    TOOL_REGISTRY[_name].idempotent = False
+    TOOL_REGISTRY[_name].max_retries = 0
+for _name in ("save_to_playlist", "favorite_track"):
+    TOOL_REGISTRY[_name].risk = ToolRisk.EXTERNAL_WRITE
+    TOOL_REGISTRY[_name].idempotent = False
+    TOOL_REGISTRY[_name].max_retries = 0
 
 
 _ALIAS_TO_CANONICAL: dict[str, str] = {}
@@ -197,6 +349,25 @@ def get_handler(name: str) -> str | None:
         return None
     spec = TOOL_REGISTRY[canonical]
     return spec.graph_handler or spec.name
+
+
+def get_tool_spec(name: str) -> ToolSpec | None:
+    canonical = normalize_tool_name(name)
+    return TOOL_REGISTRY.get(canonical) if canonical else None
+
+
+def bind_tool_handler(name: str, handler: ToolHandler) -> None:
+    spec = get_tool_spec(name)
+    if spec is None:
+        raise KeyError(name)
+    spec.handler = handler
+
+
+def bind_async_tool_handler(name: str, handler: ToolHandler) -> None:
+    spec = get_tool_spec(name)
+    if spec is None:
+        raise KeyError(name)
+    spec.async_handler = handler
 
 
 def to_openai_tools() -> list[dict[str, Any]]:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import time
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
 import httpx
@@ -20,6 +21,7 @@ SYSTEM_PROMPT = AGENT_SYSTEM_PROMPT
 # 避免每次 LLM 调用都重新做 TLS 握手（每轮 3~4 次调用，能省下可观的建连延迟）。
 # httpx.Client 对并发请求是线程安全的（SSE 端点会把图跑在线程池里，多请求会重叠）。
 _LLM_HTTP_CLIENT: httpx.Client | None = None
+_LLM_ASYNC_HTTP_CLIENT: httpx.AsyncClient | None = None
 
 
 def _shared_http_client() -> httpx.Client:
@@ -27,6 +29,20 @@ def _shared_http_client() -> httpx.Client:
     if _LLM_HTTP_CLIENT is None:
         _LLM_HTTP_CLIENT = httpx.Client(headers={"User-Agent": "MusicAgent/1.0"})
     return _LLM_HTTP_CLIENT
+
+
+def _shared_async_http_client() -> httpx.AsyncClient:
+    global _LLM_ASYNC_HTTP_CLIENT
+    if _LLM_ASYNC_HTTP_CLIENT is None:
+        _LLM_ASYNC_HTTP_CLIENT = httpx.AsyncClient(headers={"User-Agent": "MusicAgent/1.0"})
+    return _LLM_ASYNC_HTTP_CLIENT
+
+
+async def close_shared_async_client() -> None:
+    global _LLM_ASYNC_HTTP_CLIENT
+    if _LLM_ASYNC_HTTP_CLIENT is not None:
+        await _LLM_ASYNC_HTTP_CLIENT.aclose()
+        _LLM_ASYNC_HTTP_CLIENT = None
 
 
 def _extract_message_text(msg: dict[str, Any]) -> str:
@@ -86,6 +102,19 @@ class OpenAICompatibleLLM:
             {"role": "user", "content": prompt},
         ]
         return self._call(messages, temperature, thinking)
+
+    async def agenerate(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.7,
+        thinking: bool | None = None,
+    ) -> str:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system or SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        return await self._acall(messages, temperature, thinking)
 
     def chat(
         self,
@@ -194,6 +223,20 @@ class OpenAICompatibleLLM:
         ]
         yield from self._stream(messages, temperature, thinking)
 
+    async def agenerate_stream(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.7,
+        thinking: bool | None = None,
+    ) -> AsyncIterator[str]:
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system or SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        async for piece in self._astream(messages, temperature, thinking):
+            yield piece
+
     def chat_stream(
         self,
         messages: list[dict[str, Any]],
@@ -296,6 +339,91 @@ class OpenAICompatibleLLM:
         except (httpx.HTTPError, KeyError, json.JSONDecodeError) as exc:
             raise LLMError(str(exc)) from exc
 
+    async def _acall(
+        self,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        thinking: bool | None = None,
+    ) -> str:
+        payload = self._with_thinking({
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": 0.95,
+            "max_tokens": settings.llm_max_tokens,
+        }, thinking)
+        try:
+            data = await self._apost(payload)
+            self._record_stats(data)
+            return _extract_message_text(data["choices"][0]["message"])
+        except (httpx.HTTPError, KeyError, json.JSONDecodeError) as exc:
+            raise LLMError(str(exc)) from exc
+
+    async def _astream(
+        self,
+        messages: list[dict[str, Any]],
+        temperature: float,
+        thinking: bool | None,
+    ) -> AsyncIterator[str]:
+        payload = self._with_thinking({
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "top_p": 0.95,
+            "max_tokens": settings.llm_max_tokens,
+            "stream": True,
+        }, thinking)
+        client = _shared_async_http_client()
+        timeout = httpx.Timeout(settings.llm_timeout_seconds, connect=settings.llm_connect_timeout)
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
+        started = time.perf_counter()
+        usage: dict[str, Any] = {}
+        try:
+            async with client.stream(
+                "POST", f"{self.base_url}/chat/completions", json=payload, headers=headers, timeout=timeout,
+            ) as resp:
+                resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    if not line or not line.startswith("data:"):
+                        continue
+                    chunk = line[len("data:"):].strip()
+                    if chunk == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(chunk)
+                    except json.JSONDecodeError:
+                        continue
+                    if obj.get("usage"):
+                        usage = obj["usage"]
+                    choices = obj.get("choices") or []
+                    if choices:
+                        piece = (choices[0].get("delta") or {}).get("content")
+                        if piece:
+                            yield piece
+        except httpx.HTTPError as exc:
+            raise LLMError(str(exc)) from exc
+        self._record_usage_stats(usage, (time.perf_counter() - started) * 1000)
+
+    def _record_stats(self, data: dict[str, Any]) -> None:
+        self._record_usage_stats(
+            data.get("usage") or {},
+            float((data.get("_meta") or {}).get("latency_ms", 0.0)),
+        )
+
+    def _record_usage_stats(self, usage: dict[str, Any], latency_ms: float) -> None:
+        prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+        self.last_stats = {
+            "llm_calls": 1,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+            "latency_ms": round(latency_ms, 2),
+            "estimated_cost_usd": _estimate_cost_usd(prompt_tokens, completion_tokens),
+            "model": self.model,
+            "tier": self.tier,
+        }
+
     def _post(self, payload: dict[str, Any]) -> dict[str, Any]:
         """POST /chat/completions，走进程级共享连接池（复用 TLS，省握手）。
 
@@ -333,6 +461,36 @@ class OpenAICompatibleLLM:
                 raise
             except httpx.TimeoutException:
                 # 慢生成导致的超时：重试只加倍等待，直接抛让上层降级
+                raise
+        raise last_exc if last_exc else RuntimeError("LLM request failed")
+
+    async def _apost(self, payload: dict[str, Any]) -> dict[str, Any]:
+        client = _shared_async_http_client()
+        timeout = httpx.Timeout(settings.llm_timeout_seconds, connect=settings.llm_connect_timeout)
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
+        url = f"{self.base_url}/chat/completions"
+        last_exc: Exception | None = None
+        for attempt in range(settings.llm_max_retries + 1):
+            try:
+                started = time.perf_counter()
+                resp = await client.post(url, json=payload, headers=headers, timeout=timeout)
+                resp.raise_for_status()
+                data = resp.json()
+                data["_meta"] = {"latency_ms": (time.perf_counter() - started) * 1000}
+                return data
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (429, 500, 502, 503, 504) and attempt < settings.llm_max_retries:
+                    last_exc = exc
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+            except (httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                last_exc = exc
+                if attempt < settings.llm_max_retries:
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                raise
+            except httpx.TimeoutException:
                 raise
         raise last_exc if last_exc else RuntimeError("LLM request failed")
 

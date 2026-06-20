@@ -60,7 +60,7 @@ load_context → plan_intent → execute_tools
 - **意图识别分工**：LLM 只判意图 + 抽实体名，`genre/mood/scenario` 标签交给**确定性规则**（`app/graph/tag_rules.py`），降幻觉降成本。
 - **意图 Registry**（`app/intents.py`）：所有意图元数据集中声明——工具链、策略、关键词、优先级。新增意图只改一处。
 - **条件路由**：本地/检索候选不足时自动触发 `web_fallback` 联网补搜。
-- **降级链**：Graph 主路径 → 同步等价执行 → ReAct/compound 兜底。
+- **单一编排**：生产对话只走异步 LangGraph；复合任务由同一 compiled graph 作为子图执行。
 - **安全网**：LLM 误判意图时（如把「介绍」判成 discuss），按关键词信号自动升级到正确意图。
 - **稳定摘要**：`final` SSE payload 附带 `trace_summary`，前端可展示意图、工具、来源、fallback 和最终卡片数。
 
@@ -126,12 +126,10 @@ python3 -m pip install -e ".[embeddings]"   # 语义检索（sentence-transforme
 # ALLOWED_ORIGINS=https://your.domain
 
 uvicorn app.api.main:app --reload --port 8000
-streamlit run app/ui/streamlit_app.py --server.port 8501
 ```
 
 - API 文档：`http://127.0.0.1:8000/docs`
-- Vue 3 前端：`app/web/dist/index.html`
-- Streamlit UI：`http://127.0.0.1:8501`
+- Vue 3 前端：`http://127.0.0.1:8000/web`（源码 `frontend/`，构建产物 `app/web/dist/`）
 
 ## 主要 API
 
@@ -172,7 +170,7 @@ CI 会跑 ruff、pytest coverage 和 long dialogue smoke；真实源 eval 不进
 ## 工程取舍
 
 - **所有增强依赖可选**：langgraph / sentence-transformers 缺失都有等价降级路径，零依赖 demo 能力贯穿始终。
-- **不做异步 LLM 压缩**：同步架构下会阻塞主流程，GSSC 用确定性截断兜底。
+- **原生异步 LLM**：SSE 的规划、自省、恢复和最终 token 使用共享异步 HTTP 客户端；GSSC 继续负责确定性上下文预算。
 - **标签走规则不走 LLM**：降低幻觉和成本，LLM 只做它擅长的意图判断。
 - **关键词 fallback + LLM 双保险**：LLM 不可用时关键词信号兜底；LLM 误判时安全网自动纠正。
 

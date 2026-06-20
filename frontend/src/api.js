@@ -11,45 +11,44 @@ async function jsonFetch(url, options = {}) {
   return resp.json();
 }
 
+async function streamSse(url, body, handlers, signal) {
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const consume = (text) => {
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("data: ")) continue;
+      try { handlers.onEvent?.(JSON.parse(line.slice(6))); } catch { /* malformed event */ }
+    }
+  };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() || "";
+    parts.forEach(consume);
+  }
+  if (buffer.trim()) consume(buffer);
+}
+
 export const api = {
   // ---- 对话 ----
-  async streamChat({ userId, message, history }, handlers, signal) {
-    const resp = await fetch("/agent/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userId, message, history: (history || []).slice(-10) }),
-      signal,
-    });
-    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop() || "";
-      for (const part of parts) {
-        for (const line of part.split("\n")) {
-          if (!line.startsWith("data: ")) continue;
-          let event;
-          try { event = JSON.parse(line.slice(6)); } catch { continue; }
-          handlers.onEvent?.(event);
-        }
-      }
-    }
-    // 处理尾部未以 \n\n 结尾的事件
-    if (buffer.trim()) {
-      for (const line of buffer.split("\n")) {
-        if (!line.startsWith("data: ")) continue;
-        let event;
-        try { event = JSON.parse(line.slice(6)); } catch { continue; }
-        handlers.onEvent?.(event);
-      }
-    }
-  },
+  streamChat: ({ userId, threadId, message, history }, handlers, signal) =>
+    streamSse("/agent/stream", {
+      user_id: userId, thread_id: threadId, message, history: (history || []).slice(-10),
+    }, handlers, signal),
+  resumeAgent: ({ userId, threadId, actionId, approved }, handlers, signal) =>
+    streamSse("/agent/resume", {
+      user_id: userId, thread_id: threadId, action_id: actionId, approved,
+    }, handlers, signal),
   chatSync: (userId, message, history) =>
     jsonFetch("/chat", { method: "POST", body: JSON.stringify({ user_id: userId, message, history }) }),
 

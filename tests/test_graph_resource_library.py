@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi.testclient import TestClient
 
 from app.agent import AudioVisualAgent
@@ -18,21 +20,21 @@ def test_structured_plan_for_playlist_and_journey():
     assert journey.tools_needed == ["journey"]
 
 
-def test_graph_chat_writes_resource_library_and_trace(tmp_path):
+def test_graph_chat_returns_traceable_candidates_without_requiring_library_mutation(tmp_path):
     agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
 
-    answer = agent.chat("u1", "推荐三首chill歌")
+    answer = asyncio.run(agent.chat_async("u1", "推荐三首chill歌"))
 
     assert answer.answer
     assert any("[plan]" in step for step in answer.agent_trace)
     assert any("[web_music_search]" in step for step in answer.agent_trace)
-    assert agent.list_resource_tracks(10)
+    assert answer.recommended_tracks
 
 
 def test_smalltalk_does_not_require_music_candidates(tmp_path):
     agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
 
-    answer = agent.chat("u1", "hello")
+    answer = asyncio.run(agent.chat_async("u1", "hello"))
 
     # chat 意图不应联网搜索、不应返回可追溯候选
     assert "可追溯的音乐候选" not in answer.answer

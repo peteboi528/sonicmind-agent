@@ -6,8 +6,11 @@
 """
 from __future__ import annotations
 
-from app.graph.nodes import _apply_language_filter, _query_with_entities, plan_with_llm
+import asyncio
+
+from app.graph.nodes import _apply_language_filter, _query_with_entities, plan_with_llm_async
 from app.models import AgentPlan, ExternalTrack, RetrievalPlan
+from app.tools.handlers import _filter_content_exclusions
 
 
 class _StubLLM:
@@ -15,7 +18,7 @@ class _StubLLM:
         self.reply = reply
         self.last_prompt = ""
 
-    def generate(self, prompt, system=None, temperature=0.7):
+    async def agenerate(self, prompt, system=None, temperature=0.7):
         self.last_prompt = prompt
         return self.reply
 
@@ -32,10 +35,10 @@ def test_negative_constraint_rewritten_to_positive_query():
         '"use_web":true,"search_query":"深夜 英文歌 欧美 安静","language":"en",'
         '"target_count":null,"reasoning":"延续深夜场景转英文"}'
     )
-    plan = plan_with_llm(
+    plan = asyncio.run(plan_with_llm_async(
         _Agent(stub), "不要中文歌曲",
         history_text="user: 推荐几首适合深夜的歌\nassistant: 推荐了7首深夜歌曲",
-    )
+    ))
     assert plan is not None
     rp = plan.retrieval_plan
     # 关键：否定被转成正向检索词，且保留了上一轮"深夜"上下文
@@ -90,6 +93,19 @@ def test_language_filter_noop_for_unknown_language():
     assert _apply_language_filter(tracks, "ja", target=5) == tracks  # ja 不可判 → 不过滤
 
 
+def test_hard_content_exclusions_filter_language_aliases_and_scripts():
+    tracks = [
+        _track("Vietnamese Chill Mix", "Demo"),
+        _track("đêm bình yên", "Ca sĩ"),
+        _track("夜に駆ける", "YOASOBI"),
+        _track("Late Night R&B", "Demo"),
+    ]
+    no_vietnamese = _filter_content_exclusions(tracks, ["越南语"])
+    assert [track.title for track in no_vietnamese] == ["夜に駆ける", "Late Night R&B"]
+    no_japanese = _filter_content_exclusions(tracks, ["日本语"])
+    assert all(track.title != "夜に駆ける" for track in no_japanese)
+
+
 def test_mock_llm_also_rewrites_negation():
     """零依赖 mock 路径也把"不要中文"转正向 + 标 language=en（demo 不搜空）。"""
     from app.llm.mock import MockLLM
@@ -104,4 +120,3 @@ def test_mock_llm_also_rewrites_negation():
     assert data["language"] == "en"
     assert "英文" in data["search_query"] or "欧美" in data["search_query"]
     assert "深夜" in data["search_query"]  # 保留了场景上下文
-

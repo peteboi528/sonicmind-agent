@@ -1,7 +1,7 @@
 """复合任务检测：判定一条 query 是否需要多步规划（Deep/Agentic 模式）。
 
-单意图（「推荐几首歌」）走 LangGraph 单轮编排；复合多步任务（「导入歌单，然后挑适合
-跑步的」）需要 think→act→observe 迭代，路由到 ReActLoop（Deep 模式，一级分支而非降级）。
+单意图（「推荐几首歌」）走 LangGraph 主图；复合多步任务（「导入歌单，然后挑适合
+跑步的」）由同一 Runner 拆解后逐个调用 compiled LangGraph 子图。
 
 启发式（保守——宁可漏判走图，也不要把简单查询误判成复合、徒增延迟与 token）：
   1. 显式链式词（然后/之后/接着/and then...）→ 复合

@@ -88,7 +88,7 @@ async def _handle_feishu_message(msg):
     try:
         from app.api.main import agent as _agent
 
-        answer = _agent.chat(msg.user_id, msg.content)
+        answer = await _agent.chat_async(msg.user_id, msg.content)
         response = answer_to_bot_response(answer)
 
         # 提取 open_id（去掉 feishu_ 前缀）
@@ -153,7 +153,7 @@ async def _handle_wechat_message(msg):
     try:
         from app.api.main import agent as _agent
 
-        answer = _agent.chat(msg.user_id, msg.content)
+        answer = await _agent.chat_async(msg.user_id, msg.content)
         response = answer_to_bot_response(answer)
 
         # 提取 openid（去掉 wechat_ 前缀）

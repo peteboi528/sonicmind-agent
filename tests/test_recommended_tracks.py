@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 
 from app.agent import AudioVisualAgent
@@ -12,7 +13,7 @@ from tests.eval.metrics import compute_metrics
 def test_chat_populates_recommended_tracks():
     agent = AudioVisualAgent(JsonStore(tempfile.mkdtemp()))
 
-    answer = agent.chat("u-rec", "推荐几首适合跑步的歌")
+    answer = asyncio.run(agent.chat_async("u-rec", "推荐几首适合跑步的歌"))
 
     assert isinstance(answer, AgentAnswer)
     assert answer.recommended_tracks

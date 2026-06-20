@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -34,6 +34,22 @@ class LLMResponse:
 
 
 class LLMProvider(Protocol):
+    async def agenerate(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.7,
+        thinking: bool | None = None,
+    ) -> str: ...
+
+    def agenerate_stream(
+        self,
+        prompt: str,
+        system: str | None = None,
+        temperature: float = 0.7,
+        thinking: bool | None = None,
+    ) -> AsyncIterator[str]: ...
+
     def generate(
         self,
         prompt: str,

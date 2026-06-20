@@ -73,6 +73,12 @@ class Settings:
         self.media_root: str = str(_absolute_path(os.getenv("MEDIA_ROOT", "").strip()).resolve()) if os.getenv("MEDIA_ROOT", "").strip() else str((data_root / "media").resolve())
         resource_env = os.getenv("RESOURCE_LIBRARY_PATH", "").strip()
         self.resource_library_path: str = str(_absolute_path(resource_env).resolve()) if resource_env else str((data_root / "resource_library.sqlite").resolve())
+        self.agent_checkpoint_path: str = str((data_root / "agent_checkpoints.sqlite").resolve())
+        self.agent_trace_path: str = str((data_root / "agent_traces.sqlite").resolve())
+        self.agent_retention_days: int = int(os.getenv("AGENT_RETENTION_DAYS", "30"))
+        self.agent_checkpoints: bool = _bool_env("AGENT_CHECKPOINTS", True)
+        self.local_tracing: bool = _bool_env("LOCAL_TRACING", True)
+        self.llm_json_mode: str = os.getenv("LLM_JSON_MODE", "auto").strip().lower()
         self.allowed_origins: list[str] = _csv_env("ALLOWED_ORIGINS", "*")
         self.daily_rec_count: int = int(os.getenv("DAILY_REC_COUNT", "25"))
         self.enable_online_enrich: bool = os.getenv("ENABLE_ONLINE_ENRICH", "false").lower() == "true"
@@ -98,13 +104,15 @@ class Settings:
         self.dense_recall_min_score: float = float(os.getenv("DENSE_RECALL_MIN_SCORE", "0.55"))
         self.enable_rerank: bool = os.getenv("ENABLE_RERANK", "true").lower() == "true"
         self.enable_parallel_tools: bool = os.getenv("ENABLE_PARALLEL_TOOLS", "true").lower() == "true"
-        # Deep/Agentic 模式：复合多步任务走真迭代 ReAct（一级分支，非降级兜底）。
-        # 仅真实 LLM（非 mock）下生效；mock 模式仍走图，保持测试/demo 稳定。
-        self.enable_deep_mode: bool = os.getenv("ENABLE_DEEP_MODE", "true").lower() == "true"
         # reflect 候选补量回环：reflect 剔除违规候选后若不足，回 execute_tools+reflect 再补一轮。
         # 默认关闭——这会引入第 4/5 次串行往返（含联网搜索）。reflect 本身仍跑（thinking-off 后很快），
         # 不足时由 _compose_intro 如实说明 shortfall，不阻塞主流程。
         self.enable_reflect_refine: bool = os.getenv("ENABLE_REFLECT_REFINE", "false").lower() == "true"
+        # 零候选/工具错误恢复与候选质检补量分开控制；默认只允许一次恢复。
+        self.enable_empty_result_recovery: bool = os.getenv("ENABLE_EMPTY_RESULT_RECOVERY", "true").lower() == "true"
+        self.empty_result_recovery_max_attempts: int = max(
+            0, int(os.getenv("EMPTY_RESULT_RECOVERY_MAX_ATTEMPTS", "1"))
+        )
         # P1-G 记忆升级：语义召回 + LLM 偏好抽取兜底 + 巩固画像。
         # 仅真实 LLM 下做 LLM 抽取/巩固；语义召回随 embeddings 开关自动降级。
         self.enable_semantic_memory: bool = os.getenv("ENABLE_SEMANTIC_MEMORY", "true").lower() == "true"
@@ -145,6 +153,10 @@ def _csv_env(name: str, default: str) -> list[str]:
     raw = os.getenv(name, default)
     values = [item.strip() for item in raw.split(",") if item.strip()]
     return values or [default]
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).lower() in {"true", "1", "yes", "on"}
 
 
 def _parse_user_api_keys(raw: str) -> dict[str, str]:

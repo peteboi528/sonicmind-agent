@@ -1,3 +1,5 @@
+import asyncio
+
 from app.agent import AudioVisualAgent, CineSonicAgent
 from app.media.pipeline import normalize_url, stable_id, title_from_url
 from app.models import MemoryUpdateRequest
@@ -44,7 +46,7 @@ def test_full_flow(tmp_path):
     taste = agent.get_taste_profile("demo-user")
     assert taste.top_genres
 
-    answer = agent.chat("demo-user", "推荐一些适合晚上听的音乐")
+    answer = asyncio.run(agent.chat_async("demo-user", "推荐一些适合晚上听的音乐"))
     assert answer.answer
     assert answer.agent_trace
     assert any("recommend" in step for step in answer.agent_trace)

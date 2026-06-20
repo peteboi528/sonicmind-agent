@@ -26,6 +26,47 @@ def search_web_info(query: str, max_results: int = 5, api_key: str = "") -> list
     return _search_duckduckgo(query, max_results)
 
 
+async def asearch_web_info(query: str, max_results: int = 5, api_key: str = "") -> list[dict[str, str]]:
+    if api_key:
+        results = await _asearch_tavily(query, max_results, api_key)
+        if results:
+            return results
+    return await _asearch_duckduckgo(query, max_results)
+
+
+async def _asearch_tavily(query: str, max_results: int, api_key: str) -> list[dict[str, str]]:
+    from app.sources.http_transport import source_transport
+
+    try:
+        response = await source_transport.request(
+            "tavily", "POST", "https://api.tavily.com/search",
+            json={
+                "query": query, "max_results": max_results,
+                "search_depth": "basic", "include_answer": False,
+            },
+            headers={"Authorization": f"Bearer {api_key}"}, retries=0, concurrency=3,
+        )
+        return _parse_tavily_results(response.json(), max_results)
+    except Exception:
+        logger.debug("Async Tavily search failed for query=%s", query, exc_info=True)
+        return []
+
+
+async def _asearch_duckduckgo(query: str, max_results: int) -> list[dict[str, str]]:
+    from app.sources.http_transport import source_transport
+
+    try:
+        response = await source_transport.request(
+            "duckduckgo", "GET", "https://api.duckduckgo.com/",
+            params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
+            headers={"User-Agent": "Mozilla/5.0"}, retries=1, concurrency=3,
+        )
+        return _parse_duckduckgo_results(response.json(), max_results)
+    except Exception:
+        logger.debug("Async DuckDuckGo search failed for query=%s", query, exc_info=True)
+        return []
+
+
 def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict[str, str]]:
     """Tavily Search API — 高质量结构化搜索结果。"""
     url = "https://api.tavily.com/search"
@@ -43,14 +84,7 @@ def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict[str,
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         with urllib.request.urlopen(req, timeout=15) as response:
             data = json.loads(response.read().decode("utf-8"))
-        results: list[dict[str, str]] = []
-        for item in data.get("results", [])[:max_results]:
-            results.append({
-                "title": item.get("title", ""),
-                "content": item.get("content", ""),
-                "url": item.get("url", ""),
-            })
-        return results
+        return _parse_tavily_results(data, max_results)
     except Exception:
         logger.debug("Tavily search failed for query=%s", query, exc_info=True)
         return []
@@ -70,29 +104,31 @@ def _search_duckduckgo(query: str, max_results: int) -> list[dict[str, str]]:
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode("utf-8"))
-        results: list[dict[str, str]] = []
-
-        # Abstract（直接答案）
-        abstract = data.get("Abstract", "")
-        if abstract:
-            results.append({
-                "title": data.get("Heading", ""),
-                "content": abstract,
-                "url": data.get("AbstractURL", ""),
-            })
-
-        # Related topics
-        for topic in data.get("RelatedTopics", [])[:max_results]:
-            if isinstance(topic, dict) and topic.get("text"):
-                results.append({
-                    "title": topic.get("Text", "")[:80],
-                    "content": topic.get("text", ""),
-                    "url": topic.get("FirstURL", ""),
-                })
-            if len(results) >= max_results:
-                break
-
-        return results
+        return _parse_duckduckgo_results(data, max_results)
     except Exception:
         logger.debug("DuckDuckGo search failed for query=%s", query, exc_info=True)
         return []
+
+
+def _parse_tavily_results(data: dict, max_results: int) -> list[dict[str, str]]:
+    return [
+        {"title": item.get("title", ""), "content": item.get("content", ""), "url": item.get("url", "")}
+        for item in data.get("results", [])[:max_results]
+    ]
+
+
+def _parse_duckduckgo_results(data: dict, max_results: int) -> list[dict[str, str]]:
+    results: list[dict[str, str]] = []
+    abstract = data.get("Abstract", "")
+    if abstract:
+        results.append({
+            "title": data.get("Heading", ""), "content": abstract,
+            "url": data.get("AbstractURL", ""),
+        })
+    for topic in data.get("RelatedTopics", [])[:max_results]:
+        if isinstance(topic, dict) and (topic.get("Text") or topic.get("text")):
+            text = topic.get("Text") or topic.get("text") or ""
+            results.append({"title": text[:80], "content": text, "url": topic.get("FirstURL", "")})
+        if len(results) >= max_results:
+            break
+    return results

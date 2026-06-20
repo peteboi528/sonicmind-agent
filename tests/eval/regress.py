@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import tempfile
@@ -57,7 +58,7 @@ def _run_case(case: EvalCase, judge: LLMJudge | None) -> tuple[AgentAnswer, dict
     agent = AudioVisualAgent(JsonStore(Path(tempfile.mkdtemp())))
     _setup(agent, case)
     history = [{"role": m["role"], "content": m["content"]} for m in case.history] or None
-    answer = agent.chat(case.user_id, case.query, history=history)
+    answer = asyncio.run(agent.chat_async(case.user_id, case.query, history=history))
     relevance = judge.evaluate(case, answer.answer).overall if judge else None
     return answer, compute_metrics(case, answer, relevance)
 

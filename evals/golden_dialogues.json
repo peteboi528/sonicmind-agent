@@ -1,0 +1,133 @@
+[
+  {
+    "id": "late_night_relax",
+    "query": "来点深夜放松的歌曲",
+    "assertions": [
+      {"path": "intent", "op": "eq", "value": "recommend"},
+      {"path": "tools", "op": "contains", "value": "web_music_search"},
+      {"path": "effective_query", "op": "contains", "value": "深夜"}
+    ]
+  },
+  {
+    "id": "negative_continuation",
+    "query": "不要越南",
+    "dialogue_state": {
+      "last_intent": "recommend",
+      "last_query": "越南 chill R&B",
+      "entities": [],
+      "genre_tags": ["R&B"],
+      "mood_tags": ["放松"],
+      "scenario_tags": [],
+      "shown_tracks": []
+    },
+    "assertions": [
+      {"path": "intent", "op": "eq", "value": "recommend"},
+      {"path": "search_query", "op": "contains", "value": "R&B"},
+      {"path": "search_query", "op": "excludes", "value": "越南"}
+    ]
+  },
+  {
+    "id": "negative_continuation_real_state_flow",
+    "mode": "multiturn_plan",
+    "prior_query": "推荐越南 chill R&B 歌曲",
+    "query": "不要越南语歌曲",
+    "assertions": [
+      {"path": "intent", "op": "eq", "value": "recommend"},
+      {"path": "persisted_genres", "op": "contains", "value": "R&B"},
+      {"path": "persisted_moods", "op": "contains", "value": "放松"},
+      {"path": "search_query", "op": "contains", "value": "R&B"},
+      {"path": "search_query", "op": "excludes", "value": "越南"},
+      {"path": "excluded_terms", "op": "contains", "value": "越南"}
+    ]
+  },
+  {
+    "id": "similar_artist_inherits_seed",
+    "query": "推荐同类型的歌手",
+    "dialogue_state": {
+      "last_intent": "recommend",
+      "last_query": "The Weeknd 深夜氛围",
+      "entities": ["The Weeknd"],
+      "genre_tags": ["R&B"],
+      "mood_tags": ["暗黑"],
+      "scenario_tags": [],
+      "shown_tracks": []
+    },
+    "assertions": [
+      {"path": "intent", "op": "eq", "value": "similar_artists"},
+      {"path": "tools", "op": "eq", "value": ["similar_artists"]},
+      {"path": "entities", "op": "contains", "value": "The Weeknd"}
+    ]
+  },
+  {
+    "id": "broad_request_uses_taste_tags",
+    "query": "随便推荐几首",
+    "memory_query": "微电子 R&B 暗黑 The Weeknd",
+    "assertions": [
+      {"path": "search_query", "op": "contains", "value": "电子"},
+      {"path": "search_query", "op": "contains", "value": "暗黑"},
+      {"path": "search_query", "op": "excludes", "value": "The Weeknd"}
+    ]
+  },
+  {
+    "id": "explicit_genre_beats_memory",
+    "query": "来点古典专注音乐",
+    "memory_query": "R&B 暗黑",
+    "assertions": [
+      {"path": "intent", "op": "eq", "value": "recommend"},
+      {"path": "effective_query", "op": "contains", "value": "古典"},
+      {"path": "effective_query", "op": "excludes", "value": "R&B"}
+    ]
+  },
+  {
+    "id": "journey_routes_to_journey_tool",
+    "query": "做一个清晨到深夜的音乐旅程",
+    "assertions": [
+      {"path": "intent", "op": "eq", "value": "journey"},
+      {"path": "tools", "op": "eq", "value": ["journey"]}
+    ]
+  },
+  {
+    "id": "timeout_switches_local",
+    "mode": "recovery",
+    "query": "来点深夜放松的歌曲",
+    "plan": {
+      "intent": "recommend",
+      "tools_needed": ["web_music_search", "recommend"],
+      "online_required": true,
+      "retrieval_plan": {"search_query": "深夜 放松"}
+    },
+    "outcomes": [
+      {
+        "call_id": "web-1",
+        "tool": "web_music_search",
+        "status": "error",
+        "arguments": {"query": "深夜 放松"},
+        "error": {"kind": "timeout", "message": "timed out", "retryable": false},
+        "attempt": 0
+      }
+    ],
+    "assertions": [
+      {"path": "need_refine", "op": "eq", "value": true},
+      {"path": "tools", "op": "eq", "value": ["recommend"]},
+      {"path": "online_required", "op": "eq", "value": false}
+    ]
+  },
+  {
+    "id": "auth_does_not_retry",
+    "mode": "recovery",
+    "query": "推荐几首歌",
+    "plan": {"intent": "recommend", "tools_needed": ["recommend"]},
+    "outcomes": [
+      {
+        "call_id": "recommend-1",
+        "tool": "recommend",
+        "status": "auth_required",
+        "arguments": {"query": "推荐几首歌"},
+        "attempt": 0
+      }
+    ],
+    "assertions": [
+      {"path": "need_refine", "op": "eq", "value": false}
+    ]
+  }
+]

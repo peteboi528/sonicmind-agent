@@ -10,6 +10,47 @@ def test_backward_compat_alias():
     assert CineSonicAgent is AudioVisualAgent
 
 
+def test_list_assets_cache_hits_and_invalidates(tmp_path):
+    """list_assets 进程内缓存：命中不重读磁盘，写/删后失效，返回副本不污染缓存。"""
+    store = JsonStore(tmp_path / "store")
+    agent = AudioVisualAgent(store)
+
+    reads = {"n": 0}
+    original_list_keys = store.list_keys
+
+    def counting_list_keys(collection):
+        if collection == "assets":
+            reads["n"] += 1
+        return original_list_keys(collection)
+
+    store.list_keys = counting_list_keys
+
+    # 首次读盘填充缓存。
+    agent.ingest_video("https://example.com/cache-1")
+    first = agent.list_assets()
+    reads_after_first = reads["n"]
+    assert len(first) == 1
+
+    # 第二次应命中缓存，不再扫 assets 目录。
+    second = agent.list_assets()
+    assert reads["n"] == reads_after_first  # 无新增磁盘读
+    assert len(second) == 1
+
+    # 返回的是副本：调用方改它不影响缓存。
+    second.clear()
+    assert len(agent.list_assets()) == 1
+
+    # ingest 新资产失效缓存 → 下次 list_assets 重新读盘。
+    agent.ingest_video("https://example.com/cache-2")
+    assert len(agent.list_assets()) == 2
+    assert reads["n"] > reads_after_first  # 失效后确实重读了
+
+    # 删除失效缓存。
+    deleted = agent.list_assets()[0].asset_id
+    agent.delete_asset(deleted)
+    assert len(agent.list_assets()) == 1
+
+
 def test_full_flow(tmp_path):
     agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
 

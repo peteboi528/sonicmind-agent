@@ -90,6 +90,7 @@ def _build_source() -> ExternalSource:
 class AudioVisualAgent:
     def __init__(self, store: JsonStore | None = None) -> None:
         self.store = store or JsonStore(settings.store_root)
+        self._assets_cache: list[Asset] | None = None
         self.media = MediaPipeline(self.store)
         self.memory = MemoryManager(self.store)
         self.similarity = AssetSimilarity(self.store)
@@ -111,6 +112,9 @@ class AudioVisualAgent:
         self.daily = DailyRecommender(self.engine, self.source, self.llm)
         self.graph = None
         self.library.sync_assets(self.list_assets())
+        # 构造期 list_assets 发生在任何 ingest 之前，缓存到此刻的快照（常为空）会污染
+        # 后续请求。清掉，让第一个真实请求重新读盘。
+        self._invalidate_assets_cache()
         try:
             from app.graph.builder import build_agent_graph
             self.graph = build_agent_graph(self)
@@ -118,7 +122,9 @@ class AudioVisualAgent:
             logger.exception("LangGraph wrapper unavailable")
 
     def ingest_video(self, url: str, force_refresh: bool = False) -> Asset:
-        return self.media.ingest_video(url, force_refresh=force_refresh)
+        asset = self.media.ingest_video(url, force_refresh=force_refresh)
+        self._invalidate_assets_cache()
+        return asset
 
     def enrich_asset(self, asset_id: str, use_network: bool = False) -> EnrichResponse:
         asset = self.store.read_model("assets", asset_id, Asset)
@@ -139,6 +145,7 @@ class AudioVisualAgent:
             song_id = _netease_song_id(asset.source_url)
             if song_id and self._enrich_from_netease(asset, song_id):
                 self.store.write_model("assets", asset.asset_id, asset)
+                self._invalidate_assets_cache()
                 after = asset.model_dump(mode="json")
                 enriched = before != after
                 return EnrichResponse(
@@ -297,11 +304,13 @@ class AudioVisualAgent:
                     if mood and mood != "未知":
                         asset.mood = [m.strip() for m in mood.replace("、", ",").split(",") if m.strip()]
             self.store.write_model("assets", asset.asset_id, asset)
+            self._invalidate_assets_cache()
         except Exception:
             logger.debug("URL identity inference failed for asset_id=%s", asset.asset_id, exc_info=True)
 
     def analyze_media(self, asset_id: str, force_refresh: bool = False) -> tuple[Asset, list[Segment]]:
         asset, segments = self.media.analyze_media(asset_id, force_refresh=force_refresh)
+        self._invalidate_assets_cache()
         self.library.upsert_asset(asset)
         return asset, segments
 
@@ -497,6 +506,7 @@ class AudioVisualAgent:
             asset.status = AssetStatus.ANALYZED
             asset.updated_at = utc_now_iso()
             self.store.write_model("assets", asset.asset_id, asset)
+            self._invalidate_assets_cache()
             if asset.asset_id in existing_ids:
                 result["skipped"] += 1
             else:
@@ -511,19 +521,32 @@ class AudioVisualAgent:
         return result
 
     def list_assets(self) -> list[Asset]:
+        # 进程内缓存：list_assets 是 O(库大小) 的逐文件磁盘读+反序列化，且一次请求内
+        # 被多处反复调用（search/summarize_taste/list_resource_tracks/rerank…）。
+        # 资产只在 ingest/enrich/analyze/delete/clear 时变动——这些点显式失效缓存。
+        # 库大时这一项是超时主因之一，缓存把"每请求 ×N 次全量读"压成一次。
+        cached = self._assets_cache
+        if cached is not None:
+            return list(cached)
         keys = self.store.list_keys("assets")
         assets: list[Asset] = []
         for key in keys:
             asset = self.store.read_model("assets", key, Asset)
             if asset:
                 assets.append(asset)
-        return assets
+        self._assets_cache = assets
+        return list(assets)
+
+    def _invalidate_assets_cache(self) -> None:
+        """资产写入/删除/清空后调用，确保下次 list_assets 读到最新。"""
+        self._assets_cache = None
 
     def delete_asset(self, asset_id: str, user_id: str | None = None) -> bool:
         deleted_asset = self.store.delete_key("assets", asset_id)
         deleted_segments = self.store.delete_key("segments", asset_id)
         deleted = deleted_asset or deleted_segments
         if deleted:
+            self._invalidate_assets_cache()
             self.memory.remove_asset_references(asset_id, user_id=user_id)
             if user_id:
                 library = [a for a in self.list_assets() if a.status == "analyzed"]
@@ -535,6 +558,7 @@ class AudioVisualAgent:
             "assets": self.store.clear_collection("assets"),
             "segments": self.store.clear_collection("segments"),
         }
+        self._invalidate_assets_cache()
         if not preserve_memory:
             cleared["memory"] = self.store.clear_collection("memory")
         # 专辑详情是纯性能缓存（非用户数据），主动清缓存时一并清掉，确保下次点击重新取最新。

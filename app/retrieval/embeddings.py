@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from functools import lru_cache
 
 from app.config import settings
 
@@ -46,22 +47,38 @@ def embeddings_available() -> bool:
     return _load_model() is not None
 
 
-def encode(texts: list[str]) -> list[list[float]] | None:
-    """批量编码为归一化向量；不可用时返回 None。"""
+@lru_cache(maxsize=4096)
+def _encode_one(text: str) -> tuple[float, ...] | None:
+    """单条文本编码（带缓存）。embedding 是确定性的——同一文本必得同一向量，
+    所以缓存是纯收益、零行为改动。query 与候选文本在长会话/大候选池里高度重复，
+    缓存命中直接省掉 sentence-transformers 的 CPU 计算（超时的主因之一）。"""
     model = _load_model()
     if model is None:
         return None
     try:
         vectors = model.encode(
-            texts,
+            [text],
             normalize_embeddings=True,
             convert_to_numpy=False,
             show_progress_bar=False,
         )
-        return [list(map(float, v)) for v in vectors]
+        if not len(vectors):
+            return None
+        return tuple(float(x) for x in vectors[0])
     except Exception:
         logger.debug("Embedding encode failed; falling back to sparse retrieval", exc_info=True)
         return None
+
+
+def encode(texts: list[str]) -> list[list[float]] | None:
+    """批量编码为归一化向量；不可用时返回 None。逐条走 LRU 缓存。"""
+    if not texts:
+        return []
+    encoded = [_encode_one(text) for text in texts]
+    # 任一条编码失败（模型不可用）即整体回退到稀疏路径，保持原契约。
+    if any(vec is None for vec in encoded):
+        return None
+    return [list(vec) for vec in encoded]
 
 
 def cosine_normalized(a: list[float], b: list[float]) -> float:
@@ -91,3 +108,4 @@ def _reset_for_test() -> None:
     global _model, _load_attempted
     _model = None
     _load_attempted = False
+    _encode_one.cache_clear()

@@ -37,9 +37,13 @@ _ALBUM_SEARCH_ENDPOINTS = (
 # _SEARCH_RETRIES 语义对齐 http_transport：表示"重试次数"，实际尝试 = retries + 1。
 # 异步路径 source_transport.request 即用 attempts = retries + 1；同步路径下方也照此展开，
 # 否则 1 在 range(1) 里只跑一次、退避 sleep 永不触发（旧 bug）。
+# 时间预算（治本压缩）：单次搜索最坏耗时 = _SEARCH_DEADLINE 封顶。retry 该留（限流时
+# 重试能救回大量真查询），但 2 次各耗满 timeout 会把单查询拖到 6s+，叠加外层变体并行
+# + 候选验证回查就冲破 16s 工具墙。这里用墙钟 deadline 硬封顶，到点返回已有结果。
 _SEARCH_RETRIES = 1
-_SEARCH_BACKOFF = 0.2
-_SEARCH_TIMEOUT = 3.0
+_SEARCH_BACKOFF = 0.1
+_SEARCH_TIMEOUT = 2.0
+_SEARCH_DEADLINE = 4.5  # 单次 _fetch_netease_songs 总墙钟上限（含所有尝试+退避）
 
 # 专辑详情进程内缓存：按 album_id 缓存完整曲目，重复点击同一专辑不再重复打网易云。
 # FIFO + 上限，避免长跑实例无限增长；FIFO 而非 LRU 是因为专辑曲目稳定、不需要按热度复用。
@@ -85,7 +89,10 @@ def _fetch_netease_songs(query: str, limit: int, offset: int = 0) -> list[dict[s
 
     # attempts = 重试次数 + 1（与 http_transport 异步路径一致）。每轮多端点并行，
     # 任一端点非空即返回；全空（疑似限流）则退避后重试，次数用尽仍空才返回 []。
+    # _SEARCH_DEADLINE 是总墙钟上限：限流时若已逼近 deadline，不再发起下一轮——
+    # 避免重试把单次搜索拖爆，连累外层变体并行 + 候选验证撞工具超时墙。
     attempts = _SEARCH_RETRIES + 1
+    started = time.monotonic()
     for attempt in range(attempts):
         batches = run_parallel(
             [(f"netease:{base}", lambda base=base: fetch(base)) for base in _SEARCH_ENDPOINTS],
@@ -97,6 +104,11 @@ def _fetch_netease_songs(query: str, limit: int, offset: int = 0) -> list[dict[s
                 return songs
         logger.debug("NetEase search empty (rate-limited?) for %s, attempt %d/%d", query, attempt + 1, attempts)
         if attempt < attempts - 1:
+            elapsed = time.monotonic() - started
+            # 已耗时 + 退避 + 下一轮 timeout 会超 deadline 就放弃，避免拖爆外层。
+            if elapsed + _SEARCH_BACKOFF * (attempt + 1) + _SEARCH_TIMEOUT > _SEARCH_DEADLINE:
+                logger.debug("NetEase search hit deadline %.1fs for %s, skip retry", _SEARCH_DEADLINE, query)
+                break
             time.sleep(_SEARCH_BACKOFF * (attempt + 1))
     return []
 

@@ -317,6 +317,37 @@ class TestGetPlaylistTracks:
         assert result[0].title == "Has ID"
 
 
+class TestNeteaseSearchDeadline:
+    """_fetch_netease_songs 墙钟预算：持续限流时不让重试拖爆。"""
+
+    def test_persistent_empty_respects_deadline(self, monkeypatch):
+        import app.concurrency
+        import app.sources.netease as ne
+
+        calls = {"n": 0}
+
+        def fake_run_parallel(tasks, timeout, default):
+            calls["n"] += 1
+            return [[] for _ in tasks]  # 全端点空 = 疑似限流
+
+        # _fetch_netease_songs 里是函数内 import，patch 到 app.concurrency 源头。
+        monkeypatch.setattr(app.concurrency, "run_parallel", fake_run_parallel)
+        monkeypatch.setattr(ne, "_SEARCH_BACKOFF", 0.0)
+
+        result = ne._fetch_netease_songs("一直限流的查询", limit=5)
+        assert result == []
+        # attempts = _SEARCH_RETRIES + 1，每轮一次 run_parallel；deadline 不应让它超过该上限。
+        assert calls["n"] <= ne._SEARCH_RETRIES + 1
+
+    def test_deadline_constants_bound_worst_case(self):
+        import app.sources.netease as ne
+
+        # 最坏耗时 ≈ attempts × timeout + 退避，必须落在 deadline 附近(不爆 16s 工具墙)。
+        worst = (ne._SEARCH_RETRIES + 1) * ne._SEARCH_TIMEOUT
+        assert worst <= ne._SEARCH_DEADLINE + ne._SEARCH_TIMEOUT
+        assert ne._SEARCH_DEADLINE < 8.0  # 远小于 web_music_search 的 16s 超时
+
+
 class TestSearchAndExtract:
     """search_and_extract: 搜歌单 + 提取 + 去重。"""
 

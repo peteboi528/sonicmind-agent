@@ -53,7 +53,7 @@ def test_agent_lexical_library_fallback_supports_offline_mood_queries():
     agent = AudioVisualAgent.__new__(AudioVisualAgent)
 
     class FakeLibrary:
-        def list_tracks(self, limit):
+        def list_tracks(self, limit, *, verified_only=False):
             return [
                 ResourceTrack(title="Night Calm", artist="A", source="local", source_id="1", mood=["放松"], verified=True),
                 ResourceTrack(title="Morning Run", artist="B", source="local", source_id="2", mood=["热血"], verified=True),

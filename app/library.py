@@ -13,10 +13,12 @@ class ResourceLibrary:
     and negative feedback without replacing the existing JSON store.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, max_tracks: int = 5000) -> None:
         self.path = Path(path)
+        self.max_tracks = max_tracks
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+        self._writes_since_prune = 0
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.path)
@@ -84,6 +86,12 @@ class ResourceLibrary:
         self.upsert_track(track)
 
     def upsert_external(self, track: ExternalTrack) -> None:
+        # 候选池只收真实可追溯来源。fallback/mock/llm 是联网不足时的降级假候选
+        # （播不了、易污染推荐），坚决不入库——否则池子被假歌撑大，拖慢所有
+        # 拉池子的操作（semantic_search/similar_artists），且污染后续推荐。
+        source = (track.source or "").lower()
+        if "fallback" in source or source in {"mock", "llm"}:
+            return
         self.upsert_track(
             ResourceTrack(
                 title=track.title,
@@ -123,11 +131,72 @@ class ResourceLibrary:
                     track.exposure_count,
                 ),
             )
+        # 周期性裁剪（每 50 次写检查一次，摊销开销），把无界增长封顶。
+        self._writes_since_prune += 1
+        if self._writes_since_prune >= 50:
+            self._writes_since_prune = 0
+            self.prune()
 
-    def list_tracks(self, limit: int = 100) -> list[ResourceTrack]:
+    def prune(self) -> int:
+        """池子超上限时淘汰最旧的、未被曝光过的外部候选，返回删除行数。
+
+        保护 source='local'（用户真实导入库）和 exposure_count>0（曾被推荐过、
+        有价值）的行；只淘汰"搜来但从没用上"的外部候选，按 last_seen 最旧优先。
+        """
+        with self._connect() as conn:
+            total = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
+            if total <= self.max_tracks:
+                return 0
+            overflow = total - self.max_tracks
+            cursor = conn.execute(
+                """
+                DELETE FROM tracks WHERE id IN (
+                    SELECT id FROM tracks
+                    WHERE source != 'local' AND exposure_count = 0
+                    ORDER BY last_seen ASC
+                    LIMIT ?
+                )
+                """,
+                (overflow,),
+            )
+            return cursor.rowcount
+
+    def purge_fallback_sources(self) -> int:
+        """一次性清理：删除历史遗留的 fallback/mock/llm 假候选。
+
+        老版本 upsert_external 无差别入库，污染了池子（netease-fallback 等）。
+        新版已在入库口拦截，本方法清掉存量。返回删除行数。
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM tracks
+                WHERE source LIKE '%fallback%' OR source IN ('mock', 'llm')
+                """
+            )
+            return cursor.rowcount
+
+    def purge_orphan_local(self, live_asset_ids: set[str]) -> int:
+        """一次性清理：删除 source='local' 但对应 asset 已不存在的僵尸行。
+
+        清空前端库（删 assets/*.json）时 SQLite 不会同步，留下指向已删 asset 的
+        local 行。传入当前存活的 asset_id 集合，删掉不在其中的 local 行。返回删除行数。
+        """
+        with self._connect() as conn:
+            rows = conn.execute("SELECT id, source_id FROM tracks WHERE source='local'").fetchall()
+            stale_ids = [row["id"] for row in rows if row["source_id"] not in live_asset_ids]
+            if not stale_ids:
+                return 0
+            conn.executemany("DELETE FROM tracks WHERE id=?", [(i,) for i in stale_ids])
+            return len(stale_ids)
+
+    def list_tracks(self, limit: int = 100, *, verified_only: bool = False) -> list[ResourceTrack]:
+        # verified_only 把过滤下推到 SQL，避免上层"拉 3000 行再丢掉未验证的"——
+        # 池子大时这能少物化大量 ResourceTrack 对象（喂超时的开销之一）。
+        where = "WHERE verified=1" if verified_only else ""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM tracks ORDER BY verified DESC, last_seen DESC LIMIT ?",
+                f"SELECT * FROM tracks {where} ORDER BY verified DESC, last_seen DESC LIMIT ?",
                 (limit,),
             ).fetchall()
         return [self._row_to_track(row) for row in rows]

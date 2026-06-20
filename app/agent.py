@@ -91,6 +91,8 @@ class AudioVisualAgent:
     def __init__(self, store: JsonStore | None = None) -> None:
         self.store = store or JsonStore(settings.store_root)
         self._assets_cache: list[Asset] | None = None
+        self._assets_synced_dirty: bool = True
+        self._caching_enabled: bool = False  # 构造期不缓存 list_assets，见该方法注释
         self.media = MediaPipeline(self.store)
         self.memory = MemoryManager(self.store)
         self.similarity = AssetSimilarity(self.store)
@@ -112,14 +114,18 @@ class AudioVisualAgent:
         self.daily = DailyRecommender(self.engine, self.source, self.llm)
         self.graph = None
         self.library.sync_assets(self.list_assets())
-        # 构造期 list_assets 发生在任何 ingest 之前，缓存到此刻的快照（常为空）会污染
-        # 后续请求。清掉，让第一个真实请求重新读盘。
-        self._invalidate_assets_cache()
         try:
             from app.graph.builder import build_agent_graph
             self.graph = build_agent_graph(self)
         except Exception:
             logger.exception("LangGraph wrapper unavailable")
+        # 启动时清一次候选池污染（历史 fallback 假候选 + 僵尸 local）。幂等、廉价。
+        try:
+            self.cleanup_resource_library()
+        except Exception:
+            logger.debug("启动清理候选池失败，跳过", exc_info=True)
+        # 构造完成，开启 list_assets 缓存。此前所有读都不缓存，不会污染。
+        self._caching_enabled = True
 
     def ingest_video(self, url: str, force_refresh: bool = False) -> Asset:
         asset = self.media.ingest_video(url, force_refresh=force_refresh)
@@ -525,6 +531,8 @@ class AudioVisualAgent:
         # 被多处反复调用（search/summarize_taste/list_resource_tracks/rerank…）。
         # 资产只在 ingest/enrich/analyze/delete/clear 时变动——这些点显式失效缓存。
         # 库大时这一项是超时主因之一，缓存把"每请求 ×N 次全量读"压成一次。
+        # 构造期（_caching_enabled=False）不缓存：那时 store 常为空，缓存空快照会污染
+        # 后续请求。__init__ 末尾开启缓存，第一个真实请求才填充。
         cached = self._assets_cache
         if cached is not None:
             return list(cached)
@@ -534,12 +542,14 @@ class AudioVisualAgent:
             asset = self.store.read_model("assets", key, Asset)
             if asset:
                 assets.append(asset)
-        self._assets_cache = assets
+        if self._caching_enabled:
+            self._assets_cache = assets
         return list(assets)
 
     def _invalidate_assets_cache(self) -> None:
-        """资产写入/删除/清空后调用，确保下次 list_assets 读到最新。"""
+        """资产写入/删除/清空后调用，确保下次 list_assets 读到最新，并标记需重新同步到 SQLite。"""
         self._assets_cache = None
+        self._assets_synced_dirty = True
 
     def delete_asset(self, asset_id: str, user_id: str | None = None) -> bool:
         deleted_asset = self.store.delete_key("assets", asset_id)
@@ -568,6 +578,21 @@ class AudioVisualAgent:
         except Exception:
             logger.debug("clear_album_detail_cache failed", exc_info=True)
         return cleared
+
+    def cleanup_resource_library(self) -> dict[str, int]:
+        """清理候选池污染：删历史 fallback/mock 假候选 + 指向已删 asset 的僵尸 local 行。
+
+        新代码已在入库口拦截 fallback，本方法清存量；可由启动钩子或 /cache 主动触发。
+        """
+        live_ids = {asset.asset_id for asset in self.list_assets()}
+        removed_fallback = self.library.purge_fallback_sources()
+        removed_orphan = self.library.purge_orphan_local(live_ids)
+        if removed_fallback or removed_orphan:
+            logger.info(
+                "候选池清理：删除 fallback 假候选 %d 行、僵尸 local %d 行",
+                removed_fallback, removed_orphan,
+            )
+        return {"fallback": removed_fallback, "orphan_local": removed_orphan}
 
     # --- 推荐功能 ---
 
@@ -950,9 +975,7 @@ class AudioVisualAgent:
             wanted_moods.update(item.lower() for item in scenario_moods.get(scenario, set()))
 
         ranked: list[tuple[float, ResourceTrack]] = []
-        for track in self.library.list_tracks(3000):
-            if not track.verified:
-                continue
+        for track in self.library.list_tracks(1500, verified_only=True):
             genres = {item.lower() for item in track.genre}
             moods = {item.lower() for item in track.mood}
             searchable = " ".join([track.title, track.artist, *track.genre, *track.mood]).lower()
@@ -1368,7 +1391,12 @@ class AudioVisualAgent:
         return memory
 
     def list_resource_tracks(self, limit: int = 100):
-        self.library.sync_assets(self.list_assets())
+        # sync_assets 把 JSON 资产同步进 SQLite，是 O(库大小) 的写。资产没变时重复同步
+        # 纯属浪费（similar_artists 每次拉 2500 就触发一次全量 re-upsert）。只在资产
+        # 实际变动后同步一次。
+        if self._assets_synced_dirty:
+            self.library.sync_assets(self.list_assets())
+            self._assets_synced_dirty = False
         return self.library.list_tracks(limit)
 
     def generate_music_journey(self, user_id: str, instruction: str) -> dict[str, Any]:

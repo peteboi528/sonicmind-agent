@@ -328,6 +328,20 @@ for _name in ("save_to_playlist", "favorite_track"):
     TOOL_REGISTRY[_name].idempotent = False
     TOOL_REGISTRY[_name].max_retries = 0
 
+# 差异化超时：默认 8.0s 对"内部要做多次网络+LLM"的重工具不够。journey 内部
+# run_parallel(timeout=15.0)，被 8s 墙杀掉会让所有阶段空候选；recommend/playlist
+# 走 LLM 发现 + 多轮网易云搜索 + 重排，也常 >8s。按真实内部耗时放宽。
+_HEAVY_TOOL_TIMEOUTS = {
+    "journey": 18.0,            # 内部 5 阶段并行歌单搜索 timeout=15.0，留余量
+    "recommend": 20.0,         # LLM 发现 + 多轮网易云搜索 + 重排
+    "playlist": 20.0,          # 同 recommend，且常要更多候选
+    "web_music_search": 16.0,  # 多端点搜索 + 验证
+    "taste_experiment": 20.0,  # 三档候选生成，LLM + 搜索
+    "import_netease_playlist": 30.0,  # 批量导入大歌单
+}
+for _name, _timeout in _HEAVY_TOOL_TIMEOUTS.items():
+    TOOL_REGISTRY[_name].timeout_seconds = _timeout
+
 
 _ALIAS_TO_CANONICAL: dict[str, str] = {}
 for _canonical, _spec in TOOL_REGISTRY.items():

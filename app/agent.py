@@ -2002,8 +2002,11 @@ class AudioVisualAgent:
             },
         }
 
-    def summarize_taste(self, user_id: str, *, include_artists: bool = True) -> str:
-        memory = self.memory.get_memory(user_id)
+    def summarize_taste(self, user_id: str, *, include_artists: bool = True, memory: UserMemory | None = None) -> str:
+        # memory 可由调用方传入（recommend_for_query 已 get_memory 过），省掉同请求内
+        # 对同一用户的重复读盘+校验。不传则照旧自行读取，行为不变。
+        if memory is None:
+            memory = self.memory.get_memory(user_id)
         if not memory.taste_profile:
             library = [asset for asset in self.list_assets() if asset.status == "analyzed"]
             memory = self.memory.refresh_taste_profile(user_id, library)
@@ -2661,7 +2664,7 @@ class AudioVisualAgent:
         memory_query = self.memory.weighted_query(memory, include_artists=False)
         search_goal = _extract_search_query(goal)
         has_entity = self._query_has_entity(search_goal)
-        taste_summary = self.summarize_taste(user_id, include_artists=has_entity) if memory.taste_profile else ""
+        taste_summary = self.summarize_taste(user_id, include_artists=has_entity, memory=memory) if memory.taste_profile else ""
         library_artists = list({a.artist for a in self.list_assets() if a.artist})[:10] if has_entity else []
 
         # ── 三路搜索策略 ──

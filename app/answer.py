@@ -153,6 +153,34 @@ def collect_known_titles(results: list[dict[str, Any]]) -> set[str]:
                     title = getattr(getattr(item, "track", None), "title", "")
                     if title:
                         titles.add(title)
+        if r.get("type") == "music_dossier":
+            dossier = r.get("dossier") or {}
+            name = ((dossier.get("entity") or {}).get("name") or "").strip() if isinstance(dossier, dict) else ""
+            if name:
+                titles.add(name)
+            for entity in (dossier.get("related_entities") or []) if isinstance(dossier, dict) else []:
+                related_name = (entity.get("name") or "").strip() if isinstance(entity, dict) else ""
+                if related_name:
+                    titles.add(related_name)
+            for track in (dossier.get("key_tracks") or []) if isinstance(dossier, dict) else []:
+                title = (track.get("title") or "").strip() if isinstance(track, dict) else ""
+                if title:
+                    titles.add(title)
+        if r.get("type") == "sample_dossier":
+            dossier = r.get("sample_dossier") or {}
+            target = dossier.get("target") or {} if isinstance(dossier, dict) else {}
+            target_title = (target.get("title") or "").strip() if isinstance(target, dict) else ""
+            if target_title:
+                titles.add(target_title)
+            for rel in (dossier.get("relations") or []) if isinstance(dossier, dict) else []:
+                source = rel.get("source_track") or {} if isinstance(rel, dict) else {}
+                title = (source.get("title") or "").strip() if isinstance(source, dict) else ""
+                if title:
+                    titles.add(title)
+            for card in (dossier.get("source_track_cards") or []) if isinstance(dossier, dict) else []:
+                title = (card.get("title") or "").strip() if isinstance(card, dict) else ""
+                if title:
+                    titles.add(title)
     return titles
 
 

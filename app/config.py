@@ -113,6 +113,17 @@ class Settings:
         self.empty_result_recovery_max_attempts: int = max(
             0, int(os.getenv("EMPTY_RESULT_RECOVERY_MAX_ATTEMPTS", "1"))
         )
+        # Music knowledge agent latency budget. 这些链路会并行查资料/乐评，
+        # 必须有全链路墙钟上限，避免单个请求因为搜索链条过长而崩掉。
+        self.knowledge_turn_budget_seconds: float = float(os.getenv("KNOWLEDGE_TURN_BUDGET_SECONDS", "12"))
+        self.knowledge_quick_budget_seconds: float = float(os.getenv("KNOWLEDGE_QUICK_BUDGET_SECONDS", "6"))
+        self.knowledge_source_timeout_seconds: float = float(os.getenv("KNOWLEDGE_SOURCE_TIMEOUT_SECONDS", "3"))
+        self.knowledge_review_timeout_seconds: float = float(os.getenv("KNOWLEDGE_REVIEW_TIMEOUT_SECONDS", "4"))
+        self.knowledge_llm_timeout_seconds: float = float(os.getenv("KNOWLEDGE_LLM_TIMEOUT_SECONDS", "5"))
+        self.knowledge_max_review_sources: int = max(1, int(os.getenv("KNOWLEDGE_MAX_REVIEW_SOURCES", "5")))
+        self.knowledge_max_search_queries: int = max(1, int(os.getenv("KNOWLEDGE_MAX_SEARCH_QUERIES", "3")))
+        self.knowledge_max_citations: int = max(1, int(os.getenv("KNOWLEDGE_MAX_CITATIONS", "8")))
+        self.knowledge_deep_review_enabled: bool = os.getenv("KNOWLEDGE_DEEP_REVIEW_ENABLED", "false").lower() == "true"
         # P1-G 记忆升级：语义召回 + LLM 偏好抽取兜底 + 巩固画像。
         # 仅真实 LLM 下做 LLM 抽取/巩固；语义召回随 embeddings 开关自动降级。
         self.enable_semantic_memory: bool = os.getenv("ENABLE_SEMANTIC_MEMORY", "true").lower() == "true"

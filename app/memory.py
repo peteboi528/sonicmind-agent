@@ -36,12 +36,32 @@ logger = logging.getLogger(__name__)
 
 PREFERENCE_PATTERNS = [
     re.compile(r"(?:i\s+)?(?:like|love|prefer)\s+(.+)", re.IGNORECASE),
-    re.compile(r"(?:喜欢|偏好|更想要|更喜欢|爱听)(.+)"),
+    re.compile(r"(?<!不)(?:喜欢|偏好|更想要|更喜欢|超爱|很爱|也爱|爱听|爱)\s*(.+)"),
+    re.compile(r"(?:长期\s*)?(?:就吃|吃)\s*(.+?)(?:这一套|这套|$)"),
     # 更宽泛的音乐偏好捕获：听/在听/循环/追/迷 + 歌手/曲风
     re.compile(r"(?:在听|正在听|最近听|听了|一直听|常听|循环|单曲循环|追|迷|粉)\s*(.+)"),
     re.compile(r"(?:听了|在听)\s*(.{2,15})的?歌"),
     re.compile(r"(?:i\s+)?(?:listen\s+to|into|vibing\s+(?:to|with))\s+(.+)", re.IGNORECASE),
 ]
+
+# 离线/mock 评测时没有 LLM 兜底，中文口语里又常用“吃这一套/换点/超爱”
+# 表达风格偏好。这里只列高置信音乐风格词，避免把“这轮想要点能专注写代码的”
+# 这类场景诉求误写成长期画像。
+CANONICAL_PREFERENCE_TERMS = [
+    ("deep house", ("deep house",)),
+    ("city pop", ("city pop",)),
+    ("Bossa Nova", ("bossa nova", "bossa", "巴萨诺瓦")),
+    ("深夜 lo-fi", ("深夜 lo-fi", "lo-fi", "lofi")),
+    ("R&B", ("r&b", "rnb", "节奏布鲁斯")),
+    ("慵懒爵士", ("慵懒爵士",)),
+    ("爵士", ("爵士", "jazz")),
+    ("国风", ("国风", "古风", "中国风")),
+]
+
+POSITIVE_PREFERENCE_CUES = (
+    "喜欢", "偏好", "更想要", "更喜欢", "爱听", "超爱", "很爱", "也爱", "爱",
+    "迷上", "迷", "长期", "平时", "就吃", "吃", "换点", "来点",
+)
 
 # 负面偏好提取：匹配"不要/别推/讨厌/不喜欢"等 + 后续的风格/类型词
 NEGATIVE_PREFERENCE_PATTERNS = [
@@ -182,11 +202,30 @@ class MemoryManager:
         for pat in MemoryManager._CORRECTION_PATTERNS:
             m = pat.search(query)
             if m:
-                text = m.group(1).strip().strip("，,。.的了").strip()
+                text = MemoryManager._normalize_correction_target(m.group(1))
                 # 过滤掉抓到代词/空壳的情况。
                 if text and 2 <= len(text) <= 30 and text not in {"这个", "那个", "它", "他", "她"}:
                     return text
         return None
+
+    @staticmethod
+    def _normalize_correction_target(raw: str) -> str:
+        text = (raw or "").strip().strip("，,。.的了吧").strip()
+        text = re.sub(r"^(?:把|我)?(?:之前所有关于|之前关于|所有关于|关于)", "", text).strip()
+        text = re.sub(r"^(?:刚才那个|刚才那些|刚才的|刚才|之前那个|之前那些|之前|那个|这个|那条|这条)", "", text).strip()
+        text = re.sub(r"^(?:从没说过的|从未说过的|没说过的)", "", text).strip()
+        text = re.sub(r"(?:那条|这条)?(?:偏好)?(?:也)?$", "", text).strip()
+        text = text.strip("，,。.的了吧").strip()
+        lowered = text.lower()
+        for canon, aliases in CANONICAL_PREFERENCE_TERMS:
+            if any(alias.lower() in lowered for alias in aliases):
+                return canon
+        return text
+
+    @staticmethod
+    def _correction_should_exclude(query: str) -> bool:
+        """撤回类指令只删除正偏好；明确“不喜欢/不想听”才新增长期排除。"""
+        return bool(re.search(r"不(?:再)?(?:喜欢|想听|爱听)|讨厌|别再|不要再|不想听", query))
 
     def add_exclusion(self, user_id: str, rule: str) -> bool:
         """添加一条排除规则。已存在则返回 False。"""
@@ -349,7 +388,7 @@ class MemoryManager:
             if correction:
                 if self._remove_preference(memory, correction):
                     changed = True
-                if correction not in memory.exclusion_rules:
+                if self._correction_should_exclude(query) and correction not in memory.exclusion_rules:
                     memory.exclusion_rules.append(correction)
                     changed = True
 
@@ -359,10 +398,16 @@ class MemoryManager:
                 if explicit not in memory.preferences:
                     memory.preferences.append(explicit)
                     changed = True
+                # Flip-flop：重新喜欢某项时，清掉之前因纠正落下的冲突排除，
+                # 否则画像自相矛盾（同一项既"喜欢"又"被排除"）。
+                if self._clear_contradicting_exclusions(memory, explicit):
+                    changed = True
 
             # P1-G：正则未命中绕口表述时，用 LLM 兜底抽结构化偏好。
             for pref in llm_preferences:
                 if self._upsert_entry(memory, pref, "llm_extract"):
+                    changed = True
+                if self._clear_contradicting_exclusions(memory, pref):
                     changed = True
 
             # 从检索结果中提取歌手/歌名作为兴趣信号（即使没有明确说"喜欢"）
@@ -371,8 +416,11 @@ class MemoryManager:
                 if self._upsert_entry(memory, entity, "from_search_result"):
                     changed = True
 
-            # 负面偏好提取：用户说"不要抖音热歌""别推孟菲斯说唱"等
-            negative = self._extract_negative_preference(query)
+            # 负面偏好提取：用户说"不要抖音热歌""别推孟菲斯说唱"等。
+            # 纠正语句（"不喜欢X了，太老气，换回现代的"）已由上面的 correction 分支
+            # 精准处理；这里不能再跑粗粒度负则，否则会把整句尾巴(太老气/换回现代)
+            # 误抓成长期排除，污染画像。
+            negative = None if correction else self._extract_negative_preference(query)
             if negative and negative not in memory.exclusion_rules:
                 memory.exclusion_rules.append(negative)
                 changed = True
@@ -632,6 +680,29 @@ class MemoryManager:
         memory.preferences = [p for p in memory.preferences if key not in p.lower()]
         return (len(memory.structured_preferences) < before_struct) or (len(memory.preferences) < before_legacy)
 
+    @staticmethod
+    def _clear_contradicting_exclusions(memory: UserMemory, pref: str) -> bool:
+        """重新喜欢 pref 时，删除与之冲突的排除规则（flip-flop 收敛）。
+
+        匹配规则文本与 pref 互为子串（大小写不敏感）：用户先"不喜欢 deep house 了"
+        落下排除，又"重新喜欢 deep house"时，应清掉那条排除，避免画像同时
+        "喜欢"又"排除"同一项。只清被新正偏好关键词覆盖的排除，不动其它（如抖音神曲）。
+        """
+        key = pref.lower().strip()
+        if not key:
+            return False
+        kept: list[str] = []
+        removed = False
+        for rule in memory.exclusion_rules:
+            low = rule.lower().strip()
+            if low and (low in key or key in low):
+                removed = True
+                continue
+            kept.append(rule)
+        if removed:
+            memory.exclusion_rules = kept
+        return removed
+
     def _migrate_preferences(self, memory: UserMemory) -> None:
         if memory.preferences and not memory.structured_preferences:
             for pref in memory.preferences:
@@ -762,6 +833,13 @@ def compute_behavior_scores(
 
 def extract_preference(event: str) -> str | None:
     normalized = event.strip()
+    if re.search(r"谁还听", normalized):
+        return None
+    known = _extract_known_music_preference(normalized)
+    if known:
+        return known
+    if re.search(r"不(?:再)?喜欢|不要|别再|不想听", normalized):
+        return None
     for pattern in PREFERENCE_PATTERNS:
         match = pattern.search(normalized)
         if match:
@@ -769,6 +847,34 @@ def extract_preference(event: str) -> str | None:
             if len(value) >= 3:
                 return value
     return None
+
+
+def _extract_known_music_preference(text: str) -> str | None:
+    cue_positions = [text.find(cue) for cue in POSITIVE_PREFERENCE_CUES if cue in text]
+    if not cue_positions:
+        return None
+    first_cue = min(cue_positions)
+    neg_positions = [
+        pos for pos in (
+            text.find("不喜欢"),
+            text.find("不要"),
+            text.find("别再"),
+            text.find("不想听"),
+        )
+        if pos >= 0
+    ]
+    if neg_positions and min(neg_positions) < first_cue:
+        return None
+    lowered = text.lower()
+    matches: list[str] = []
+    for canon, aliases in CANONICAL_PREFERENCE_TERMS:
+        if any(alias.lower() in lowered for alias in aliases):
+            matches.append(canon)
+    if not matches:
+        return None
+    # 复合偏好保留在一条里，便于 “Bossa Nova 和慵懒爵士” 这类句子仍能按
+    # substring 命中“爵士”，同时避免多条写入放大偶然表达。
+    return " 和 ".join(dict.fromkeys(matches))
 
 
 def extract_goal(event: str) -> str | None:
@@ -783,8 +889,10 @@ def extract_goal(event: str) -> str | None:
 def cleanup(value: str) -> str:
     # 去掉前后的语气词（上/了/过/的/啊/呢/吧/哦）和标点
     value = re.sub(r"\s+", " ", value.strip("。.!? ，,；;！"))
+    value = re.split(r"(?:，|,|；|;|。)\s*(?:但|不过|尤其|今晚|今天|工作时|约会时)", value, maxsplit=1)[0]
     value = re.sub(r"^[上进了的了啊呢吧哦着过]", "", value)
     value = re.sub(r"[上了的了啊呢吧哦着过]$", "", value)
+    value = re.sub(r"(?:这一套|这套)$", "", value).strip()
     return value.strip()
 
 

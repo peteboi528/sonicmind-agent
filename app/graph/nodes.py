@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from typing import TYPE_CHECKING, Any
 
 from app.answer import (
@@ -108,6 +109,7 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         "prompt_versions": {},
         "runtime_metrics": empty_runtime_metrics(),
         "semantic_recall_pending": True,
+        "started_at_monotonic": time.monotonic(),
     }
     return {
         **state,
@@ -153,6 +155,16 @@ def _finish_plan_intent(
             "online_required": False,
             "reasoning_summary": spec.summary,
         })
+    keyword_intent = match_intent_by_keywords(query)
+    if keyword_intent and _is_knowledge_intent(keyword_intent) and plan.intent != keyword_intent:
+        spec = get_intent(keyword_intent)
+        plan = plan.model_copy(update={
+            "intent": keyword_intent,
+            "strategy": spec.strategy_for(True),
+            "tools_needed": spec.tools_for(True),
+            "online_required": True,
+            "reasoning_summary": spec.summary,
+        })
     plan, inherited = _apply_dialogue_continuation(plan, query, context.get("dialogue_state"))
     # 安全网：LLM 可能把介绍/百科类问题误判为 discuss，检查关键词自动升级
     plan = _upgrade_artist_info(plan, query)
@@ -160,6 +172,18 @@ def _finish_plan_intent(
     context = state.get("context") or {}
     plan, memory_seeds = _inject_preference_seeds(plan, query, context)
     plan = _materialize_tool_stages(plan, query, state.get("top_k", 5))
+    context = dict(state.get("context") or {})
+    if _is_knowledge_intent(plan.intent):
+        from app.knowledge import knowledge_deadline
+
+        context["deadline_at"] = knowledge_deadline()
+        context["latency_budget"] = {
+            "kind": "knowledge",
+            "budget_seconds": settings.knowledge_turn_budget_seconds,
+            "timed_out_tools": [],
+            "skipped_due_to_deadline": [],
+            "partial": False,
+        }
     trace_line = f"[plan] {plan.reasoning_summary}"
     if inherited:
         trace_line += f"（延续上一轮：继承 {inherited}）"
@@ -274,6 +298,33 @@ def _inject_preference_seeds(
 
 def _materialize_tool_stages(plan: AgentPlan, query: str, top_k: int) -> AgentPlan:
     """Turn compatibility tool names into explicit calls and dependency stages."""
+    if plan.intent == "sample_lookup":
+        resolve = ToolCall(name="resolve_music_entity", arguments=_planned_arguments("resolve_music_entity", query, plan, top_k))
+        search = ToolCall(name="sample_relation_search", arguments=_planned_arguments("sample_relation_search", query, plan, top_k))
+        locate = ToolCall(name="locate_sample_sources", arguments=_planned_arguments("locate_sample_sources", query, plan, top_k))
+        build = ToolCall(name="build_sample_dossier", arguments=_planned_arguments("build_sample_dossier", query, plan, top_k))
+        return plan.model_copy(update={
+            "tools_needed": ["resolve_music_entity", "sample_relation_search", "locate_sample_sources", "build_sample_dossier"],
+            "stages": [
+                ToolStage(calls=[resolve], parallel=False),
+                ToolStage(calls=[search], parallel=False),
+                ToolStage(calls=[locate], parallel=False),
+                ToolStage(calls=[build], parallel=False),
+            ],
+        })
+    if _is_knowledge_intent(plan.intent):
+        resolve = ToolCall(name="resolve_music_entity", arguments=_planned_arguments("resolve_music_entity", query, plan, top_k))
+        metadata = ToolCall(name="music_metadata_lookup", arguments=_planned_arguments("music_metadata_lookup", query, plan, top_k))
+        reviews = ToolCall(name="review_search", arguments=_planned_arguments("review_search", query, plan, top_k))
+        build = ToolCall(name="build_music_dossier", arguments=_planned_arguments("build_music_dossier", query, plan, top_k))
+        return plan.model_copy(update={
+            "tools_needed": ["resolve_music_entity", "music_metadata_lookup", "review_search", "build_music_dossier"],
+            "stages": [
+                ToolStage(calls=[resolve], parallel=False),
+                ToolStage(calls=[metadata, reviews], parallel=True),
+                ToolStage(calls=[build], parallel=False),
+            ],
+        })
     stages: list[ToolStage] = []
     parallel_calls: list[ToolCall] = []
     previous: list[str] = []
@@ -310,6 +361,13 @@ def _planned_arguments(name: str, query: str, plan: AgentPlan, top_k: int) -> di
         return {"instruction": entity_query, "target_count": plan.target_count}
     if handler == "taste_experiment":
         return {"prompt": query, "total": plan.target_count or 12}
+    if handler in {
+        "resolve_music_entity", "music_metadata_lookup", "review_search", "build_music_dossier",
+        "sample_relation_search", "locate_sample_sources", "build_sample_dossier",
+    }:
+        # 知识/对比工具必须保留用户原句；LLM 改写后的 search_query 可能把
+        # “A 和 B 的区别”压成一个搜索串，导致实体切分失败。
+        return {"query": query, "intent": plan.intent}
     if handler in {"artist_albums", "video_search", "web_info_search"}:
         return {"query": plan.retrieval_plan.entities[0] if handler == "artist_albums" and plan.retrieval_plan.entities else entity_query}
     if handler == "similar_artists":
@@ -323,6 +381,15 @@ def _planned_arguments(name: str, query: str, plan: AgentPlan, top_k: int) -> di
     }:
         return _infer_aux_arguments(handler, query, plan)
     return {}
+
+
+def _is_knowledge_intent(intent: str) -> bool:
+    try:
+        from app.knowledge import is_knowledge_intent
+
+        return is_knowledge_intent(intent)
+    except Exception:
+        return False
 
 
 def _attach_semantic_recall_if_needed(agent: AudioVisualAgent, state: AgentState, plan: AgentPlan) -> AgentState:
@@ -546,6 +613,7 @@ async def web_fallback_async(agent: AudioVisualAgent, state: AgentState) -> Agen
     trace = [*state.get("trace", []), "[web_fallback] 本地候选不足，触发联网兜底补搜。"]
     events = [*state.get("events", []), StreamEvent(type="eval", content="本地候选不足，联网兜底补搜。")]
     outcomes = list(state.get("tool_outcomes", []))
+    state_context = dict(state.get("context") or {})
     call = ToolCall(name="web_music_search", arguments=_planned_arguments("web_music_search", query, plan, top_k))
     local_results: list[dict[str, Any]] = []
     runtime_result = await _run_tool_async_safely(
@@ -652,6 +720,22 @@ def _record_runtime_result(
     if handler == "similar_artists":
         for artist in runtime_result.data.get("artists", []):
             events.append(StreamEvent(type="artist_card", content=artist.get("name", ""), payload=artist))
+    if handler == "build_music_dossier" and runtime_result.data.get("dossier"):
+        events.append(StreamEvent(
+            type="dossier",
+            content=runtime_result.data.get("answer", "已生成音乐档案。"),
+            payload={"dossier": runtime_result.data.get("dossier")},
+        ))
+    if handler == "build_sample_dossier" and runtime_result.data.get("sample_dossier"):
+        events.append(StreamEvent(
+            type="sample_relations",
+            content=runtime_result.data.get("answer", "已生成采样溯源结果。"),
+            payload={
+                "sample_dossier": runtime_result.data.get("sample_dossier"),
+                "relations": runtime_result.data.get("sample_relations") or [],
+                "source_cards": runtime_result.data.get("source_cards") or [],
+            },
+        ))
     if runtime_result.cards:
         payload: dict[str, Any] = {"count": len(runtime_result.cards), "cards": runtime_result.cards}
         if handler == "taste_experiment":
@@ -684,6 +768,7 @@ async def execute_tools_async(agent: AudioVisualAgent, state: AgentState) -> Age
     interrupt_enabled = bool(state.get("_interrupt_enabled"))
     refine_count = state.get("_refine_count", 0) + (1 if state.get("_need_refine") else 0)
     executed: set[str] = set()
+    state_context = dict(state.get("context") or {})
 
     async def run_call(call: ToolCall, shared_results: list[dict[str, Any]]):
         local_results: list[dict[str, Any]] = []
@@ -692,7 +777,7 @@ async def execute_tools_async(agent: AudioVisualAgent, state: AgentState) -> Age
         result = await _run_tool_async_safely(
             agent, call, plan, query, user_id, top_k, shared_results,
             local_results, local_trace, local_events,
-            thread_id, run_id, interrupt_enabled,
+            thread_id, run_id, interrupt_enabled, state_context,
         )
         return call, result, local_results, local_trace, local_events
 
@@ -745,13 +830,14 @@ async def _run_tool_async_safely(
     thread_id: str,
     run_id: str,
     interrupt_enabled: bool,
+    state_context: dict[str, Any] | None = None,
 ) -> ToolResult | None:
     import asyncio
 
     try:
         return await _run_tool_async(
             agent, call, plan, query, user_id, top_k, prior_results,
-            results, trace, events, thread_id, run_id, interrupt_enabled,
+            results, trace, events, thread_id, run_id, interrupt_enabled, state_context,
         )
     except asyncio.CancelledError:
         raise
@@ -788,6 +874,7 @@ async def _run_tool_async(
     thread_id: str,
     run_id: str,
     interrupt_enabled: bool,
+    state_context: dict[str, Any] | None = None,
 ) -> ToolResult:
     handler = get_handler(call.name)
     if handler is None:
@@ -844,10 +931,13 @@ async def _run_tool_async(
                     arguments = {**arguments, "confirm": True}
                     call = call.model_copy(update={"arguments": arguments})
     context_kwargs = {"run_id": run_id} if run_id else {}
+    state_context = state_context or {}
     if runtime_result is None:
         runtime_result = await tool_runtime.execute(call, ToolContext(
             thread_id=thread_id, user_id=user_id, query=query, plan=plan_payload,
             prior_results=prior_results, confirmation=confirmation, agent=agent,
+            deadline_at=state_context.get("deadline_at"),
+            latency_budget=state_context.get("latency_budget") or {},
             **context_kwargs,
         ))
     return _record_runtime_result(
@@ -934,6 +1024,8 @@ async def reflect_async(agent: AudioVisualAgent, state: AgentState) -> AgentStat
         if recovery is not None:
             return recovery
         plan = state["plan"]
+        if _is_knowledge_intent(plan.intent):
+            return {**state, "_need_refine": False}
         if plan.intent not in {"recommend", "search", "playlist", "video"} or settings.mock_mode:
             return {**state, "_need_refine": False}
         tracks = _collect_tracks(state.get("results", []))
@@ -1023,6 +1115,8 @@ async def _prepare_empty_result_recovery_async(
     if not settings.enable_empty_result_recovery:
         return None
     attempt = int(state.get("_refine_count", 0))
+    if _is_knowledge_intent(state["plan"].intent):
+        return None
     if attempt >= settings.empty_result_recovery_max_attempts or state["plan"].intent not in _RECOVERY_INTENTS:
         return None
     current = [item for item in state.get("tool_outcomes", []) if int(item.get("attempt", 0)) == attempt]
@@ -1419,9 +1513,19 @@ async def _finalize_tail_async(
     artists_payload = _similar_artists_payload(state.get("results", []))
     if artists_payload:
         final_payload["artists"] = artists_payload
+    dossier_payload = _music_dossier_payload(state.get("results", []))
+    if dossier_payload:
+        final_payload["dossier"] = dossier_payload
+    sample_payload = _sample_dossier_payload(state.get("results", []))
+    if sample_payload:
+        final_payload["sample_dossier"] = sample_payload
+        final_payload["sample_relations"] = sample_payload.get("relations") or []
+        source_cards = sample_payload.get("source_track_cards") or []
+        if source_cards:
+            final_payload["cards"] = source_cards
     final_payload["trace_summary"] = _trace_summary(
         state["plan"], state.get("results", []), trace, aligned_cards,
-        state.get("tool_outcomes", []),
+        state.get("tool_outcomes", []), state.get("context") or {},
     )
     return answer, final_payload, trace
 
@@ -1839,6 +1943,7 @@ def _trace_summary(
     trace: list[str],
     cards: list[dict[str, Any]],
     outcomes: list[dict[str, Any]] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """稳定的 Agent 摘要，供 UI 透明度面板和 smoke 报告断言使用。"""
     tracks = _select_listed_tracks(results, plan) or _collect_tracks(results)
@@ -1846,6 +1951,7 @@ def _trace_summary(
     experiment_cards = 0
     album_cards = 0
     artist_cards = 0
+    sample_cards = 0
     for result in results:
         if result.get("type") == "taste_experiment":
             exp = result.get("experiment")
@@ -1860,6 +1966,17 @@ def _trace_summary(
             artist_cards += len(result.get("artists") or [])
             if result.get("artists"):
                 sources.add("local_library")
+        elif result.get("type") == "music_dossier":
+            dossier = result.get("dossier") or {}
+            for citation in dossier.get("citations") or []:
+                if citation.get("source"):
+                    sources.add(citation.get("source"))
+        elif result.get("type") == "sample_dossier":
+            dossier = result.get("sample_dossier") or {}
+            sample_cards += len(dossier.get("source_track_cards") or [])
+            for citation in dossier.get("citations") or []:
+                if citation.get("source"):
+                    sources.add(citation.get("source"))
     observed_tools = [str(item.get("tool") or "") for item in outcomes or [] if item.get("tool")]
     planned = list(dict.fromkeys([
         *observed_tools,
@@ -1901,6 +2018,7 @@ def _trace_summary(
         execution_state = "ok"
     else:
         execution_state = "planned_not_executed"
+    latency_budget = _latency_budget_summary(context or {}, outcomes or [], results)
     return {
         "intent": plan.intent,
         "strategy": plan.strategy,
@@ -1917,8 +2035,56 @@ def _trace_summary(
         "guard_removed": sum(1 for line in trace if line.startswith("[guard]")),
         "reflection": any("[reflect]" in line for line in trace),
         "recovery": any("[refine]" in line for line in trace),
-        "final_cards": len(cards) or experiment_cards or album_cards or artist_cards,
+        "final_cards": len(cards) or experiment_cards or album_cards or artist_cards or sample_cards,
+        "latency_budget": latency_budget,
     }
+
+
+def _latency_budget_summary(
+    context: dict[str, Any],
+    outcomes: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not _is_knowledge_intent(str(context.get("intent") or "")) and not context.get("latency_budget"):
+        # context may not carry intent; infer from knowledge result payloads.
+        if not any(r.get("type") in {"music_dossier", "sample_dossier"} for r in results):
+            return None
+    started = context.get("started_at_monotonic")
+    elapsed = round(max(0.0, time.monotonic() - float(started)), 3) if started else 0
+    timed_out = [
+        str(item.get("tool") or "")
+        for item in outcomes
+        if (item.get("error") or {}).get("kind") == "timeout"
+    ]
+    skipped = []
+    for item in outcomes:
+        metrics = item.get("metrics") or {}
+        if metrics.get("deadline_skipped"):
+            skipped.append(str(item.get("tool") or ""))
+    partial = any((r.get("dossier") or {}).get("partial") for r in results if r.get("type") == "music_dossier")
+    partial = partial or any((r.get("sample_dossier") or {}).get("partial") for r in results if r.get("type") == "sample_dossier")
+    budget = context.get("latency_budget") or {}
+    return {
+        "budget_seconds": budget.get("budget_seconds", settings.knowledge_turn_budget_seconds),
+        "elapsed_seconds": elapsed,
+        "timed_out_tools": [t for t in timed_out if t],
+        "skipped_due_to_deadline": [s for s in skipped if s],
+        "partial": partial,
+    }
+
+
+def _music_dossier_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for result in reversed(results):
+        if result.get("type") == "music_dossier" and result.get("dossier"):
+            return result.get("dossier")
+    return None
+
+
+def _sample_dossier_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for result in reversed(results):
+        if result.get("type") == "sample_dossier" and result.get("sample_dossier"):
+            return result.get("sample_dossier")
+    return None
 
 
 def _taste_experiment_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -1940,6 +2106,28 @@ def _similar_artists_payload(results: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def _compose_deterministic_answer(results: list[dict[str, Any]], plan: AgentPlan) -> str:
+    if plan.intent == "sample_lookup":
+        dossier = _sample_dossier_payload(results)
+        if dossier:
+            try:
+                from app.knowledge import sample_dossier_answer
+                from app.models import SampleDossier
+
+                return sample_dossier_answer(SampleDossier.model_validate(dossier))
+            except Exception:
+                return str((dossier or {}).get("degraded_reason") or "已生成采样溯源结果，但整理文本时降级。")
+        return "这轮没有找到可核实采样关系；我不会硬编源曲。"
+    if _is_knowledge_intent(plan.intent):
+        dossier = _music_dossier_payload(results)
+        if dossier:
+            try:
+                from app.knowledge import dossier_answer
+                from app.models import MusicDossier
+
+                return dossier_answer(MusicDossier.model_validate(dossier))
+            except Exception:
+                return str((dossier or {}).get("summary") or "已生成音乐档案，但整理文本时降级。")
+        return "这轮没有在时间预算内拿到足够音乐资料；我不会编造乐评。"
     if plan.intent == "artist_albums":
         return _compose_artist_albums_answer(results)
     if plan.intent == "similar_artists":
@@ -2020,7 +2208,7 @@ async def compose_answer_stream_async(
         if source_urls:
             yield "\n\n📎 参考来源：\n" + "\n".join(f"- {url}" for url in source_urls[:3])
         return
-    if intent in {"artist_albums", "similar_artists", "taste_experiment", "taste", "journey"}:
+    if intent in {"artist_albums", "similar_artists", "taste_experiment", "taste", "journey"} or _is_knowledge_intent(intent):
         yield _compose_deterministic_answer(results, plan)
         return
 
@@ -2063,19 +2251,13 @@ def _intro_prompt(
         if (getattr(t, "artist", "") or "").strip()
     ))
     mem_hint = f"用户偏好：{memory_query[:150]}" if memory_query else "暂无明确偏好记录"
-    history_hint = ""
-    if history_text:
-        # 只取最近几行避免过长
-        recent_lines = history_text.strip().split("\n")[-6:]
-        history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
     prompt = (
-        f"{history_hint}"
         f"用户请求：{query}\n"
         f"我已找到 {len(tracks)} 首真实候选，前几首：{titles_preview}\n"
         f"候选中实际出现的艺人：{artists_preview or '无明确艺人'}\n"
         f"{mem_hint}\n\n"
-        "请写一句自然、有温度的推荐开场白（80字内），体现你理解了用户的需求、偏好和对话上下文。"
-        "如果用户之前聊过相关话题，体现连贯性。"
+        "请写一句自然、有温度的推荐开场白（80字内），只能围绕用户本轮请求和实际候选。"
+        "不要提最近对话、上一轮话题、旧歌手或旧专辑；本轮任务是独立的。"
         "记忆只作为弱背景，当前任务约束优先。除非用户本轮明确点名某艺人，且该艺人确实出现在候选中，"
         "否则不得声称会加入、延续或重点推荐该艺人的歌曲。"
         "不要列歌名，不要编造任何歌曲，不要用书名号。只输出这一句话。"

@@ -12,6 +12,16 @@ from app.tools.contracts import ToolCall, ToolContext, ToolError, ToolResult, To
 from app.tools.registry import ToolSpec, get_tool_spec
 from app.tools.trace import LocalTraceStore
 
+_KNOWLEDGE_TOOL_LIMITS = {
+    "resolve_music_entity": "knowledge_source_timeout_seconds",
+    "music_metadata_lookup": "knowledge_source_timeout_seconds",
+    "review_search": "knowledge_review_timeout_seconds",
+    "build_music_dossier": "knowledge_llm_timeout_seconds",
+    "sample_relation_search": "knowledge_review_timeout_seconds",
+    "locate_sample_sources": "knowledge_source_timeout_seconds",
+    "build_sample_dossier": "knowledge_llm_timeout_seconds",
+}
+
 
 class ToolRuntime:
     def __init__(self, *, trace_store: LocalTraceStore | None = None) -> None:
@@ -45,16 +55,27 @@ class ToolRuntime:
             result = ToolResult(tool=spec.name, status=ToolStatus.UNSUPPORTED, error=ToolError(kind="missing_handler", message=f"No handler registered for {spec.name}"))
             return self._finish(spec, context, span_id, started, started_at, retries, result)
 
+        timeout_seconds, skipped = self._effective_timeout(spec, context)
+        if skipped:
+            result = ToolResult(
+                tool=spec.name,
+                status=ToolStatus.EMPTY,
+                summary=f"{spec.name} 因知识链路时间预算不足被跳过。",
+                data={"type": spec.name, "skipped_due_to_deadline": [spec.name]},
+                metrics={"deadline_skipped": True},
+            )
+            return self._finish(spec, context, span_id, started, started_at, retries, result)
+
         semaphore = self._semaphores.setdefault(spec.name, asyncio.Semaphore(spec.max_concurrency))
         attempts = spec.max_retries + 1 if spec.idempotent and spec.risk == ToolRisk.READ else 1
         async with semaphore:
             for attempt in range(attempts):
                 try:
                     if inspect.iscoroutinefunction(handler):
-                        value = await asyncio.wait_for(handler(arguments, context), timeout=spec.timeout_seconds)
+                        value = await asyncio.wait_for(handler(arguments, context), timeout=timeout_seconds)
                     else:
                         value = await asyncio.wait_for(
-                            asyncio.to_thread(handler, arguments, context), timeout=spec.timeout_seconds
+                            asyncio.to_thread(handler, arguments, context), timeout=timeout_seconds
                         )
                     result = value if isinstance(value, ToolResult) else ToolResult(tool=spec.name, status=ToolStatus.OK, data=value or {})
                     return self._finish(spec, context, span_id, started, started_at, retries, result)
@@ -62,12 +83,21 @@ class ToolRuntime:
                     result = ToolResult(tool=spec.name, status=ToolStatus.CANCELLED, summary="工具调用已取消。")
                     return self._finish(spec, context, span_id, started, started_at, retries, result)
                 except TimeoutError:
+                    if spec.name in _KNOWLEDGE_TOOL_LIMITS:
+                        result = ToolResult(
+                            tool=spec.name,
+                            status=ToolStatus.EMPTY,
+                            summary=f"{spec.name} 在知识链路预算内未返回，已降级继续。",
+                            data={"type": spec.name, "skipped_due_to_deadline": [spec.name]},
+                            metrics={"deadline_skipped": True, "timeout_as_degraded": True},
+                        )
+                        return self._finish(spec, context, span_id, started, started_at, retries, result)
                     result = ToolResult(
                         tool=spec.name,
                         status=ToolStatus.ERROR,
                         error=ToolError(
                             kind="timeout",
-                            message=f"{spec.name} timed out after {spec.timeout_seconds:.1f}s",
+                            message=f"{spec.name} timed out after {timeout_seconds:.1f}s",
                             retryable=False,
                         ),
                     )
@@ -92,9 +122,30 @@ class ToolRuntime:
         confirmation = context.confirmation or {}
         return confirmation.get("action_id") == call.call_id and confirmation.get("approved") is True
 
+    @staticmethod
+    def _effective_timeout(spec: ToolSpec, context: ToolContext) -> tuple[float, bool]:
+        timeout = spec.timeout_seconds
+        if spec.name in _KNOWLEDGE_TOOL_LIMITS:
+            from app.config import settings
+
+            timeout = min(timeout, float(getattr(settings, _KNOWLEDGE_TOOL_LIMITS[spec.name])))
+        remaining: float | None = None
+        if context.deadline_at:
+            remaining = max(0.0, context.deadline_at - time.monotonic())
+            timeout = min(timeout, remaining)
+        skipped = (
+            spec.name in _KNOWLEDGE_TOOL_LIMITS
+            and spec.name not in {"build_music_dossier", "build_sample_dossier"}
+            and remaining is not None
+            and remaining < 1.0
+        )
+        return max(0.05, timeout), skipped
+
     def _finish(self, spec: ToolSpec, context: ToolContext, span_id: str, started: float, started_at: str, retries: int, result: ToolResult) -> ToolResult:
         duration_ms = (time.monotonic() - started) * 1000
         result.metrics.update({"duration_ms": round(duration_ms, 2), "retries": retries})
+        if context.deadline_at:
+            result.metrics["deadline_remaining_ms"] = round(max(0.0, context.deadline_at - time.monotonic()) * 1000, 2)
         if self.trace_store:
             self.trace_store.span(
                 span_id=span_id, run_id=context.run_id, name=spec.name, kind="tool",

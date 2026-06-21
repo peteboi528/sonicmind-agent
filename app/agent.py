@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import re
 import threading
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1411,7 +1413,7 @@ class AudioVisualAgent:
             self._assets_synced_dirty = False
         return self.library.list_tracks(limit)
 
-    def generate_music_journey(self, user_id: str, instruction: str) -> dict[str, Any]:
+    def generate_music_journey(self, user_id: str, instruction: str, target_count: int | None = None) -> dict[str, Any]:
         from app.concurrency import run_parallel
         from app.search.netease_playlist import search_and_extract
 
@@ -1419,19 +1421,37 @@ class AudioVisualAgent:
         phases = _journey_phases(instruction, memory.taste_profile)
         out = {"user_id": user_id, "instruction": instruction, "phases": []}
         per_phase = 4
+        if target_count:
+            per_phase = max(1, math.ceil(target_count / max(1, len(phases))))
         recent = set(memory.journey_history[-160:])
         rotation = len(memory.journey_history) // max(1, per_phase)
 
         # 阶段互相独立，并行从高可信真人歌单召回。不能把完整旅程句子直接作为歌名
         # 搜索条件，否则“清晨/深夜/旅程”等场景词会让所有正式歌曲被相关性过滤掉。
+        def recall_phase(phase: dict[str, Any]) -> list[ExternalTrack]:
+            tracks = search_and_extract(
+                phase["queries"][rotation % len(phase["queries"])],
+                max_playlists=4,
+                tracks_per_playlist=per_phase * 4,
+            )
+            if tracks:
+                return tracks
+            # 离线/mock 或外部歌单接口空结果时，回落到统一搜索入口。large_messy
+            # 压测会 patch 这里，真实环境也可走本地/线上兜底，避免整段旅程返空。
+            fallback: list[ExternalTrack] = []
+            for query in phase["queries"]:
+                batch = self.search_web_music(
+                    query, top_k=per_phase * 4, relevance_query=phase["query"],
+                )
+                fallback.extend(batch)
+                if len(_dedupe_tracks(fallback)) >= per_phase * 2:
+                    break
+            return _dedupe_tracks(fallback)
+
         tasks = [
             (
                 f"journey:{phase['name']}",
-                lambda phase=phase: search_and_extract(
-                    phase["queries"][rotation % len(phase["queries"])],
-                    max_playlists=4,
-                    tracks_per_playlist=per_phase * 4,
-                ),
+                lambda phase=phase: recall_phase(phase),
             )
             for phase in phases
         ]
@@ -1708,10 +1728,12 @@ class AudioVisualAgent:
         tracks = [
             track for track in tracks
             if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+            and _is_playlist_context_compatible(instruction, track)
         ]
         clean_candidates = [
             track for track in candidates
             if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+            and _is_playlist_context_compatible(instruction, track)
         ]
         tracks = _fill_tracks(tracks, clean_candidates, target_count)
 
@@ -1815,6 +1837,7 @@ class AudioVisualAgent:
         clean_seed_tracks = [
             track for track in seed_tracks
             if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+            and _is_playlist_context_compatible(instruction, track)
         ]
         external: list[ExternalTrack] = []
 
@@ -1832,6 +1855,7 @@ class AudioVisualAgent:
                 external.extend(
                     track for track in curated
                     if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+                    and _is_playlist_context_compatible(instruction, track)
                 )
             except Exception:
                 logger.debug("curated playlist recall failed for %s", instruction, exc_info=True)
@@ -1847,6 +1871,7 @@ class AudioVisualAgent:
             external.extend(
                 track for track in batch
                 if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+                and _is_playlist_context_compatible(instruction, track)
             )
 
         if len(_dedupe_tracks([*clean_seed_tracks, *external])) < target_count:
@@ -1858,12 +1883,14 @@ class AudioVisualAgent:
             external.extend(
                 track for track in source_tracks
                 if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+                and _is_playlist_context_compatible(instruction, track)
             )
 
         library_ranked = sorted(
             [
                 track for track in library
                 if _is_recommendation_quality_track(track, allow_variants=allow_variants)
+                and _is_playlist_context_compatible(instruction, track)
             ],
             key=lambda asset: _playlist_match_score(asset, search_terms),
             reverse=True,
@@ -2675,6 +2702,7 @@ class AudioVisualAgent:
         memory = self.memory.get_memory(user_id)
         memory_query = self.memory.weighted_query(memory, include_artists=False)
         search_goal = _extract_search_query(goal)
+        anchors = _extract_recommendation_anchors(goal)
         has_entity = self._query_has_entity(search_goal)
         taste_summary = self.summarize_taste(user_id, include_artists=has_entity, memory=memory) if memory.taste_profile else ""
         library_artists = list({a.artist for a in self.list_assets() if a.artist})[:10] if has_entity else []
@@ -2692,17 +2720,28 @@ class AudioVisualAgent:
 
         if seed_supply >= top_k:
             trace_lines.append(f"route=seed_candidates, supplied={seed_supply}")
-        elif has_entity:
-            # 路由C：精确搜索（网易云歌曲搜索，这个是OK的）
-            trace_lines.append(f"route=exact, search_goal={search_goal}")
+        elif has_entity or anchors.explicit:
+            # 路由C：精确/锚点搜索。复杂小众 query 不能只拿一条长 search_goal 搜；
+            # 逐个艺人/曲风 seed 召回，再统一去重和重排，避免 long query 召回空或偏移。
+            seeds = _recommendation_search_seeds(search_goal, goal, anchors, search_variants)
+            trace_lines.append(
+                f"route=anchor_exact, search_goal={search_goal}, seeds={len(seeds)}, "
+                f"artists={len(anchors.artists)}, styles={len(anchors.styles)}"
+            )
             # 延续去重时翻页：跳过已展示的那批最热结果，取更深位次新歌，
             # 否则同一查询永远返回 top-N，去重后很快就无新歌可推。
             rec_offset = len(excluded_tracks) if excluded_tracks else 0
-            batch = self.search_web_music(
-                search_goal, top_k=max(top_k * 2, top_k),
-                relevance_query=search_goal, offset=rec_offset, variants=search_variants,
-            )
-            all_candidates.extend(batch)
+            for idx, seed in enumerate(seeds):
+                batch = self.search_web_music(
+                    seed,
+                    top_k=max(top_k, 6),
+                    relevance_query=seed,
+                    offset=rec_offset if idx == 0 else 0,
+                    variants=None,
+                )
+                all_candidates.extend(batch)
+                if len(_dedupe_tracks(all_candidates)) >= max(top_k * 3, top_k):
+                    break
         else:
             # 路由B（优先）：网易云歌单搜索——真人策划歌单，质量最高
             from app.search.netease_playlist import search_and_extract
@@ -2763,7 +2802,7 @@ class AudioVisualAgent:
 
         # 兜底：用 search_goal 再搜一次。带 offset 翻页（已排除 + 已收集数），
         # 否则同查询永远返回 top-N，与首轮 batch 重复，dedup 全跳过、补不了量。
-        if len(verified) < top_k and search_goal:
+        if len(verified) < top_k and search_goal and not anchors.explicit:
             fb_offset = len(excluded_tracks or []) + len(verified)
             fallback_batch = self.search_web_music(
                 search_goal, top_k=max(top_k * 2, top_k), offset=fb_offset,
@@ -2779,11 +2818,20 @@ class AudioVisualAgent:
         # 可播放、不是幻觉。限流是间歇的，今天搜不到的昨天可能已入池。
         # 复用 _dense_library_fallback：它做 semantic→lexical 召回 + 转 ExternalTrack +
         # 按 existing 去重，类型与下游 rerank 兼容。
+        if anchors.explicit:
+            before = len(verified)
+            verified = [track for track in verified if _track_matches_recommendation_anchors(track, anchors)]
+            dropped = before - len(verified)
+            if dropped:
+                trace_lines.append(f"anchor_filter=dropped:{dropped}")
+
         if len(verified) < top_k:
             pool_hits = self._dense_library_fallback(
                 search_goal or goal, verified, limit=max(top_k * 2, top_k),
             )
             pool_hits = [t for t in pool_hits if not self.library.is_disliked(user_id, t)]
+            if anchors.explicit:
+                pool_hits = [t for t in pool_hits if _track_matches_recommendation_anchors(t, anchors)]
             if pool_hits:
                 trace_lines.append(f"route=resource_pool, recalled={len(pool_hits)}")
                 verified.extend(pool_hits)
@@ -3228,6 +3276,147 @@ def _extract_search_query(goal: str) -> str:
     return goal  # 兜底：返回原始 goal
 
 
+@dataclass(frozen=True)
+class RecommendationAnchors:
+    artists: tuple[str, ...] = ()
+    styles: tuple[str, ...] = ()
+    negatives: tuple[str, ...] = ()
+
+    @property
+    def explicit(self) -> bool:
+        return bool(self.artists or self.styles)
+
+
+_KNOWN_RECOMMENDATION_ARTISTS = (
+    "SZA", "Frank Ocean", "Daniel Caesar",
+    "Four Tet", "Jon Hopkins", "Aphex Twin",
+    "Lamp", "小野リサ", "Lisa Ono", "Tomoko Aran", "亜蘭知子",
+    "toe", "Explosions in the Sky", "American Football",
+    "Cocteau Twins", "Slowdive", "Alvvays",
+    "Nujabes", "J Dilla", "Uyama Hiroto",
+)
+
+_RECOMMENDATION_STYLE_ALIASES: dict[str, tuple[str, ...]] = {
+    "R&B": ("r&b", "rnb", "neo-soul", "neo soul", "soul", "节奏布鲁斯"),
+    "ambient techno": ("ambient techno", "ambient", "techno"),
+    "IDM": ("idm", "glitch electronica", "electronica", "glitch"),
+    "city pop": ("city pop", "city-pop", "シティポップ"),
+    "bossa nova": ("bossa nova", "bossa", "巴萨诺瓦"),
+    "post-rock": ("post-rock", "post rock", "后摇"),
+    "math rock": ("math rock", "数学摇滚"),
+    "dream pop": ("dream pop", "dream-pop"),
+    "shoegaze": ("shoegaze", "盯鞋"),
+    "jazz hip-hop": ("jazz hip-hop", "jazz hip hop", "jazzhop", "jazz-hop"),
+    "lo-fi": ("lo-fi", "lofi", "lo fi", "lo-fi beats"),
+    "国风电子": ("国风电子", "国风 电", "中国风 电子", "国风", "中国风"),
+    "future bass": ("future bass", "futurebass"),
+    "Nordic folk": ("nordic folk", "北欧民谣", "北欧 folk"),
+    "ambient folk": ("ambient folk",),
+    "modern classical": ("modern classical", "modern-classical", "neoclassical", "neo classical", "新古典"),
+}
+
+_RECOMMENDATION_STYLE_SEARCH_VARIANTS: dict[str, tuple[str, ...]] = {
+    "R&B": ("R&B", "neo soul", "Frank Ocean", "Daniel Caesar", "SZA"),
+    "ambient techno": ("ambient techno", "Jon Hopkins", "Four Tet"),
+    "IDM": ("IDM", "Aphex Twin", "glitch electronica"),
+    "city pop": ("city pop", "Lamp", "Tomoko Aran", "小野リサ"),
+    "bossa nova": ("bossa nova", "小野リサ", "Lisa Ono"),
+    "post-rock": ("post-rock", "Explosions in the Sky", "toe"),
+    "math rock": ("math rock", "toe", "American Football"),
+    "dream pop": ("dream pop", "Cocteau Twins", "Alvvays"),
+    "shoegaze": ("shoegaze", "Slowdive", "Cocteau Twins"),
+    "jazz hip-hop": ("jazz hip-hop", "Nujabes", "J Dilla"),
+    "lo-fi": ("lo-fi beats", "Nujabes", "Uyama Hiroto"),
+    "国风电子": ("国风电子", "中国风 电子", "徐梦圆"),
+    "future bass": ("future bass", "徐梦圆"),
+    "Nordic folk": ("Nordic folk", "北欧民谣"),
+    "ambient folk": ("ambient folk",),
+    "modern classical": ("modern classical", "neoclassical"),
+}
+
+
+def _extract_recommendation_anchors(query: str) -> RecommendationAnchors:
+    lowered = (query or "").lower()
+    artists: list[str] = []
+    for artist in _KNOWN_RECOMMENDATION_ARTISTS:
+        if artist.lower() in lowered or artist in query:
+            artists.append(artist)
+
+    styles: list[str] = []
+    for style, aliases in _RECOMMENDATION_STYLE_ALIASES.items():
+        if any(alias.lower() in lowered for alias in aliases):
+            styles.append(style)
+
+    negatives: list[str] = []
+    for match in re.finditer(r"(?:不要|别推|不想听|排除|避开)\s*([^，。,.!?！？]{1,24})", query or ""):
+        value = match.group(1).strip()
+        value = re.sub(r"(?:的)?(?:歌曲|音乐|风格|歌)?[吧呀啊啦了呢]*$", "", value).strip()
+        if value:
+            negatives.append(value)
+    return RecommendationAnchors(
+        artists=tuple(dict.fromkeys(artists)),
+        styles=tuple(dict.fromkeys(styles)),
+        negatives=tuple(dict.fromkeys(negatives)),
+    )
+
+
+def _recommendation_search_seeds(
+    search_goal: str,
+    original_query: str,
+    anchors: RecommendationAnchors,
+    upstream_variants: list[str] | None = None,
+) -> list[str]:
+    """Build bounded per-anchor NetEase search seeds for complex niche requests."""
+    seeds: list[str] = []
+
+    def add(value: str) -> None:
+        value = (value or "").strip()
+        if value and value.lower() not in {item.lower() for item in seeds}:
+            seeds.append(value)
+
+    for artist in anchors.artists:
+        add(artist)
+    for style in anchors.styles:
+        for variant in _RECOMMENDATION_STYLE_SEARCH_VARIANTS.get(style, (style,)):
+            add(variant)
+    if anchors.artists and anchors.styles:
+        for artist in anchors.artists[:4]:
+            for style in anchors.styles[:2]:
+                add(f"{artist} {style}")
+    for item in upstream_variants or []:
+        add(item)
+    add(search_goal)
+    if not seeds:
+        add(original_query)
+    return seeds[: max(1, settings.max_search_variants + 8)]
+
+
+def _recommendation_anchor_hits(track: Asset | ExternalTrack, anchors: RecommendationAnchors) -> list[str]:
+    if not anchors.explicit:
+        return []
+    raw = " ".join([
+        getattr(track, "title", "") or "",
+        getattr(track, "artist", "") or "",
+        " ".join(getattr(track, "genre", []) or []),
+        " ".join(getattr(track, "mood", []) or []),
+    ]).lower()
+    normalized = _normalize_match_text(raw)
+    hits: list[str] = []
+    for artist in anchors.artists:
+        key = _normalize_match_text(artist)
+        if key and key in normalized:
+            hits.append(artist)
+    for style in anchors.styles:
+        aliases = _RECOMMENDATION_STYLE_ALIASES.get(style, (style,))
+        if any(_normalize_match_text(alias) and _normalize_match_text(alias) in normalized for alias in aliases):
+            hits.append(style)
+    return list(dict.fromkeys(hits))
+
+
+def _track_matches_recommendation_anchors(track: Asset | ExternalTrack, anchors: RecommendationAnchors) -> bool:
+    return bool(_recommendation_anchor_hits(track, anchors))
+
+
 def _playlist_search_terms(instruction: str) -> str:
     terms = [instruction]
     lowered = instruction.lower()
@@ -3329,6 +3518,72 @@ def _is_recommendation_quality_track(track: Any, *, allow_variants: bool = False
     if descriptor_count >= 3:
         return False
     if len(title) > 38 and descriptor_count >= 2:
+        return False
+    return True
+
+
+_RUNNING_PLAYLIST_TOKENS = ("跑步", "运动", "健身", "慢跑", "夜跑", "running", "workout", "gym", "run ")
+
+_RUNNING_PLAYLIST_ANTI_CONTEXT_PATTERNS = (
+    r"白噪音", r"粉噪音", r"褐噪音", r"助眠", r"催眠", r"睡前", r"睡眠", r"入睡",
+    r"工作学习", r"学习工作", r"学习(?:时|用|专注|必备|音乐)?", r"专注力", r"提高专注",
+    r"放松(?:音乐|催眠|冥想|疗愈)?", r"冥想", r"spa", r"asmr",
+    r"雨声", r"雨水声", r"下雨声", r"雷声", r"雨林", r"自然(?:声|白噪音)",
+    r"高音质.*/.*白噪音", r"睡觉", r"安眠",
+    r"white\s*noise", r"brown\s*noise", r"pink\s*noise", r"sleep(?:ing)?",
+    r"study(?:ing)?", r"focus", r"concentrat(?:e|ion)", r"meditation", r"relax(?:ing|ation)?",
+    r"rain\s*sounds?", r"thunder\s*sounds?", r"lullaby",
+)
+
+_LONG_VIDEO_RECOMMENDATION_MARKERS = (
+    "推荐歌曲", "日推", "一定要带上耳机", "带上耳机", "不能错过", "歌单推荐",
+    "热门推荐", "音乐分享", "高音质", "完整版", "合集", "纯享", "一小时", "1小时",
+)
+
+
+def _is_playlist_context_compatible(instruction: str, track: Any) -> bool:
+    """Reject candidates that are formally valid songs but clash with a scene playlist.
+
+    The generic quality gate answers “does this look recommendable at all?”.  This
+    layer answers “does it obviously violate the current playlist scene?”.  Keep it
+    intentionally conservative: for now we only hard-filter running/workout lists,
+    where sleepy/study/noise candidates are especially damaging.
+    """
+    lowered_instruction = (instruction or "").lower()
+    if not any(token in lowered_instruction for token in _RUNNING_PLAYLIST_TOKENS):
+        return True
+
+    title = (getattr(track, "title", "") or "").strip()
+    artist = (getattr(track, "artist", "") or "").strip()
+    source = (getattr(track, "source", "") or "").lower()
+    candidate_kind = (getattr(track, "candidate_kind", "") or "").lower()
+    lowered_title = title.lower()
+    lowered_artist = artist.lower()
+    combined = f"{lowered_title} {lowered_artist}"
+    compact = re.sub(r"\s+", "", combined)
+
+    if any(re.search(pattern, combined) or re.search(pattern, compact) for pattern in _RUNNING_PLAYLIST_ANTI_CONTEXT_PATTERNS):
+        return False
+
+    # B 站/视频搜索常返回“推荐文案标题”，它们可能包含真实歌曲名，但不是干净的
+    # song candidate。跑步歌单里宁愿少收，也不要混入视频标题噪声。
+    if source in {"bilibili", "youtube"} or candidate_kind in {"video", "compilation"}:
+        prose_like = len(title) > 24 or any(mark in title for mark in _LONG_VIDEO_RECOMMENDATION_MARKERS)
+        if prose_like and any(mark in title for mark in _LONG_VIDEO_RECOMMENDATION_MARKERS):
+            return False
+
+    title_compact = re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", lowered_title)
+    artist_compact = re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", lowered_artist)
+    generic_scene_names = {
+        "工作学习时听的音乐提高专注力",
+        "工作学习时听的音乐",
+        "提高专注力",
+        "雨林下雨声自然白噪音工作学习睡觉",
+        "高音质白噪音雨水声雷声放松催眠学习睡前音乐工作学习必备",
+        "纯音乐馆",
+        "休闲音乐",
+    }
+    if title_compact in generic_scene_names or artist_compact in generic_scene_names:
         return False
     return True
 

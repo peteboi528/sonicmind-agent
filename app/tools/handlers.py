@@ -148,6 +148,13 @@ def install_default_handlers() -> None:
         "playlist": _playlist,
         "taste": _taste,
         "taste_experiment": _taste_experiment,
+        "resolve_music_entity": _resolve_music_entity,
+        "music_metadata_lookup": _music_metadata_lookup,
+        "review_search": _review_search,
+        "build_music_dossier": _build_music_dossier,
+        "sample_relation_search": _sample_relation_search,
+        "locate_sample_sources": _locate_sample_sources,
+        "build_sample_dossier": _build_sample_dossier,
         "web_music_search": _web_music_search,
         "artist_albums": _artist_albums,
         "similar_artists": _similar_artists,
@@ -265,6 +272,210 @@ def _taste_experiment(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     result.cards = cards
     result.status = ToolStatus.OK if cards else ToolStatus.EMPTY
     return result
+
+
+def _knowledge_entities_from_prior(ctx: ToolContext) -> list[Any]:
+    from app.models import MusicEntity
+
+    for result in reversed(ctx.prior_results or []):
+        if result.get("type") == "music_entity_resolution":
+            return [MusicEntity.model_validate(item) for item in result.get("entities", [])]
+    return []
+
+
+def _resolve_music_entity(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.knowledge import resolve_music_entities
+
+    plan = ctx.plan or {}
+    intent = str(args.get("intent") or plan.get("intent") or "")
+    entities = resolve_music_entities(args.get("query") or ctx.query, intent, plan)
+    data = {
+        "type": "music_entity_resolution",
+        "entities": [entity.model_dump(mode="json") for entity in entities],
+        "partial": not bool(entities),
+    }
+    summary = f"解析到 {len(entities)} 个音乐实体。" if entities else "未能稳定解析音乐实体。"
+    return ToolResult(tool="resolve_music_entity", status=ToolStatus.OK if entities else ToolStatus.EMPTY, data=data, summary=summary)
+
+
+def _music_metadata_lookup(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.knowledge import lookup_metadata, resolve_music_entities
+
+    plan = ctx.plan or {}
+    entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(args.get("query") or ctx.query, str(plan.get("intent") or ""), plan)
+    payload = lookup_metadata(ctx.agent, entities, ctx.deadline_at)
+    data = {
+        "type": "music_metadata",
+        "entities": [entity.model_dump(mode="json") for entity in entities],
+        **payload,
+    }
+    skipped = payload.get("skipped_due_to_deadline") or []
+    status = ToolStatus.EMPTY if skipped or not (payload.get("metadata") or payload.get("tracks") or payload.get("citations")) else ToolStatus.OK
+    summary = "资料查询因时间预算不足被跳过。" if skipped else f"获取 {len(payload.get('citations') or [])} 条资料来源。"
+    return ToolResult(tool="music_metadata_lookup", status=status, data=data, summary=summary)
+
+
+def _review_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.knowledge import resolve_music_entities, search_reviews
+
+    plan = ctx.plan or {}
+    entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(args.get("query") or ctx.query, str(plan.get("intent") or ""), plan)
+    payload = search_reviews(entities, ctx.deadline_at)
+    data = {
+        "type": "review_search",
+        "entities": [entity.model_dump(mode="json") for entity in entities],
+        **payload,
+    }
+    skipped = payload.get("skipped_due_to_deadline") or []
+    status = ToolStatus.EMPTY if skipped or not payload.get("citations") else ToolStatus.OK
+    summary = "乐评搜索因时间预算不足被跳过。" if skipped else f"获取 {len(payload.get('citations') or [])} 条乐评来源。"
+    return ToolResult(tool="review_search", status=status, data=data, summary=summary)
+
+
+def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.knowledge import build_dossier, dossier_answer, resolve_music_entities
+    from app.models import MusicCitation, MusicEntity, ReviewOpinion, TrackRef
+
+    plan = ctx.plan or {}
+    query = args.get("query") or ctx.query
+    intent = str(plan.get("intent") or "")
+    entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(query, intent, plan)
+    metadata: list[dict[str, Any]] = []
+    metadata_citations: list[MusicCitation] = []
+    review_citations: list[MusicCitation] = []
+    opinions: list[ReviewOpinion] = []
+    tracks: list[TrackRef] = []
+    skipped: list[str] = []
+    for result in ctx.prior_results or []:
+        if result.get("type") == "music_metadata":
+            metadata.extend(result.get("metadata") or [])
+            metadata_citations.extend(MusicCitation.model_validate(item) for item in result.get("citations", []) or [])
+            tracks.extend(TrackRef.model_validate(item) for item in result.get("tracks", []) or [])
+            skipped.extend(result.get("skipped_due_to_deadline") or [])
+        elif result.get("type") == "review_search":
+            review_citations.extend(MusicCitation.model_validate(item) for item in result.get("citations", []) or [])
+            opinions.extend(ReviewOpinion.model_validate(item) for item in result.get("opinions", []) or [])
+            skipped.extend(result.get("skipped_due_to_deadline") or [])
+        elif result.get("type") == "music_entity_resolution" and not entities:
+            entities = [MusicEntity.model_validate(item) for item in result.get("entities", []) or []]
+    dossier = build_dossier(
+        ctx.agent, query, intent, entities, metadata, metadata_citations,
+        review_citations, opinions, tracks, ctx.deadline_at, skipped,
+    )
+    data = {
+        "type": "music_dossier",
+        "dossier": dossier.model_dump(mode="json"),
+        "answer": dossier_answer(dossier),
+    }
+    return ToolResult(
+        tool="build_music_dossier",
+        status=ToolStatus.OK,
+        data=data,
+        summary="生成音乐档案。" + ("（部分资料降级）" if dossier.partial else ""),
+        provenance=[{"source": c.source, "url": c.url, "kind": c.kind} for c in dossier.citations],
+    )
+
+
+def _sample_target_from_prior(ctx: ToolContext):
+    from app.models import TrackRef
+
+    for result in reversed(ctx.prior_results or []):
+        if result.get("type") == "sample_relation_search" and result.get("target"):
+            return TrackRef.model_validate(result.get("target"))
+    return None
+
+
+def _sample_evidence_from_prior(ctx: ToolContext):
+    from app.models import SampleEvidence
+
+    evidence = []
+    for result in ctx.prior_results or []:
+        if result.get("type") == "sample_relation_search":
+            evidence.extend(SampleEvidence.model_validate(item) for item in result.get("evidence", []) or [])
+    return evidence
+
+
+def _sample_relations_from_prior(ctx: ToolContext):
+    from app.models import SampleRelation
+
+    relations = []
+    for result in ctx.prior_results or []:
+        if result.get("type") == "locate_sample_sources":
+            relations.extend(SampleRelation.model_validate(item) for item in result.get("relations", []) or [])
+    return relations
+
+
+def _sample_cards_from_prior(ctx: ToolContext) -> list[dict[str, Any]]:
+    cards: list[dict[str, Any]] = []
+    for result in ctx.prior_results or []:
+        if result.get("type") == "locate_sample_sources":
+            cards.extend(result.get("source_cards", []) or [])
+    return cards
+
+
+def _sample_relation_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.knowledge import resolve_music_entities, search_sample_relations
+
+    plan = ctx.plan or {}
+    query = args.get("query") or ctx.query
+    entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(query, "sample_lookup", plan)
+    payload = search_sample_relations(entities, query, ctx.deadline_at)
+    data = {"type": "sample_relation_search", **payload}
+    skipped = payload.get("skipped_due_to_deadline") or []
+    evidence = payload.get("evidence") or []
+    status = ToolStatus.EMPTY if skipped or not evidence else ToolStatus.OK
+    summary = "采样关系搜索因时间预算不足被跳过。" if skipped else f"获取 {len(evidence)} 条采样证据。"
+    return ToolResult(tool="sample_relation_search", status=status, data=data, summary=summary)
+
+
+def _locate_sample_sources(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.knowledge import locate_sample_sources, resolve_music_entities, search_sample_relations
+    from app.models import SampleEvidence, TrackRef
+
+    plan = ctx.plan or {}
+    query = args.get("query") or ctx.query
+    target = _sample_target_from_prior(ctx)
+    evidence = _sample_evidence_from_prior(ctx)
+    if target is None:
+        entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(query, "sample_lookup", plan)
+        payload = search_sample_relations(entities, query, ctx.deadline_at)
+        target = TrackRef.model_validate(payload.get("target") or {"title": query})
+        evidence = [SampleEvidence.model_validate(item) for item in payload.get("evidence", []) or []]
+    payload = locate_sample_sources(ctx.agent, target, evidence, ctx.deadline_at)
+    data = {"type": "locate_sample_sources", "target": target.model_dump(mode="json"), **payload}
+    skipped = payload.get("skipped_due_to_deadline") or []
+    status = ToolStatus.EMPTY if skipped or not payload.get("relations") else ToolStatus.OK
+    summary = "源曲定位因时间预算不足被跳过。" if skipped else f"定位 {len(payload.get('source_cards') or [])} 个源曲候选。"
+    return ToolResult(tool="locate_sample_sources", status=status, data=data, summary=summary, cards=payload.get("source_cards") or [])
+
+
+def _build_sample_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.knowledge import build_sample_dossier, sample_dossier_answer
+    from app.models import TrackRef
+
+    target = _sample_target_from_prior(ctx) or TrackRef(title=args.get("query") or ctx.query, source="query")
+    evidence = _sample_evidence_from_prior(ctx)
+    relations = _sample_relations_from_prior(ctx)
+    cards = _sample_cards_from_prior(ctx)
+    skipped: list[str] = []
+    for result in ctx.prior_results or []:
+        skipped.extend(result.get("skipped_due_to_deadline") or [])
+    dossier = build_sample_dossier(target, evidence, relations, cards, skipped)
+    data = {
+        "type": "sample_dossier",
+        "sample_dossier": dossier.model_dump(mode="json"),
+        "sample_relations": [rel.model_dump(mode="json") for rel in dossier.relations],
+        "source_cards": cards,
+        "answer": sample_dossier_answer(dossier),
+    }
+    return ToolResult(
+        tool="build_sample_dossier",
+        status=ToolStatus.OK if dossier.relations else ToolStatus.EMPTY,
+        data=data,
+        summary="生成采样溯源结果。" + ("（部分资料降级）" if dossier.partial else ""),
+        cards=cards,
+        provenance=[{"source": ev.source, "url": ev.url, "confidence": ev.confidence} for ev in dossier.citations],
+    )
 
 
 def _web_music_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -403,7 +614,11 @@ def _import_netease_playlist(args: dict[str, Any], ctx: ToolContext) -> ToolResu
 
 def _journey(_args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     from app.models import ExternalTrack
-    journey = ctx.agent.generate_music_journey(ctx.user_id, ctx.query)
+    target_count = (ctx.plan or {}).get("target_count") if isinstance(ctx.plan, dict) else None
+    if target_count:
+        journey = ctx.agent.generate_music_journey(ctx.user_id, ctx.query, target_count=target_count)
+    else:
+        journey = ctx.agent.generate_music_journey(ctx.user_id, ctx.query)
     tracks = [ExternalTrack.model_validate(track) for phase in journey.get("phases", []) for track in phase.get("tracks", [])]
     result = _result("journey", {"type": "journey", "journey": journey}, f"生成 {len(journey.get('phases', []))} 个阶段、{len(tracks)} 首曲目。", tracks, expects_tracks=True)
     phase_reasons = [(phase["name"], phase["goal"]) for phase in journey.get("phases", []) for _ in phase.get("tracks", [])]

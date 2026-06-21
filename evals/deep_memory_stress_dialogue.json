@@ -1,0 +1,197 @@
+{
+  "name": "深压力测试：杂库下的画像污染、纠正反转与长程稳定性",
+  "user_id": "deep-memory-stress-user",
+  "library": "large_messy",
+  "description": "在 large_messy 候选库（150+首横跨9流派，含SEO垃圾/标签错乱/缺标签/同名不同人）下，跨5会话约34轮。相较 stress_memory 新增更难的陷阱：(1)复合句多偏好叠加+句内一次性修饰；(2)反讽/反问式假阳性（'谁还听X啊'不该写成喜欢X）；(3)双重否定；(4)条件偏好（工作时/约会时各不同）不该升级成全局排除；(5)纠正后再反转（flip-flop：撤回后又重新喜欢）——验证旧排除是否还在造成画像自相矛盾；(6)幂等纠正（撤回从没喜欢过的东西）不崩；(7)跨会话短期实体泄漏；(8)深度去重/翻页（连续6次'再来'）；(9)杂库下音乐旅程/歌单不空不崩；(10)展示≠喜欢，SEO/错标歌手不进画像。诚实记录：部分断言预期暴露已知/新增缺口。",
+  "turns": [
+    {
+      "session": "s1_onboarding",
+      "message": "我长期就吃深夜 R&B 这一套，越有空间感越好。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["R&B"], "episode_contains": ["空间感"]},
+      "rationale": "建立第一条稳定长期偏好，作为后续 34 轮的画像基底。"
+    },
+    {
+      "session": "s1_onboarding",
+      "message": "我也喜欢 deep house，但今晚工作别给我太吵的。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["deep house"], "exclusion_not_contains": ["太吵"]},
+      "rationale": "复合句：正偏好 deep house 要留；'今晚…别太吵'是一次性(今晚)+句内修饰，不该升级成长期排除'太吵'。"
+    },
+    {
+      "session": "s1_onboarding",
+      "message": "顺便说一句，谁还听抖音神曲啊，太掉价了。",
+      "expect": {"answer_non_empty": true, "positive_not_contains": ["抖音神曲"]},
+      "rationale": "反问/反讽式表达不含'喜欢'，绝不能被抽成正偏好'抖音神曲'；理想上也别误当成长期排除（语气而非指令）。"
+    },
+    {
+      "session": "s1_onboarding",
+      "message": "说真的，别再给我推抖音神曲了。",
+      "expect": {"answer_non_empty": true, "exclusion_contains": ["抖音神曲"]},
+      "rationale": "这才是明确的长期排除指令（别再…了），应落排除规则。"
+    },
+    {
+      "session": "s1_onboarding",
+      "message": "这轮想要点能专注写代码的，别太催眠。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_not_contains": ["催眠", "专注"]},
+      "rationale": "一次性(这轮)+句内修饰(别太催眠)都不入长期排除；'专注'是场景不是偏好。"
+    },
+    {
+      "session": "s1_onboarding",
+      "message": "再来几首，不要刚才那批。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "shown_tracks_min": 2, "exclusion_not_contains": ["刚才"]},
+      "rationale": "一次性指代(刚才那批)不入长期排除；翻页去重要出新歌。"
+    },
+    {
+      "session": "s1_onboarding",
+      "message": "工作时我要纯音乐，约会时才要 R&B 人声。",
+      "expect": {"answer_non_empty": true, "exclusion_not_contains": ["人声", "纯音乐"]},
+      "rationale": "条件偏好（场景各异）不该被截成全局排除'人声'或全局正偏好'纯音乐'，否则后续推荐被错误约束。"
+    },
+    {
+      "session": "s2_correction",
+      "message": "先分析下你现在记得的我的口味。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["R&B"], "exclusion_contains": ["抖音神曲"]},
+      "rationale": "跨会话长期记忆稳定：R&B 在、抖音神曲排除在。"
+    },
+    {
+      "session": "s2_correction",
+      "message": "我现在其实不喜欢 deep house 了，那条偏好删掉。",
+      "expect": {"answer_non_empty": true, "positive_not_contains": ["deep house"], "exclusion_contains": ["deep house"]},
+      "rationale": "纠正：删冲突正偏好 deep house，落一条排除，不'喜欢/不喜欢'并存。"
+    },
+    {
+      "session": "s2_correction",
+      "message": "其实算了，我又开始喜欢 deep house 了，挺好的。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["deep house"], "exclusion_not_contains": ["deep house"]},
+      "rationale": "FLIP-FLOP 重点探针：撤回后又重新喜欢，正偏好应回归且旧排除应被清掉，否则画像自相矛盾（喜欢却又被排除）。预期暴露缺口。"
+    },
+    {
+      "session": "s2_correction",
+      "message": "把我从没说过的 trap 那条也取消吧。",
+      "expect": {"answer_non_empty": true},
+      "rationale": "幂等/空操作纠正：撤回从未存在的偏好不应崩溃、不应误造排除矛盾。"
+    },
+    {
+      "session": "s2_correction",
+      "message": "我现在超爱慵懒爵士，尤其有铜管但鼓别太炸。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["爵士"], "exclusion_not_contains": ["太炸"]},
+      "rationale": "句内生成约束(鼓别太炸)不该被粗粒度正则截成长期排除'太炸'。"
+    },
+    {
+      "session": "s2_correction",
+      "message": "这周在跑步，临时来点高能量电子，但还是不要抖音神曲。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_contains": ["抖音神曲"], "exclusion_not_contains": ["高能量电子"]},
+      "rationale": "一次性(这周/临时)不入长期；复述强化的'不要抖音神曲'保留；'高能量电子'是临时需求不是排除。"
+    },
+    {
+      "session": "s3_leakage",
+      "message": "找 Radiohead 的歌。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "dialogue_entities_contains": ["Radiohead"]},
+      "rationale": "显式实体搜索，进短期对话实体。"
+    },
+    {
+      "session": "s3_leakage",
+      "message": "这轮换点国风的，不要刚才那些英伦摇滚。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_not_contains": ["英伦", "刚才"], "positive_contains": ["国风"]},
+      "rationale": "一次性(这轮/刚才)不入长期；国风作为新长期偏好应被记住。预期暴露 positive_contains 国风 缺口（mock 无 LLM 抽取）。"
+    },
+    {
+      "session": "s3_leakage",
+      "message": "不喜欢刚才那个国风了，太老气，换回现代的。",
+      "expect": {"answer_non_empty": true, "exclusion_not_contains": ["老气", "现代"], "positive_not_contains": ["国风"]},
+      "rationale": "纠正删国风正偏好；句内'太老气'/'换回现代'不入排除。预期暴露排除污染缺口（贪婪纠正正则吞整句）。"
+    },
+    {
+      "session": "s3_leakage",
+      "message": "顺便介绍一下坂本龙一的背景。",
+      "expect": {"answer_non_empty": true, "positive_not_contains": ["坂本龙一"]},
+      "rationale": "artist_info 话题插入不应把被介绍的艺术家写成音乐正偏好。"
+    },
+    {
+      "session": "s3_leakage",
+      "message": "那按我现在的口味，给今晚回家路上来几首。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "positive_contains": ["R&B"]},
+      "rationale": "国风已移除、deep house 反转后状态待定，R&B 仍是稳定基底，推荐应回到 R&B。"
+    },
+    {
+      "session": "s4_dedup_depth",
+      "message": "推荐几首适合我现在心情的。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "dialogue_entities_not_contains": ["Radiohead"]},
+      "rationale": "新会话不应无限继承上一会话短期实体 Radiohead。"
+    },
+    {
+      "session": "s4_dedup_depth",
+      "message": "再来几首，别重复。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "shown_tracks_min": 2}
+    },
+    {
+      "session": "s4_dedup_depth",
+      "message": "再来几首。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "shown_tracks_min": 4}
+    },
+    {
+      "session": "s4_dedup_depth",
+      "message": "再来。",
+      "expect": {"answer_non_empty": true, "shown_tracks_min": 5}
+    },
+    {
+      "session": "s4_dedup_depth",
+      "message": "继续，还要新的。",
+      "expect": {"answer_non_empty": true, "shown_tracks_min": 6},
+      "rationale": "深度翻页：连续追加后 shown_tracks 单调增长，验证去重不卡死、不返空。杂库容量足以支撑多轮去重。"
+    },
+    {
+      "session": "s4_dedup_depth",
+      "message": "再来几首，要跟前面都不一样的。",
+      "expect": {"answer_non_empty": true, "shown_tracks_min": 7},
+      "rationale": "第六次追加，压测去重池耗尽前的稳定性。"
+    },
+    {
+      "session": "s5_stability",
+      "message": "我平时就喜欢 R&B 和深夜 lo-fi 氛围。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["R&B"]},
+      "rationale": "长期偏好跨第五个会话仍稳定。"
+    },
+    {
+      "session": "s5_stability",
+      "message": "做 12 首的跑步歌单。",
+      "expect": {"answer_non_empty": true, "tracks_min": 5},
+      "rationale": "杂库下歌单生成不崩、不空。"
+    },
+    {
+      "session": "s5_stability",
+      "message": "这轮不要太吵的中文歌，英文或纯音乐都行。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_not_contains": ["中文歌", "太吵"]},
+      "rationale": "一次性(这轮)+语言/响度约束不入长期排除。"
+    },
+    {
+      "session": "s5_stability",
+      "message": "其实把之前所有关于 city pop 的都忘了吧，我早就不喜欢了。",
+      "expect": {"answer_non_empty": true, "positive_not_contains": ["city pop"]},
+      "rationale": "幂等纠正：本场景从未喜欢过 city pop，撤回不应造成画像异常或崩溃。"
+    },
+    {
+      "session": "s5_stability",
+      "message": "来个从放松到激昂的音乐旅程。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1},
+      "rationale": "杂库下音乐旅程不空不崩。预期可能暴露分段召回返空缺口（与 stress_memory Turn 23 同源）。"
+    },
+    {
+      "session": "s5_stability",
+      "message": "把这个旅程扩成 20 首的完整歌单。",
+      "expect": {"answer_non_empty": true, "tracks_min": 5},
+      "rationale": "大规模歌单在杂库下不崩；容量超过单流派曲目数，验证跨流派召回。"
+    },
+    {
+      "session": "s5_stability",
+      "message": "再确认一次我的长期口味。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["R&B"], "positive_not_contains": ["抖音神曲", "太吵", "催眠", "老气"]},
+      "rationale": "经历 30+ 轮纠正/反转/一次性约束后，画像只剩真长期偏好，未被任何一次性/句内修饰词污染。"
+    },
+    {
+      "session": "s5_stability",
+      "message": "最后再给我几首深夜 R&B 收尾。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "positive_contains": ["R&B"]},
+      "rationale": "全程压力后 R&B 基底依然稳定、推荐不崩。"
+    }
+  ]
+}

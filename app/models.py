@@ -412,6 +412,89 @@ class TrackRef(BaseModel):
     components: dict[str, float] = Field(default_factory=dict)
 
 
+class MusicEntity(BaseModel):
+    type: Literal["artist", "album", "track", "genre"] = "artist"
+    name: str
+    artist: str = ""
+    aliases: list[str] = Field(default_factory=list)
+    external_ids: dict[str, str] = Field(default_factory=dict)
+    image: str = ""
+    source: str = "unknown"
+
+
+class MusicCitation(BaseModel):
+    source: str = "unknown"
+    title: str = ""
+    url: str = ""
+    author: str = ""
+    published_at: str = ""
+    kind: Literal["metadata", "review", "encyclopedia", "platform", "user_comment"] = "metadata"
+    excerpt: str = ""
+    confidence: float = Field(default=0.5, ge=0, le=1)
+
+
+class ReviewOpinion(BaseModel):
+    source: str = ""
+    rating: str = ""
+    sentiment: Literal["positive", "mixed", "negative", "unknown"] = "unknown"
+    aspects: list[Literal["production", "lyrics", "vocal", "concept", "influence", "replay_value"]] = Field(default_factory=list)
+    summary: str = ""
+    citation_id: int | None = None
+
+
+class MusicDossier(BaseModel):
+    entity: MusicEntity
+    summary: str = ""
+    background: str = ""
+    style_tags: list[str] = Field(default_factory=list)
+    critical_consensus: str = ""
+    audience_reception: str = ""
+    key_tracks: list[TrackRef] = Field(default_factory=list)
+    listening_guide: list[str] = Field(default_factory=list)
+    related_entities: list[MusicEntity] = Field(default_factory=list)
+    citations: list[MusicCitation] = Field(default_factory=list)
+    review_opinions: list[ReviewOpinion] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    partial: bool = False
+    degraded_reason: str | None = None
+
+
+class KnowledgeEvidencePack(BaseModel):
+    facts: list[str] = Field(default_factory=list)
+    critic_points: list[str] = Field(default_factory=list)
+    sound_descriptors: list[str] = Field(default_factory=list)
+    theme_descriptors: list[str] = Field(default_factory=list)
+    disagreements: list[str] = Field(default_factory=list)
+    source_quality: dict[str, str] = Field(default_factory=dict)
+
+
+class SampleEvidence(BaseModel):
+    source: str = "unknown"
+    title: str = ""
+    url: str = ""
+    excerpt: str = ""
+    confidence: float = Field(default=0.4, ge=0, le=1)
+    source_tier: Literal["A", "B", "C"] = "C"
+
+
+class SampleRelation(BaseModel):
+    target_track: TrackRef
+    source_track: TrackRef
+    relation_type: Literal["sample", "interpolation", "cover", "remix", "reference", "unknown"] = "unknown"
+    confidence: float = Field(default=0.4, ge=0, le=1)
+    evidence: list[int] = Field(default_factory=list)
+    note: str = ""
+
+
+class SampleDossier(BaseModel):
+    target: TrackRef
+    relations: list[SampleRelation] = Field(default_factory=list)
+    source_track_cards: list[dict[str, Any]] = Field(default_factory=list)
+    citations: list[SampleEvidence] = Field(default_factory=list)
+    partial: bool = False
+    degraded_reason: str | None = None
+
+
 class TasteExperimentFeedback(BaseModel):
     completed: int = 0
     skipped: int = 0
@@ -464,7 +547,7 @@ class TasteExperiment(BaseModel):
 class StreamEvent(BaseModel):
     type: Literal[
         "plan", "thinking", "tool_start", "tool_result", "candidates",
-        "song_card", "album_card", "artist_card", "eval", "token", "final", "guard", "error",
+        "song_card", "album_card", "artist_card", "dossier", "sample_relations", "eval", "token", "final", "guard", "error",
         "checkpoint", "confirmation_required", "resumed", "refine",
     ]
     content: str = ""

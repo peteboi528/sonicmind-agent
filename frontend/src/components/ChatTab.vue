@@ -20,10 +20,10 @@ let threadId = newThreadId();
 
 const QUICK = [
   { text: "🎵 推荐几首适合深夜的歌", prompt: "推荐几首适合深夜的歌" },
+  { text: "💿 讲讲 Blonde 这张专辑", prompt: "讲讲 Blonde 这张专辑，乐评怎么说？" },
+  { text: "🧭 The Weeknd 音乐路线", prompt: "The Weeknd 的音乐路线是什么？" },
   { text: "🧪 推荐点不一样的", prompt: "推荐点不一样的，做个品味实验" },
   { text: "🏃 帮我做 20 首跑步歌单", prompt: "帮我做 20 首跑步歌单" },
-  { text: "🔍 找 The Weeknd 的歌", prompt: "找 The Weeknd 的歌" },
-  { text: "🌅 清晨到深夜的音乐旅程", prompt: "做一个清晨到深夜的音乐旅程" },
 ];
 
 function scrollDown() {
@@ -31,7 +31,7 @@ function scrollDown() {
 }
 
 function toast(text) {
-  messages.value.push({ id: ++msgId, role: "bot", text, cards: [], albums: [], traceSummary: null, tasteExperiment: null });
+  messages.value.push({ id: ++msgId, role: "bot", text, cards: [], albums: [], traceSummary: null, tasteExperiment: null, dossier: null });
   scrollDown();
 }
 
@@ -89,6 +89,8 @@ function saveToStorage() {
           track_count: a.track_count, tracks: a.tracks || [], saved: !!a.saved,
         })),
         artists: m.artists || [],
+        dossier: m.dossier || null,
+        sampleDossier: m.sampleDossier || null,
         traceSummary: m.traceSummary || null,
         tasteExperiment: m.tasteExperiment || null,
         pendingActions: m.pendingActions || [],
@@ -112,6 +114,8 @@ function loadFromStorage() {
         cards: m.cards || [],
         albums: (m.albums || []).map(a => ({ ...a, loading: false, saving: false })),
         artists: m.artists || [],
+        dossier: m.dossier || null,
+        sampleDossier: m.sampleDossier || null,
         traceSummary: m.traceSummary || null,
         tasteExperiment: m.tasteExperiment || null,
       }));
@@ -240,7 +244,7 @@ async function send(text) {
   // 必须用 reactive：后续 candidates/song_card/final 事件会持续 push/splice botMsg.cards，
   // 若是普通对象，这些改动绕过响应式代理、Vue 检测不到，导致流式阶段只显示第一个
   // candidates 批次（约 5 张），final 的完整列表不刷新——只能靠刷新页面从 storage 重建。
-  const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [], albums: [], artists: [], traceSummary: null, tasteExperiment: null, pendingActions: [] });
+  const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [], albums: [], artists: [], dossier: null, sampleDossier: null, traceSummary: null, tasteExperiment: null, pendingActions: [] });
   let finalText = "";
   abortController = new AbortController();
 
@@ -270,6 +274,18 @@ async function send(text) {
           botMsg.artists.push(event.payload || {});
           if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
           scrollDown();
+        } else if (event.type === "dossier") {
+          botMsg.dossier = event.payload?.dossier || event.payload || null;
+          if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
+          scrollDown();
+        } else if (event.type === "sample_relations") {
+          botMsg.sampleDossier = event.payload?.sample_dossier || event.payload || null;
+          const sourceCards = event.payload?.source_cards || [];
+          if (Array.isArray(sourceCards) && sourceCards.length) {
+            botMsg.cards.splice(0, botMsg.cards.length, ...sourceCards);
+          }
+          if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
+          scrollDown();
         } else if (event.type === "token") {
           // 真流式：答案正文边生成边追加。首 token 清掉「思考中」，并把气泡入列（chat 等无候选卡片的意图靠这里首次出现）。
           if (thinking.value) thinking.value = "";
@@ -285,6 +301,8 @@ async function send(text) {
           }
           botMsg.traceSummary = event.payload?.trace_summary || null;
           botMsg.tasteExperiment = event.payload?.taste_experiment || botMsg.tasteExperiment;
+          botMsg.dossier = event.payload?.dossier || botMsg.dossier;
+          botMsg.sampleDossier = event.payload?.sample_dossier || botMsg.sampleDossier;
           if (Array.isArray(event.payload?.artists)) botMsg.artists.splice(0, botMsg.artists.length, ...event.payload.artists);
         } else if (event.type === "confirmation_required") {
           botMsg.pendingActions.push({ ...event.payload, text: event.content, resolved: false });
@@ -406,6 +424,68 @@ function onKey(e) {
                 </div>
                 <small>已保存到“实验室”，可以在那里播放整列、打反馈并生成报告。</small>
               </div>
+              <div v-if="m.dossier" class="dossier-card" :class="{ partial: m.dossier.partial }">
+                <div class="dossier-head">
+                  <div>
+                    <span class="dossier-kicker">{{ m.dossier.entity?.type || "music" }}</span>
+                    <h3>{{ m.dossier.entity?.name || "音乐档案" }}</h3>
+                    <p v-if="m.dossier.entity?.artist">{{ m.dossier.entity.artist }}</p>
+                  </div>
+                  <img v-if="m.dossier.entity?.image" :src="m.dossier.entity.image" alt="" loading="lazy" />
+                  <div v-else class="dossier-disc">◎</div>
+                </div>
+                <div v-if="m.dossier.partial" class="dossier-warning">
+                  资料不完整：{{ m.dossier.degraded_reason || "部分来源在时间预算内未返回" }}
+                </div>
+                <p v-if="m.dossier.summary" class="dossier-summary">{{ m.dossier.summary }}</p>
+                <div v-if="m.dossier.style_tags?.length" class="dossier-tags">
+                  <span v-for="tag in m.dossier.style_tags.slice(0, 8)" :key="tag">{{ tag }}</span>
+                </div>
+                <div v-if="m.dossier.critical_consensus" class="review-consensus">
+                  <strong>乐评/资料共识</strong>
+                  <p>{{ m.dossier.critical_consensus }}</p>
+                </div>
+                <div v-if="m.dossier.listening_guide?.length" class="listening-guide">
+                  <strong>聆听路线</strong>
+                  <ol>
+                    <li v-for="item in m.dossier.listening_guide.slice(0, 4)" :key="item">{{ item }}</li>
+                  </ol>
+                </div>
+                <div v-if="m.dossier.citations?.length" class="citation-list">
+                  <strong>来源</strong>
+                  <a v-for="(c, idx) in m.dossier.citations.slice(0, 6)" :key="(c.url || c.title || c.source || 'citation') + '-' + idx" :href="c.url || '#'" target="_blank" rel="noreferrer">
+                    <span>{{ c.kind }}</span>{{ c.title || c.source || c.url }}
+                  </a>
+                </div>
+              </div>
+              <div v-if="m.sampleDossier" class="sample-card" :class="{ partial: m.sampleDossier.partial }">
+                <div class="sample-head">
+                  <span>Sample Trace</span>
+                  <strong>{{ m.sampleDossier.target?.title || "采样溯源" }}</strong>
+                </div>
+                <div v-if="m.sampleDossier.partial" class="sample-warning">
+                  资料不完整：{{ m.sampleDossier.degraded_reason || "部分来源未能确认" }}
+                </div>
+                <div v-if="m.sampleDossier.relations?.length" class="sample-relations">
+                  <div v-for="(rel, idx) in m.sampleDossier.relations" :key="idx" class="sample-relation">
+                    <div class="sample-type">{{ rel.relation_type || "unknown" }} · {{ Math.round((rel.confidence || 0) * 100) }}%</div>
+                    <div class="sample-title">
+                      <span>{{ rel.target_track?.title || "目标曲" }}</span>
+                      <em>←</em>
+                      <strong>{{ rel.source_track?.title || "未知源曲" }}</strong>
+                    </div>
+                    <p v-if="rel.source_track?.artist">{{ rel.source_track.artist }}</p>
+                    <small v-if="rel.note">{{ rel.note }}</small>
+                  </div>
+                </div>
+                <div v-else class="sample-empty">没有找到可核实采样关系，我不会硬编源曲。</div>
+                <div v-if="m.sampleDossier.citations?.length" class="citation-list">
+                  <strong>采样证据</strong>
+                  <a v-for="(c, idx) in m.sampleDossier.citations.slice(0, 6)" :key="(c.url || c.title || c.source || 'sample') + '-' + idx" :href="c.url || '#'" target="_blank" rel="noreferrer">
+                    <span>{{ c.source_tier || "C" }} · {{ c.source }}</span>{{ c.title || c.url }}
+                  </a>
+                </div>
+              </div>
               <details v-if="m.traceSummary" class="trace-summary">
                 <summary>决策摘要</summary>
                 <div class="trace-grid">
@@ -419,6 +499,7 @@ function onKey(e) {
                   <span v-if="m.traceSummary.tool_error_details?.length">错误详情</span><strong v-if="m.traceSummary.tool_error_details?.length">{{ m.traceSummary.tool_error_details.map(item => `${item.tool}: ${item.message}`).join("；") }}</strong>
                   <span>来源</span><strong>{{ (m.traceSummary.sources || []).join(" / ") || "无候选来源" }}</strong>
                   <span>卡片</span><strong>{{ m.traceSummary.final_cards }}</strong>
+                  <span v-if="m.traceSummary.latency_budget">耗时预算</span><strong v-if="m.traceSummary.latency_budget">{{ m.traceSummary.latency_budget.elapsed_seconds }}s / {{ m.traceSummary.latency_budget.budget_seconds }}s<span v-if="m.traceSummary.latency_budget.partial"> · 部分降级</span></strong>
                 </div>
               </details>
               <div v-if="m.cards.length" class="cards">
@@ -715,6 +796,239 @@ function onKey(e) {
 
 .taste-preview small {
   color: var(--text-muted);
+  line-height: 1.45;
+}
+
+.dossier-card {
+  margin-top: 12px;
+  width: min(100%, 660px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, rgba(255,255,255,0.055), rgba(255,255,255,0.025));
+  padding: 14px;
+}
+
+.dossier-card.partial {
+  border-color: rgba(245, 166, 35, 0.35);
+}
+
+.dossier-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.dossier-kicker {
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-family: var(--font-display);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.dossier-head h3 {
+  font-family: var(--font-display);
+  font-size: 1.08rem;
+  margin: 3px 0;
+}
+
+.dossier-head p {
+  color: var(--text-sub);
+  font-size: 0.84rem;
+}
+
+.dossier-head img,
+.dossier-disc {
+  width: 58px;
+  height: 58px;
+  border-radius: 12px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: var(--bg-elevated);
+}
+
+.dossier-disc {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 1.8rem;
+}
+
+.dossier-warning {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 166, 35, 0.09);
+  color: #f5b84d;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.dossier-summary,
+.review-consensus p {
+  color: var(--text-sub);
+  font-size: 0.86rem;
+  line-height: 1.55;
+}
+
+.dossier-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0;
+}
+
+.dossier-tags span {
+  padding: 4px 9px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.review-consensus,
+.listening-guide,
+.citation-list {
+  margin-top: 12px;
+}
+
+.review-consensus strong,
+.listening-guide strong,
+.citation-list strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 0.83rem;
+}
+
+.listening-guide ol {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-sub);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.citation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.citation-list a {
+  color: var(--text-sub);
+  font-size: 0.8rem;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.citation-list a:hover { color: var(--accent); }
+
+.citation-list span {
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+
+.sample-card {
+  margin-top: 12px;
+  width: min(100%, 660px);
+  border: 1px solid rgba(120, 160, 255, 0.22);
+  border-radius: var(--radius);
+  background: linear-gradient(135deg, rgba(80,120,255,0.08), rgba(255,255,255,0.025));
+  padding: 14px;
+}
+
+.sample-card.partial {
+  border-color: rgba(245, 166, 35, 0.35);
+}
+
+.sample-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.sample-head span {
+  color: #8ea7ff;
+  font-size: 0.72rem;
+  font-family: var(--font-display);
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.sample-head strong {
+  font-family: var(--font-display);
+  font-size: 0.96rem;
+}
+
+.sample-warning,
+.sample-empty {
+  margin: 8px 0;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 166, 35, 0.09);
+  color: #f5b84d;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.sample-relations {
+  display: grid;
+  gap: 8px;
+}
+
+.sample-relation {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.035);
+}
+
+.sample-type {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  font-weight: 800;
+  margin-bottom: 5px;
+}
+
+.sample-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-sub);
+  font-size: 0.9rem;
+}
+
+.sample-title strong {
+  color: var(--text);
+}
+
+.sample-title em {
+  color: #8ea7ff;
+  font-style: normal;
+}
+
+.sample-relation p,
+.sample-relation small {
+  display: block;
+  margin-top: 5px;
+  color: var(--text-muted);
+  font-size: 0.78rem;
   line-height: 1.45;
 }
 

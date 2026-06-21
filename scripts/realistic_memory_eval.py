@@ -10,23 +10,33 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-SCENARIO_PATH = ROOT / "evals" / "realistic_memory_dialogue.json"
+EVALS_DIR = ROOT / "evals"
 ARTIFACT_DIR = ROOT / "artifacts"
-RUNTIME_DIR = ARTIFACT_DIR / "realistic_memory_eval_runtime"
-REPORT_JSON = ARTIFACT_DIR / "realistic_memory_eval_report.json"
-REPORT_MD = ARTIFACT_DIR / "realistic_memory_eval_report.md"
 
 
-def configure_environment() -> None:
+def scenario_paths(name: str) -> tuple[Path, Path, Path]:
+    """按场景名解析 scenario JSON 与报告输出路径。默认 realistic_memory 保持兼容。"""
+    candidates = [EVALS_DIR / f"{name}.json", EVALS_DIR / f"{name}_dialogue.json"]
+    scenario = next((p for p in candidates if p.exists()), candidates[0])
+    report_json = ARTIFACT_DIR / f"{name}_eval_report.json"
+    report_md = ARTIFACT_DIR / f"{name}_eval_report.md"
+    return scenario, report_json, report_md
+
+
+# 向后兼容：旧代码/测试按名引用默认场景路径。
+SCENARIO_PATH = scenario_paths("realistic_memory")[0]
+
+
+def configure_environment(runtime_dir: Path) -> None:
     os.environ["LLM_API_KEY"] = ""
     os.environ["EXTERNAL_SOURCE"] = "mock"
     os.environ["ENABLE_EMBEDDINGS"] = "false"
     os.environ["ENABLE_ONLINE_ENRICH"] = "false"
     os.environ["LASTFM_API_KEY"] = ""
     os.environ["TAVILY_API_KEY"] = ""
-    os.environ["STORE_ROOT"] = str(RUNTIME_DIR / "store")
-    os.environ["MEDIA_ROOT"] = str(RUNTIME_DIR / "media")
-    os.environ["RESOURCE_LIBRARY_PATH"] = str(RUNTIME_DIR / "resource_library.sqlite")
+    os.environ["STORE_ROOT"] = str(runtime_dir / "store")
+    os.environ["MEDIA_ROOT"] = str(runtime_dir / "media")
+    os.environ["RESOURCE_LIBRARY_PATH"] = str(runtime_dir / "resource_library.sqlite")
 
 
 @dataclass
@@ -182,24 +192,36 @@ def render_report(scenario: dict[str, Any], results: list[TurnResult]) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
-    configure_environment()
+def _install_library(library: str) -> None:
+    """按场景声明的库选择假数据源。默认 small=install_fakes；large_messy=大而杂压测库。"""
+    if library == "large_messy":
+        from scripts.large_messy_library import install_large_messy
+
+        install_large_messy()
+    else:
+        from scripts.long_dialogue_smoke import install_fakes
+
+        install_fakes()
+
+
+def run_eval(scenario_name: str = "realistic_memory") -> int:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
-    if RUNTIME_DIR.exists():
-        shutil.rmtree(RUNTIME_DIR)
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    scenario_path, report_json, report_md = scenario_paths(scenario_name)
+    runtime_dir = ARTIFACT_DIR / f"{scenario_name}_eval_runtime"
+    configure_environment(runtime_dir)
+    if runtime_dir.exists():
+        shutil.rmtree(runtime_dir)
+    runtime_dir.mkdir(parents=True, exist_ok=True)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 复用常规 smoke 的稳定假数据源；评测关注对话和记忆，而不是外部 API 波动。
-    from scripts.long_dialogue_smoke import install_fakes
+    scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
+    _install_library(scenario.get("library", "small"))
 
-    install_fakes()
     from app.agent import AudioVisualAgent
     from app.storage import JsonStore
 
-    scenario = json.loads(SCENARIO_PATH.read_text(encoding="utf-8"))
-    agent = AudioVisualAgent(JsonStore(RUNTIME_DIR / "store"))
+    agent = AudioVisualAgent(JsonStore(runtime_dir / "store"))
     results = run_scenario(agent, scenario)
     payload = {
         "scenario": scenario["name"],
@@ -212,13 +234,22 @@ def main() -> int:
             for item in results
         ],
     }
-    REPORT_JSON.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    REPORT_MD.write_text(render_report(scenario, results), encoding="utf-8")
+    report_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    report_md.write_text(render_report(scenario, results), encoding="utf-8")
     failed = [item for item in results if not item.ok]
-    print(f"Realistic memory eval: {len(results) - len(failed)}/{len(results)} passed")
-    print(f"Markdown report: {REPORT_MD}")
-    print(f"JSON report: {REPORT_JSON}")
+    print(f"{scenario_name} eval: {len(results) - len(failed)}/{len(results)} passed")
+    print(f"Markdown report: {report_md}")
+    print(f"JSON report: {report_json}")
     return 1 if failed else 0
+
+
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Realistic / stress memory eval runner")
+    parser.add_argument("--scenario", default="realistic_memory", help="evals/ 下的场景名（不含 .json）")
+    args = parser.parse_args()
+    return run_eval(args.scenario)
 
 
 if __name__ == "__main__":

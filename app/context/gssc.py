@@ -35,6 +35,8 @@ class ContextSource:
     content: str
     priority: int
     min_tokens: int = 0
+    # 对话历史应优先保留最近几轮；规则、画像等来源仍保留开头。
+    preserve_tail: bool = False
 
     @property
     def tokens(self) -> int:
@@ -70,11 +72,16 @@ class BudgetReport:
         return lines
 
 
-def _truncate_to_tokens(text: str, max_tokens: int) -> str:
-    """按行截断到目标 token 预算内（保留前面的行，尾部丢弃）。"""
+def _truncate_to_tokens(text: str, max_tokens: int, *, preserve_tail: bool = False) -> str:
+    """按行截断到目标 token 预算内。
+
+    默认保留开头；对话历史可指定 ``preserve_tail``，避免长会话把最新几轮丢掉。
+    """
     if estimate_tokens(text) <= max_tokens:
         return text
     lines = text.splitlines()
+    if preserve_tail:
+        lines = list(reversed(lines))
     kept: list[str] = []
     used = 0
     for line in lines:
@@ -83,11 +90,13 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
             break
         kept.append(line)
         used += line_tokens
+    if preserve_tail:
+        kept.reverse()
     result = "\n".join(kept)
     # 一行都放不下时，按字符硬截断兜底
     if not result and text:
         approx_chars = max_tokens * 2
-        result = text[:approx_chars]
+        result = text[-approx_chars:] if preserve_tail else text[:approx_chars]
     return result
 
 
@@ -124,7 +133,11 @@ class ContextBudgetManager:
                 result[s.name] = s.content
                 allocations[s.name] = s.tokens
             else:
-                result[s.name] = _truncate_to_tokens(s.content, budget_for_source)
+                result[s.name] = _truncate_to_tokens(
+                    s.content,
+                    budget_for_source,
+                    preserve_tail=s.preserve_tail,
+                )
                 allocations[s.name] = estimate_tokens(result[s.name])
                 report.truncated.append(s.name)
 

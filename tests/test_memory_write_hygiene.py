@@ -36,6 +36,7 @@ def test_correction_detected():
     assert MemoryManager._detect_preference_correction("其实我现在不喜欢 city pop 了") is not None
     assert "city pop" in MemoryManager._detect_preference_correction("其实我现在不喜欢 city pop 了").lower()
     assert MemoryManager._detect_preference_correction("把 city pop 那条偏好改掉") is not None
+    assert MemoryManager._detect_preference_correction("不喜欢刚才那个国风了，太老气，换回现代的") == "国风"
 
 
 def test_correction_removes_conflicting_positive_and_adds_exclusion(tmp_path):
@@ -66,3 +67,23 @@ def test_ephemeral_turn_does_not_pollute_exclusions_via_auto_learn(tmp_path):
     joined = " ".join(mem.exclusion_rules)
     assert "中文" not in joined
     assert "上一批" not in joined
+
+
+def test_oral_positive_preferences_are_extracted_without_llm():
+    from app.memory import extract_preference
+
+    assert extract_preference("我长期就吃深夜 R&B 这一套，越有空间感越好。") == "R&B"
+    assert extract_preference("也爱 city pop，不过工作时最好少一点人声。") == "city pop"
+    assert "爵士" in (extract_preference("我现在超爱慵懒爵士，尤其有铜管但鼓别太炸。") or "")
+    assert extract_preference("这轮换点国风的，不要刚才那些英伦摇滚。") == "国风"
+    assert extract_preference("顺便说一句，谁还听抖音神曲啊，太掉价了。") is None
+
+
+def test_idempotent_cancel_does_not_create_new_exclusion(tmp_path):
+    mgr = _mgr(tmp_path)
+    uid = "u-idempotent"
+
+    asyncio.run(mgr.auto_learn_from_turn_async(uid, "把我从没说过的 trap 那条也取消吧。", results=[]))
+
+    mem = mgr.get_memory(uid)
+    assert not any("trap" in rule.lower() for rule in mem.exclusion_rules)

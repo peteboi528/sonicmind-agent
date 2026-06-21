@@ -1,0 +1,148 @@
+{
+  "name": "压力测试：大而杂曲库下的画像污染与稳定性",
+  "user_id": "stress-memory-user",
+  "library": "large_messy",
+  "description": "在大而杂候选库（150+首横跨9流派，含SEO垃圾曲名/标签错乱/缺标签）背景下，跨4会话约24轮。高压制造一次性约束、句内修饰、反复纠正、跨会话实体泄漏，验证：(1) 用户画像只留真长期偏好，一次性/句内约束不入长期；(2) 纠正能删冲突偏好；(3) 推荐在杂库下不崩溃、去重有效。",
+  "turns": [
+    {
+      "session": "day1_dense_onboarding",
+      "message": "我平时喜欢 R&B，尤其是深夜有空间感、低饱和的那种。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["R&B"], "episode_contains": ["空间感"]}
+    },
+    {
+      "session": "day1_dense_onboarding",
+      "message": "也爱 city pop，不过工作时最好少一点人声。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["city pop"]}
+    },
+    {
+      "session": "day1_dense_onboarding",
+      "message": "最近迷上了 Bossa Nova 和慵懒爵士。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["爵士"]},
+      "rationale": "建立第二个长期偏好，为后续纠正冲突做铺垫。"
+    },
+    {
+      "session": "day1_dense_onboarding",
+      "message": "别再给我推抖音神曲了。",
+      "expect": {"answer_non_empty": true, "exclusion_contains": ["抖音神曲"]}
+    },
+    {
+      "session": "day1_dense_onboarding",
+      "message": "这轮想要点能专注写代码的，别太催眠。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_not_contains": ["催眠"]},
+      "rationale": "一次性约束（这轮）+ 句内修饰（别太催眠）都不应升级成长期排除。"
+    },
+    {
+      "session": "day1_dense_onboarding",
+      "message": "再来几首，不要刚才那批。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "shown_tracks_min": 2, "exclusion_not_contains": ["刚才"]},
+      "rationale": "一次性指代（刚才那批）不入长期排除；去重要有新歌。"
+    },
+    {
+      "session": "day1_dense_onboarding",
+      "message": "其实我现在不喜欢 city pop 了，之前那条偏好请改掉。",
+      "expect": {"answer_non_empty": true, "positive_not_contains": ["city pop"], "exclusion_contains": ["city pop"]},
+      "rationale": "用户纠正应替换冲突记忆——删正偏好并落排除，而非喜欢/不喜欢并存。"
+    },
+    {
+      "session": "day2_contradiction",
+      "message": "分析下你现在记得的我的口味。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["R&B"], "positive_not_contains": ["city pop"]},
+      "rationale": "纠正应已生效：R&B 还在，city pop 已移除。"
+    },
+    {
+      "session": "day2_contradiction",
+      "message": "我现在超爱慵懒爵士，尤其有铜管但鼓别太炸。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["爵士"], "exclusion_not_contains": ["太炸"]},
+      "rationale": "句内生成约束（有铜管但鼓别太炸）不应被粗粒度正则截成长期排除'太炸'。"
+    },
+    {
+      "session": "day2_contradiction",
+      "message": "这周在跑步，临时想听高能量电子，但还是不要抖音神曲。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_contains": ["抖音神曲"]},
+      "rationale": "一次性（这周）约束不入长期；但'不要抖音神曲'是已确立的长期排除，应复述强化保留。"
+    },
+    {
+      "session": "day2_contradiction",
+      "message": "回到平时的深夜氛围，安静点的。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "positive_contains": ["R&B"]},
+      "rationale": "话题切回长期偏好，R&B 画像应稳定，不受临时跑步约束干扰。"
+    },
+    {
+      "session": "day2_contradiction",
+      "message": "再来几首，不要上一批。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "shown_tracks_min": 4, "exclusion_not_contains": ["上一批"]},
+      "rationale": "又一次一次性约束不入长期；shown_tracks 持续增长验证去重翻页有效。"
+    },
+    {
+      "session": "day3_leakage",
+      "message": "找 Radiohead 的歌。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "dialogue_entities_contains": ["Radiohead"]}
+    },
+    {
+      "session": "day3_leakage",
+      "message": "这轮换点国风的，不要刚才那些英伦摇滚。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_not_contains": ["英伦"], "positive_contains": ["国风"]},
+      "rationale": "一次性（这轮/刚才）约束不入长期；国风作为新长期偏好应被记住。"
+    },
+    {
+      "session": "day3_leakage",
+      "message": "不喜欢刚才那个国风了，太老气，换回现代的。",
+      "expect": {"answer_non_empty": true, "exclusion_not_contains": ["老气"], "positive_not_contains": ["国风"]},
+      "rationale": "句内'太老气'不入排除；纠正删国风正偏好。"
+    },
+    {
+      "session": "day3_leakage",
+      "message": "那按我现在的口味，给今晚回家路上来几首。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "positive_contains": ["R&B"]},
+      "rationale": "国风已纠正移除，R&B 仍是稳定长期偏好，推荐应回到 R&B 基底。"
+    },
+    {
+      "session": "day3_leakage",
+      "message": "顺便介绍一下坂本龙一的背景。",
+      "expect": {"answer_non_empty": true},
+      "rationale": "话题插入（artist_info）不应污染音乐画像。"
+    },
+    {
+      "session": "day4_fresh_stability",
+      "message": "推荐几首适合我现在心情的。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "dialogue_entities_not_contains": ["Radiohead"]},
+      "rationale": "新会话不应无限继承上一次会话的短期实体（Radiohead）。"
+    },
+    {
+      "session": "day4_fresh_stability",
+      "message": "我平时就喜欢 R&B 和深夜 lo-fi 氛围。",
+      "expect": {"answer_non_empty": true, "positive_contains": ["R&B"]},
+      "rationale": "长期偏好跨会话稳定保留。"
+    },
+    {
+      "session": "day4_fresh_stability",
+      "message": "做 10 首的跑步歌单。",
+      "expect": {"answer_non_empty": true, "tracks_min": 5},
+      "rationale": "歌单生成在杂库下不崩溃。"
+    },
+    {
+      "session": "day4_fresh_stability",
+      "message": "这轮不要太吵的中文歌，英文或纯音乐都行。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "exclusion_not_contains": ["中文歌"]},
+      "rationale": "一次性（这轮）+ 语言约束不入长期排除。"
+    },
+    {
+      "session": "day4_fresh_stability",
+      "message": "其实把之前所有关于 city pop 的都忘了吧，我早就不喜欢了。",
+      "expect": {"answer_non_empty": true, "positive_not_contains": ["city pop"]},
+      "rationale": "幂等纠正：city pop 早已在 day1 移除，再次纠正不应造成画像异常或崩溃。"
+    },
+    {
+      "session": "day4_fresh_stability",
+      "message": "来个从放松到激昂的音乐旅程。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1},
+      "rationale": "音乐旅程在杂库下不崩溃。"
+    },
+    {
+      "session": "day4_fresh_stability",
+      "message": "最后再给我几首深夜 R&B 收尾。",
+      "expect": {"answer_non_empty": true, "tracks_min": 1, "positive_contains": ["R&B"]},
+      "rationale": "经历 24 轮压力后，R&B 长期画像依然稳定，推荐不崩溃。"
+    }
+  ]
+}

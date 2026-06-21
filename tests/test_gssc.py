@@ -44,3 +44,23 @@ def test_small_content_not_truncated():
     out, report = mgr.allocate(sources)
     assert out["user_query"] == "短问题"
     assert report.truncated == []
+
+
+def test_long_dialogue_history_keeps_latest_turns():
+    mgr = ContextBudgetManager(total_budget=24)
+    history = "\n".join(f"user: 第 {i} 轮消息" for i in range(20))
+    sources = [
+        ContextSource(
+            name="history",
+            content=history,
+            priority=2,
+            min_tokens=4,
+            preserve_tail=True,
+        )
+    ]
+
+    out, report = mgr.allocate(sources)
+
+    assert "第 19 轮消息" in out["history"]
+    assert "第 0 轮消息" not in out["history"]
+    assert "history" in report.truncated

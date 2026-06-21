@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from app.agent import (
     _classify_candidate_kind,
+    _is_playlist_context_compatible,
     _is_recommendation_quality_track,
     _query_requests_variant_content,
     _valid_external_track,
@@ -174,3 +175,37 @@ class TestRecommendationQualityGate:
         )
         assert _query_requests_variant_content("给我一些 Drake Type Beat") is True
         assert _is_recommendation_quality_track(track, allow_variants=True) is True
+
+
+class TestPlaylistContextGate:
+    def test_running_playlist_rejects_sleep_study_and_noise_candidates(self):
+        noisy = [
+            ("高音质/白噪音/雨水声/雷声/放松/催眠/学习/睡前音乐/工作学习必备", "纯音乐馆", "netease"),
+            ("工作学习时听的音乐 提高专注力", "曹哲瀚", "netease"),
+            ("雨林/下雨声/自然白噪音/工作/学习/睡觉", "纯音乐馆", "netease"),
+            ("推荐歌曲：《Chasing Tonight(Slowed)》Richz一定要带上耳机", "桥尼娜臂样", "bilibili"),
+            ("日推 |“绝对不能错过的慵懒调调！”|《踊り子》Vaundy", "漁小孩", "bilibili"),
+        ]
+        for index, (title, artist, source) in enumerate(noisy):
+            track = ExternalTrack(
+                external_id=f"bad-{index}", title=title, artist=artist, source=source
+            )
+            assert _is_playlist_context_compatible("帮我做 20 首跑步歌单", track) is False, title
+
+    def test_running_playlist_keeps_normal_song_candidates(self):
+        clean = [
+            ("Blinding Lights", "The Weeknd"),
+            ("Lose Yourself", "Eminem"),
+            ("Firework", "Katy Perry"),
+        ]
+        for index, (title, artist) in enumerate(clean):
+            track = ExternalTrack(
+                external_id=f"ok-{index}", title=title, artist=artist, source="netease"
+            )
+            assert _is_playlist_context_compatible("帮我做 20 首跑步歌单", track) is True, title
+
+    def test_non_running_playlist_does_not_apply_running_gate(self):
+        track = ExternalTrack(
+            external_id="sleep-1", title="雨声 白噪音", artist="纯音乐馆", source="netease"
+        )
+        assert _is_playlist_context_compatible("帮我做睡前放松歌单", track) is True

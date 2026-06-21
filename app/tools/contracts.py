@@ -42,6 +42,8 @@ class ToolContext(BaseModel):
     plan: dict[str, Any] | None = None
     prior_results: list[dict[str, Any]] = Field(default_factory=list)
     confirmation: dict[str, Any] | None = None
+    deadline_at: float | None = None
+    latency_budget: dict[str, Any] = Field(default_factory=dict)
     agent: Any = Field(default=None, exclude=True, repr=False)
 
 
@@ -60,4 +62,3 @@ class ToolResult(BaseModel):
     provenance: list[dict[str, Any]] = Field(default_factory=list)
     metrics: dict[str, Any] = Field(default_factory=dict)
     error: ToolError | None = None
-

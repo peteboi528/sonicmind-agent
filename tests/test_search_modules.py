@@ -17,6 +17,21 @@ def test_merge_search_queries_dedupes_and_caps(monkeypatch):
     assert _merge_search_queries("Eminem", ["eminem", "rap", "hip hop"]) == ["Eminem", "rap", "hip hop"]
 
 
+def test_recommendation_anchor_extraction_for_heavy_user_queries():
+    from app.agent import _extract_recommendation_anchors, _recommendation_search_seeds
+
+    query = "推荐 6 首 post-rock / math rock，参考 toe、Explosions in the Sky、American Football。"
+    anchors = _extract_recommendation_anchors(query)
+
+    assert anchors.artists == ("toe", "Explosions in the Sky", "American Football")
+    assert "post-rock" in anchors.styles
+    assert "math rock" in anchors.styles
+    seeds = _recommendation_search_seeds("post-rock math rock toe Explosions in the Sky", query, anchors)
+    assert "toe" in seeds
+    assert "Explosions in the Sky" in seeds
+    assert "post-rock" in seeds
+
+
 def test_agent_dense_library_fallback_returns_verified_tracks(monkeypatch):
     from app.agent import AudioVisualAgent
     from app.config import settings
@@ -736,6 +751,96 @@ class TestRecommendForQueryRoutes:
         # 首次 exact 路由调用必须带 offset=5（已展示数）
         assert seen_offsets, "search_web_music 未被调用"
         assert seen_offsets[0] == 5
+
+    def test_complex_explicit_query_uses_anchor_seed_recall_and_drops_unrelated(self):
+        """长 query 为空时，逐艺人 seed 能召回；不相关 city pop 不应补位。"""
+        from types import SimpleNamespace
+
+        from app.agent import AudioVisualAgent
+        from app.models import UserMemory
+
+        mock_memory = MagicMock()
+        mock_memory.get_memory.return_value = UserMemory(user_id="test")
+        mock_memory.weighted_query.return_value = "city pop ambient"
+
+        mock_library = MagicMock()
+        mock_library.is_disliked.return_value = False
+        mock_library.record_exposure = MagicMock()
+        mock_library.decay_exposure_ts = MagicMock()
+
+        agent = AudioVisualAgent.__new__(AudioVisualAgent)
+        agent.memory = mock_memory
+        agent.library = mock_library
+        agent.llm = MagicMock()
+        agent.list_assets = MagicMock(return_value=[])
+        agent._local_recommendation_candidates = MagicMock(return_value=[])
+        agent._dense_library_fallback = MagicMock(return_value=[
+            ExternalTrack(external_id="bad-1", title="City Lights", artist="Airi City Pop", source="netease")
+        ])
+        agent._record_recommendation_history = MagicMock()
+        agent._rerank_tracks = MagicMock(side_effect=lambda _uid, _q, tracks, top_k: [
+            (t, SimpleNamespace(score=1.0 - i * 0.01, reason="test", components={}))
+            for i, t in enumerate(tracks[:top_k])
+        ])
+
+        def fake_search(query, top_k=5, relevance_query="", offset=0, **_):
+            if query == "toe":
+                return [
+                    ExternalTrack(external_id=f"toe-{i}", title=f"toe Song {i}", artist="toe", source="netease")
+                    for i in range(3)
+                ]
+            if query == "Explosions in the Sky":
+                return [
+                    ExternalTrack(external_id=f"eits-{i}", title=f"Sky Song {i}", artist="Explosions In The Sky", source="netease")
+                    for i in range(3)
+                ]
+            return [
+                ExternalTrack(external_id="bad-web", title="City-Pop Curse", artist="Airi City Pop", source="netease")
+            ]
+
+        agent.search_web_music = fake_search
+
+        result = agent.recommend_for_query(
+            "user1",
+            "推荐 6 首适合搭视觉灵感板的 post-rock / math rock，参考 toe、Explosions in the Sky。",
+            top_k=6,
+        )
+
+        assert len(result.tracks) == 6
+        assert {item.asset.artist for item in result.tracks} == {"toe", "Explosions In The Sky"}
+        assert agent._dense_library_fallback.call_count == 0
+        assert any("anchor_filter=dropped" in line for line in result.agent_trace)
+
+    def test_explicit_anchor_query_returns_shortfall_instead_of_unrelated_fill(self):
+        from app.agent import AudioVisualAgent
+        from app.models import UserMemory
+
+        mock_memory = MagicMock()
+        mock_memory.get_memory.return_value = UserMemory(user_id="test")
+        mock_memory.weighted_query.return_value = "city pop"
+
+        mock_library = MagicMock()
+        mock_library.is_disliked.return_value = False
+
+        agent = AudioVisualAgent.__new__(AudioVisualAgent)
+        agent.memory = mock_memory
+        agent.library = mock_library
+        agent.llm = MagicMock()
+        agent.list_assets = MagicMock(return_value=[])
+        agent._local_recommendation_candidates = MagicMock(return_value=[])
+        agent._dense_library_fallback = MagicMock(return_value=[
+            ExternalTrack(external_id="bad-pool", title="City Lights", artist="Airi City Pop", source="netease")
+        ])
+        agent._record_recommendation_history = MagicMock()
+        agent.search_web_music = MagicMock(return_value=[
+            ExternalTrack(external_id="bad-web", title="City-Pop Curse", artist="Airi City Pop", source="netease")
+        ])
+
+        result = agent.recommend_for_query("user1", "给我 6 首 Nujabes jazz hip-hop lo-fi beats", top_k=6)
+
+        assert result.tracks == []
+        assert "online_verified=0" in result.agent_trace[-1]
+        assert agent._dense_library_fallback.call_count == 1
 
     @patch("app.search.web_music_discovery.discover_from_llm")
     @patch("app.search.netease_playlist.search_and_extract")

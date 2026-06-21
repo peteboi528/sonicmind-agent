@@ -163,6 +163,7 @@ uvicorn app.api.main:app --reload --port 8000
 
 - `python3 -m pytest`：单元 + 集成测试（零依赖可跑）。
 - `python3 scripts/long_dialogue_smoke.py`：长对话结构化回归，输出 `artifacts/long_dialogue_smoke_report.md/json`。
+- `python3 scripts/realistic_memory_eval.py`：三段跨会话、16 轮的真实记忆压力测试；包含偏好纠正、临时约束、话题插入和会话边界，输出独立诊断报告。该评测发现产品缺口时会返回非零，不纳入默认 CI。
 - `python3 -m tests.eval.run`：LLM-as-judge 端到端评分（需真实 key），10 个 case 覆盖推荐/歌单/反幻觉/多样性/旅程/目标跟踪。详见 [tests/eval/README.md](tests/eval/README.md)。
 
 CI 会跑 ruff、pytest coverage 和 long dialogue smoke；真实源 eval 不进默认 CI，避免外部接口波动阻塞本地回归。

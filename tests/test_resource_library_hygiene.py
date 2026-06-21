@@ -81,3 +81,44 @@ def test_verified_only_filter_in_sql(tmp_path):
 
     assert {t.title for t in lib.list_tracks(100, verified_only=True)} == {"V"}
     assert {t.title for t in lib.list_tracks(100)} == {"V", "U"}
+
+
+def test_embedding_persisted_and_dirty_incremental(tmp_path, monkeypatch):
+    """新写入行标 dirty；warm_embeddings 算好并落库后变 clean；改 genre 重新 dirty。"""
+    lib = ResourceLibrary(tmp_path / "lib.sqlite")
+    import app.retrieval.embeddings as emb
+    from app.models import ResourceTrack
+
+    lib.upsert_track(ResourceTrack(title="Rainy", artist="A", source="netease", source_id="1", verified=True))
+    # fake encode: 用文本长度造确定性向量,避免依赖真模型
+    monkeypatch.setattr(emb, "embeddings_available", lambda: True)
+    monkeypatch.setattr(emb, "encode", lambda texts: [[float(len(t) % 7) / 7.0] * 4 for t in texts] or None)
+
+    import sqlite3
+    conn = sqlite3.connect(str(tmp_path / "lib.sqlite"))
+    row = conn.execute("SELECT embedding, embed_dirty FROM tracks WHERE title='Rainy'").fetchone()
+    assert row[0] == "" and row[1] == 1  # 新行 dirty、无向量
+
+    warmed = lib.warm_embeddings()
+    assert warmed >= 1
+    row = conn.execute("SELECT embedding, embed_dirty FROM tracks WHERE title='Rainy'").fetchone()
+    assert row[0] != "" and row[1] == 0  # 已算并落库、变 clean
+
+    # 改 genre → 应重新标 dirty（embedding 文本变了）。
+    lib.upsert_track(ResourceTrack(title="Rainy", artist="A", source="netease", source_id="1", genre=["R&B"], verified=True))
+    row = conn.execute("SELECT embed_dirty FROM tracks WHERE title='Rainy'").fetchone()
+    assert row[0] == 1
+    conn.close()
+
+
+def test_semantic_search_bails_when_too_many_dirty(tmp_path, monkeypatch):
+    """冷启动保护：dirty 行 >32 时不同步算，让位词法（返回空）。"""
+    lib = ResourceLibrary(tmp_path / "lib.sqlite")
+    import app.retrieval.embeddings as emb
+    from app.models import ResourceTrack
+
+    for i in range(40):
+        lib.upsert_track(ResourceTrack(title=f"T{i}", artist="A", source="netease", source_id=str(i), verified=True))
+    monkeypatch.setattr(emb, "embeddings_available", lambda: True)
+    monkeypatch.setattr(emb, "encode", lambda texts: None)  # 不该被调用
+    assert lib.semantic_search("query", limit=5) == []  # 40 dirty > 32 → bail

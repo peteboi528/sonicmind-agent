@@ -104,7 +104,17 @@ def test_resource_library_semantic_search_uses_dense(tmp_path, monkeypatch):
         verified=True,
     ))
     monkeypatch.setattr(emb, "embeddings_available", lambda: True)
-    monkeypatch.setattr(emb, "semantic_scores", lambda query, texts: [0.91 if "Piano" in text else 0.2 for text in texts])
+    # semantic_search 现用预存向量 + cosine：query 向量与 "Piano" 文本向量接近、与 "Drum" 远。
+    # 用确定性 stub：encode 按"是否含 Piano"返回不同向量，cosine 映射后 Piano 高分。
+    def fake_encode(texts):
+        out = []
+        for t in texts:
+            if "Piano" in t or "安静" in t or "钢琴" in t:
+                out.append([1.0, 0.0, 0.0, 0.0])
+            else:
+                out.append([0.0, 1.0, 0.0, 0.0])
+        return out
+    monkeypatch.setattr(emb, "encode", fake_encode)
 
     hits = lib.semantic_search("安静钢琴", limit=2, min_score=0.55)
 

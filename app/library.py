@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -43,16 +44,24 @@ class ResourceLibrary:
                     exposure_count INTEGER NOT NULL DEFAULT 0,
                     ts_alpha REAL NOT NULL DEFAULT 1.0,
                     ts_beta REAL NOT NULL DEFAULT 1.0,
+                    embedding TEXT NOT NULL DEFAULT '',
+                    embed_dirty INTEGER NOT NULL DEFAULT 1,
                     UNIQUE(source, source_id, title, artist)
                 )
                 """
             )
-            # 迁移：为旧库补 Thompson Sampling 列。
+            # 迁移：为旧库补 Thompson Sampling 列 + embedding 预存列。
             existing = {row["name"] for row in conn.execute("PRAGMA table_info(tracks)")}
             if "ts_alpha" not in existing:
                 conn.execute("ALTER TABLE tracks ADD COLUMN ts_alpha REAL NOT NULL DEFAULT 1.0")
             if "ts_beta" not in existing:
                 conn.execute("ALTER TABLE tracks ADD COLUMN ts_beta REAL NOT NULL DEFAULT 1.0")
+            if "embedding" not in existing:
+                # embedding：候选文本的归一化向量（JSON 数组），预存避免每次语义检索对全池现算。
+                conn.execute("ALTER TABLE tracks ADD COLUMN embedding TEXT NOT NULL DEFAULT ''")
+            if "embed_dirty" not in existing:
+                # embed_dirty：文本变了需重算；1=待算（含迁移来的旧行，首次检索时补算并落库）。
+                conn.execute("ALTER TABLE tracks ADD COLUMN embed_dirty INTEGER NOT NULL DEFAULT 1")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS dislikes (
@@ -116,7 +125,11 @@ class ResourceLibrary:
                     mood=excluded.mood,
                     playback_url=excluded.playback_url,
                     verified=excluded.verified,
-                    last_seen=excluded.last_seen
+                    last_seen=excluded.last_seen,
+                    -- genre/mood 进了 embedding 文本，变了就需重算，标 dirty。
+                    embed_dirty = CASE
+                        WHEN excluded.genre IS NOT tracks.genre OR excluded.mood IS NOT tracks.mood
+                        THEN 1 ELSE tracks.embed_dirty END
                 """,
                 (
                     track.title,
@@ -204,8 +217,13 @@ class ResourceLibrary:
     def semantic_search(self, query: str, limit: int = 5, pool_size: int = 300, min_score: float = 0.55) -> list[ResourceTrack]:
         """Dense fallback recall over verified resource-library tracks.
 
-        This is intentionally opportunistic: if embeddings are unavailable or
-        encoding fails, return [] and let callers keep their existing flow.
+        性能关键：候选向量**预存**在 tracks.embedding 列。dirty 行（新写入或改了
+        genre/mood）首次检索时补算并落库，之后命中预存向量——避免每次对全池现算
+        embedding（1068 首冷启动曾耗时 21s，是 web_music_search 超时的真根因）。
+
+        冷启动保护：若池里有大量 dirty 行且未预热，返回 [] 让调用方走零开销的词法
+        兜底，而不是在请求路径里同步算几百个向量（会撞超时墙）。后台 warm_embeddings
+        把向量算好后语义召回才启用。
         """
         query = (query or "").strip()
         if not query:
@@ -214,20 +232,121 @@ class ResourceLibrary:
 
         if not embeddings.embeddings_available():
             return []
-        candidates = [track for track in self.list_tracks(pool_size) if track.verified]
-        if not candidates:
+
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, title, artist, genre, mood, source, source_id, playback_url,
+                       verified, last_seen, exposure_count, embedding, embed_dirty
+                FROM tracks WHERE verified=1
+                ORDER BY last_seen DESC LIMIT ?
+                """,
+                (pool_size,),
+            ).fetchall()
+        if not rows:
             return []
-        texts = [_resource_track_text(track) for track in candidates]
-        scores = embeddings.semantic_scores(query, texts)
-        if scores is None:
+
+        # 冷启动保护：未预热时别在请求路径里同步算大批向量，让位词法兜底。
+        # 仅个别 dirty（增量写入）才补算——那是小批、可接受。
+        dirty = [r for r in rows if r["embed_dirty"] or not r["embedding"]]
+        if len(dirty) > 32:
             return []
-        ranked = [
-            (score, track)
-            for score, track in zip(scores, candidates, strict=False)
-            if score >= min_score
-        ]
-        ranked.sort(key=lambda item: item[0], reverse=True)
-        return [track for _, track in ranked[:limit]]
+        new_vectors = self._compute_and_persist_embeddings(dirty) if dirty else {}
+
+        # query 向量走 encode LRU（同 query 不重算）。
+        query_vec = embeddings.encode([query])
+        query_vec = query_vec[0] if query_vec else None
+        if query_vec is None:
+            return []
+
+        scored: list[tuple[float, ResourceTrack]] = []
+        for r in rows:
+            vec = new_vectors.get(r["id"])
+            if vec is None:
+                vec = self._decode_embedding(r["embedding"])
+            if not vec:
+                continue
+            score = (embeddings.cosine_normalized(query_vec, vec) + 1.0) / 2.0
+            if score >= min_score:
+                scored.append((score, self._row_to_track(r)))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [track for _, track in scored[:limit]]
+
+    def warm_embeddings(self, batch: int = 200) -> int:
+        """后台预热：批量补算所有 dirty 行的 embedding 并落库。
+
+        在请求路径外（启动后台线程）跑，把冷启动的几十秒开销挪出用户等待。
+        返回本次算好的行数。embedding 不可用时无操作。
+        """
+        from app.retrieval import embeddings
+
+        if not embeddings.embeddings_available():
+            return 0
+        # 取全部 dirty 行的 id（不截断 batch），下面再分块算。batch 是单次 encode 的块大小。
+        with self._connect() as conn:
+            ids = [r["id"] for r in conn.execute(
+                "SELECT id FROM tracks WHERE verified=1 AND embed_dirty=1"
+            ).fetchall()]
+        total = 0
+        # 分块算（每块 batch 行），单块 encode 调用 + 批量落库，控制峰值内存。
+        for start in range(0, len(ids), batch):
+            chunk = ids[start:start + batch]
+            if not chunk:
+                continue
+            with self._connect() as conn:
+                placeholders = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    "SELECT id, title, artist, genre, mood, source, source_id, playback_url, "
+                    "verified, last_seen, exposure_count "
+                    f"FROM tracks WHERE id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            texts = [_resource_track_text(self._row_to_track(r)) for r in rows]
+            vectors = embeddings.encode(texts)
+            if vectors is None:
+                break
+            with self._connect() as conn:
+                for row, vec in zip(rows, vectors, strict=False):
+                    if not vec:
+                        continue
+                    conn.execute(
+                        "UPDATE tracks SET embedding=?, embed_dirty=0 WHERE id=?",
+                        (json.dumps(vec, separators=(",", ":")), row["id"]),
+                    )
+            total += len(chunk)
+        return total
+
+    def _compute_and_persist_embeddings(self, rows: list[sqlite3.Row]) -> dict[int, list[float]]:
+        """批量算 dirty 行的 embedding，写回 SQLite，返回 {id: vector}。"""
+        if not rows:
+            return {}
+        from app.retrieval import embeddings
+
+        texts = [_resource_track_text(self._row_to_track(r)) for r in rows]
+        vectors = embeddings.encode(texts)
+        if vectors is None:
+            return {}  # 编码失败（如模型临时不可用），这些行下次仍 dirty，不写入空值
+        result: dict[int, list[float]] = {}
+        with self._connect() as conn:
+            for row, vec in zip(rows, vectors, strict=False):
+                if not vec:
+                    continue
+                conn.execute(
+                    "UPDATE tracks SET embedding=?, embed_dirty=0 WHERE id=?",
+                    (json.dumps(vec, separators=(",", ":")), row["id"]),
+                )
+                result[row["id"]] = list(vec)
+        return result
+
+    @staticmethod
+    def _decode_embedding(raw: str) -> list[float] | None:
+        if not raw:
+            return None
+        try:
+            decoded = json.loads(raw)
+            return decoded if isinstance(decoded, list) and decoded else None
+        except (ValueError, TypeError):
+            return None
 
     def record_exposure(self, tracks: list[ExternalTrack | Asset]) -> None:
         with self._connect() as conn:

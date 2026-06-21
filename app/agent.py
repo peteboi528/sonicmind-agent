@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -126,6 +127,17 @@ class AudioVisualAgent:
             logger.debug("启动清理候选池失败，跳过", exc_info=True)
         # 构造完成，开启 list_assets 缓存。此前所有读都不缓存，不会污染。
         self._caching_enabled = True
+        # 后台预热候选池 embedding：避免首次语义检索在请求路径里同步算几百个向量
+        # 拖垮 web_music_search（冷启动曾 21s+ 撞超时）。daemon 线程，进程退出不阻塞。
+        threading.Thread(target=self._warm_pool_embeddings, daemon=True).start()
+
+    def _warm_pool_embeddings(self) -> None:
+        try:
+            warmed = self.library.warm_embeddings()
+            if warmed:
+                logger.info("候选池 embedding 预热完成：%d 行", warmed)
+        except Exception:
+            logger.debug("候选池 embedding 预热失败，跳过", exc_info=True)
 
     def ingest_video(self, url: str, force_refresh: bool = False) -> Asset:
         asset = self.media.ingest_video(url, force_refresh=force_refresh)

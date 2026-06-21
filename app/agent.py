@@ -3987,16 +3987,22 @@ def _query_matches_track(query: str, track: ExternalTrack) -> bool:
     if entity_hit:
         return True
 
-    # 无 entity 命中：泛化类 token 全部必须命中（保持严格，防止 API 垃圾）
+    # 无 entity 命中：泛化类 token 命中要求放宽——允许漏掉 1 个 token
+    # （命中数 ≥ max(1, len-1)）。网易云真实结果 title 常只含部分场景/风格词，
+    # “全部 token 必须命中”过严会把纯 netease 候选滤光，纯 netease 凑不够 top_k，
+    # 推荐就回落到全本地。噪声类（合集/歌单/长混音）已由 _ALLOWED_CANDIDATE_KINDS
+    # 在 _valid_external_track 上游过滤，这里只处理单曲/官方MV，放宽 1 词偏差安全。
     if not general_tokens:
         # 只有 entity token 但都没命中 → 拒绝
         return False
 
+    required = max(1, len(general_tokens) - 1)
+    hits = 0
     for token in general_tokens:
         token_is_ascii = bool(re.fullmatch(r"[A-Za-z0-9&]+", token))
-        if not any(_match_token(token, part, fuzzy=token_is_ascii) for part in searchable_parts):
-            return False
-    return True
+        if any(_match_token(token, part, fuzzy=token_is_ascii) for part in searchable_parts):
+            hits += 1
+    return hits >= required
 
 
 def _valid_external_track(track: ExternalTrack, query: str) -> bool:

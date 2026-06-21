@@ -139,6 +139,40 @@ class TestValidExternalTrackFiltersCompilation:
         assert _valid_external_track(track, "Taylor Swift") is False
 
 
+class TestChineseRelevanceRelaxation:
+    """纯中文查询放宽：允许漏 1 个 token，避免真实 netease 单曲被滤光、推荐回落全本地。"""
+
+    def test_two_token_query_full_hit_kept(self):
+        track = ExternalTrack(
+            external_id="cn1", title="夜曲", artist="周杰伦",
+            source="netease", candidate_kind="track",
+        )
+        assert _valid_external_track(track, "周杰伦 夜曲") is True
+
+    def test_two_token_query_one_miss_now_kept(self):
+        """只命中 1/2 token 的单曲放宽后保留，交给下游 rerank 排序。"""
+        track = ExternalTrack(
+            external_id="cn2", title="晴天", artist="周杰伦",
+            source="netease", candidate_kind="track",
+        )
+        assert _valid_external_track(track, "周杰伦 夜曲") is True
+
+    def test_three_token_query_all_miss_rejected(self):
+        track = ExternalTrack(
+            external_id="cn3", title="无关歌名", artist="路人甲",
+            source="netease", candidate_kind="track",
+        )
+        assert _valid_external_track(track, "华语 治愈 民谣") is False
+
+    def test_three_token_query_one_miss_kept(self):
+        track = ExternalTrack(
+            external_id="cn4", title="治愈系民谣", artist="某人",
+            source="netease", candidate_kind="track",
+        )
+        # "华语 治愈 民谣"：命中 治愈+民谣(2/3) ≥ required(2) → 放行
+        assert _valid_external_track(track, "华语 治愈 民谣") is True
+
+
 class TestRecommendationQualityGate:
     def test_filters_keyword_spam_and_production_assets(self):
         noisy = [

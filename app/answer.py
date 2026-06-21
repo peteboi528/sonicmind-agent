@@ -49,12 +49,53 @@ def source_label(source: str) -> str:
     return "本地库"
 
 
-def infer_count(text: str) -> int | None:
-    """从用户输入解析请求的数量（"推荐5首"→5）。1~100 截断。"""
-    match = re.search(r"(\d{1,3})\s*(?:首|个|tracks?|songs?)?", text, re.IGNORECASE)
-    if not match:
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+            "六": 6, "七": 7, "八": 8, "九": 9}
+
+
+def _parse_cn_number(s: str) -> int | None:
+    """解析中文数字（1~99）：十/二十/十二/三十五/两 等。无法解析返回 None。"""
+    if not s or any(ch not in _CN_DIGIT and ch != "十" for ch in s):
         return None
-    return max(1, min(int(match.group(1)), 100))
+    if "十" in s:
+        left, _, right = s.partition("十")
+        tens = _CN_DIGIT.get(left, 1) if left else 1
+        ones = _CN_DIGIT.get(right, 0) if right else 0
+        return tens * 10 + ones
+    if len(s) == 1 and s in _CN_DIGIT:
+        return _CN_DIGIT[s]
+    return None
+
+
+def infer_count(text: str) -> int | None:
+    """从用户输入解析请求的数量。
+
+    优先级：阿拉伯数字（"推荐5首"→5）> 中文数字（"二十首"/"十二首"/"两首"）
+    > 模糊量词（"十几首"→15、"一批"→12、"几首"→8）。均截断到 1~100。
+
+    之前只认阿拉伯数字，"多来几首/来一批/二十首"等中文/模糊表达全部落空，
+    target_count 为 None，推荐恒回到默认 top_k=5。
+    """
+    text = text or ""
+    # 1. 阿拉伯数字（含可选量词）
+    match = re.search(r"(\d{1,3})\s*(?:首|个|tracks?|songs?|曲)?", text, re.IGNORECASE)
+    if match:
+        return max(1, min(int(match.group(1)), 100))
+    # 2. 中文数字 + 量词（只用"首/曲/首歌"；"个"过宽会把"一个清晨""三个阶段"
+    #    这类泛指误解析成歌曲数量，污染 journey 等场景）
+    match = re.search(r"([零一二三四五六七八九十两]{1,3})\s*(?:多|来)?\s*(?:首|曲|首歌)", text)
+    if match:
+        n = _parse_cn_number(match.group(1))
+        if n:
+            return max(1, min(n, 100))
+    # 3. 模糊量词 → 合理默认（均多于默认 top_k=5，体现“多来点”）
+    if re.search(r"十[一二三四五六七八九]?几|二十几|三十几|几十", text):
+        return 15
+    if re.search(r"一批|一堆|好多|大量|一些|一打|十几", text):
+        return 12
+    if re.search(r"几首|几多|多来[点些]|再来点|多几首|来一批", text):
+        return 8
+    return None
 
 
 def dedupe_tracks(tracks: list[Any]) -> list[Any]:

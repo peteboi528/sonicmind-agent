@@ -9,6 +9,28 @@ from unittest.mock import MagicMock, patch
 from app.models import ExternalTrack, ResourceTrack
 
 
+def test_infer_count_extracts_arabic_chinese_and_fuzzy_quantities():
+    from app.answer import infer_count
+
+    # 阿拉伯数字（原有行为）
+    assert infer_count("推荐5首") == 5
+    assert infer_count("来 10 首歌") == 10
+    assert infer_count("给我12") == 12
+    # 中文数字
+    assert infer_count("二十首") == 20
+    assert infer_count("十二首") == 12
+    assert infer_count("十首") == 10
+    assert infer_count("两首") == 2
+    assert infer_count("三十五首") == 35
+    # 模糊量词 → 合理默认（均多于默认 top_k=5）
+    assert infer_count("多来几首") == 8
+    assert infer_count("来一批") == 12
+    assert infer_count("十几首") == 15
+    # 无数量线索 → None（调用方回落默认 top_k）
+    assert infer_count("随便推荐点") is None
+    assert infer_count("来点好听的") is None
+
+
 def test_merge_search_queries_dedupes_and_caps(monkeypatch):
     from app.agent import _merge_search_queries
     from app.config import settings

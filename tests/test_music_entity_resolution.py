@@ -237,3 +237,76 @@ def test_golden_cases_json_loads():
         assert case.get("query")
         assert case.get("intent")
         assert case.get("expected_entity")
+
+
+# ── Phase 1：artist 职业生涯时间线（务实版，与专辑解读结构区分）─────────────────
+
+def test_artist_deep_dive_produces_career_timeline():
+    """artist_deep_dive 产出 career_phases，回答以「职业生涯脉络+代表作」组织。"""
+    from app.knowledge import build_dossier, dossier_answer
+    from app.models import MusicEntity, TrackRef
+
+    entity = MusicEntity(type="artist", name="Radiohead", artist="Radiohead", ambiguity="resolved")
+    albums = [{"name": "Pablo Honey"}, {"name": "OK Computer"}, {"name": "Kid A"}, {"name": "In Rainbows"}]
+    dossier = build_dossier(
+        None, "Radiohead 的音乐路线", "artist_deep_dive", [entity],
+        [{"summary": "British rock band formed in 1985, broke through in 1997, electronic turn in 2000."}],
+        [], [], [], [TrackRef(title="Karma Police", artist="Radiohead")],
+        albums=albums,
+    )
+    phase_names = [p.phase_name for p in dossier.career_phases]
+    assert "时间跨度" in phase_names          # bio 有 ≥2 年份 → 给跨度
+    assert "代表作品" in phase_names
+    text = dossier_answer(dossier)
+    assert "职业生涯脉络" in text
+    assert "OK Computer" in text              # 代表专辑出现
+    assert "1985" in text or "1997" in text   # 真实年份锚点
+
+
+def test_artist_timeline_honest_without_year_data():
+    """无年份资料时不臆造「时间跨度」，只给确定的「代表作品」并诚实说明。"""
+    from app.knowledge import build_dossier
+    from app.models import MusicEntity
+
+    entity = MusicEntity(type="artist", name="SZA", artist="SZA")
+    dossier = build_dossier(
+        None, "SZA 的音乐路线", "artist_deep_dive", [entity],
+        [{"summary": "contemporary R&B singer"}], [], [], [], [],
+        albums=[{"name": "Ctrl"}, {"name": "SOS"}],
+    )
+    phase_names = [p.phase_name for p in dossier.career_phases]
+    assert "代表作品" in phase_names
+    assert "时间跨度" not in phase_names
+    assert any("未提供明确发行年份" in (p.career_context or "") for p in dossier.career_phases)
+
+
+def test_album_deep_dive_stays_tracklist_shaped():
+    """专辑解读不走职业生涯，保持曲目/乐评导向（与歌手发展明显区分）。"""
+    from app.knowledge import build_dossier, dossier_answer
+    from app.models import MusicEntity, TrackRef
+
+    entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
+    dossier = build_dossier(
+        None, "Blonde", "album_deep_dive", [entity],
+        [{"summary": "alternative R&B album"}], [], [], [],
+        [TrackRef(title="Nikes", artist="Frank Ocean")],
+    )
+    assert dossier.career_phases == []
+    text = dossier_answer(dossier)
+    assert "可以先听" in text
+    assert "职业生涯脉络" not in text
+
+
+def test_artist_compare_keeps_compare_render_not_timeline():
+    """music_compare 即便实体是 artist 也不走职业生涯时间线，走对比渲染。"""
+    from app.knowledge import build_dossier, dossier_answer
+    from app.models import MusicEntity
+
+    a = MusicEntity(type="artist", name="Radiohead")
+    b = MusicEntity(type="artist", name="Coldplay")
+    dossier = build_dossier(None, "Radiohead 和 Coldplay 的区别", "music_compare", [a, b], [], [], [], [], [])
+    assert dossier.career_phases == []
+    text = dossier_answer(dossier)
+    assert "区别" in text
+    assert "职业生涯脉络" not in text
+

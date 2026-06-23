@@ -453,6 +453,21 @@ class ReviewOpinion(BaseModel):
     citation_id: int | None = None
 
 
+class CareerPhase(BaseModel):
+    """歌手职业生涯的一个阶段（Phase 1 务实版）。
+
+    仅承载可追溯证据——精确分期资料不足时只产出「代表作品 / 入门路线」这类确定性阶段，
+    绝不凭空编造年份或风格演变（延续知识链防幻觉铁律）。period 为空表示无可靠时间锚点。
+    """
+
+    period: str = ""
+    phase_name: str = ""
+    key_releases: list[str] = Field(default_factory=list)
+    sound_change: str = ""
+    career_context: str = ""
+    evidence_ids: list[int] = Field(default_factory=list)
+
+
 class MusicDossier(BaseModel):
     entity: MusicEntity
     summary: str = ""
@@ -462,6 +477,8 @@ class MusicDossier(BaseModel):
     audience_reception: str = ""
     key_tracks: list[TrackRef] = Field(default_factory=list)
     listening_guide: list[str] = Field(default_factory=list)
+    # Phase 1：artist_deep_dive 的职业生涯脉络（确定性、不臆造）。album/其他意图留空。
+    career_phases: list[CareerPhase] = Field(default_factory=list)
     related_albums: list[dict[str, Any]] = Field(default_factory=list)
     related_entities: list[MusicEntity] = Field(default_factory=list)
     citations: list[MusicCitation] = Field(default_factory=list)

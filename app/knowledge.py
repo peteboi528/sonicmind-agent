@@ -12,6 +12,7 @@ from app.config import settings
 from app.concurrency import run_parallel
 from app.llm.structured import extract_json_dict
 from app.models import (
+    CareerPhase,
     EvidenceConsistencyReport,
     KnowledgeEvidencePack,
     MusicCitation,
@@ -458,6 +459,60 @@ def _ambiguous_summary(entity: MusicEntity) -> str:
     )
 
 
+_YEAR_RE = re.compile(r"\b(19[5-9]\d|20[0-3]\d)\b")
+
+
+def _extract_years(text: str) -> list[int]:
+    """从资料文本里抽 4 位年份（1950–2039），用于推断职业生涯时间跨度。"""
+    return [int(m) for m in _YEAR_RE.findall(text or "")]
+
+
+def _build_career_timeline(
+    entity: MusicEntity,
+    albums: list[dict[str, Any]],
+    tracks: list[TrackRef],
+    meta_text: str,
+    style_tags: list[str],
+) -> list[CareerPhase]:
+    """为 artist_deep_dive 构建职业生涯脉络（确定性、不臆造）。
+
+    数据现实：网易云歌手专辑接口不返回发行年份，精确到每张专辑的分期来源不足。因此只产出
+    「可追溯证据支持」的阶段——bio 里若出现 ≥2 个不同年份，给出时间跨度；始终基于真实专辑/
+    曲目给「代表作品」+「入门路线」。绝不编造年份或风格演变（防幻觉铁律）。
+    """
+    album_names: list[str] = []
+    for album in albums:
+        name = str(album.get("name") or album.get("title") or "").strip()
+        if name and name not in album_names:
+            album_names.append(name)
+
+    phases: list[CareerPhase] = []
+    years = sorted({y for y in _extract_years(meta_text) if 1950 <= y <= 2039})
+    has_span = len(years) >= 2 and years[-1] > years[0]
+    if has_span:
+        phases.append(CareerPhase(
+            period=f"{years[0]}–{years[-1]}",
+            phase_name="时间跨度",
+            sound_change="；".join(style_tags[:2]) if style_tags else "",
+            career_context=(
+                f"可追溯资料的时间跨度约 {years[0]}–{years[-1]} 年。受限于来源，"
+                f"无法精确把每张专辑钉到具体阶段，下面按代表作品组织。"
+            ),
+        ))
+    # 始终给出「代表作品」阶段（仅基于真实拥有的专辑；不足时回落曲目）
+    releases = album_names or [t.title for t in tracks if t.title]
+    phases.append(CareerPhase(
+        period="代表作品",
+        phase_name="代表作品",
+        key_releases=releases[:6],
+        career_context=(
+            "来源未提供明确发行年份，按可追溯的代表作品组织，不臆造分期。"
+            if not has_span else "职业生涯中可追溯的代表专辑。"
+        ),
+    ))
+    return phases
+
+
 def lookup_metadata(agent: Any, entities: list[MusicEntity], deadline_at: float | None = None) -> dict[str, Any]:
     remaining = remaining_seconds(deadline_at)
     if remaining is not None and remaining < 1.0:
@@ -891,6 +946,9 @@ def build_dossier(
     is_compare = intent == "music_compare" and len(entities) >= 2
     ambiguous = entity.ambiguity == "ambiguous" and not is_compare
     guide = _listening_guide(entity, tracks, style_tags)
+    career_phases: list[CareerPhase] = []
+    if entity.type == "artist" and not is_compare and not ambiguous:
+        career_phases = _build_career_timeline(entity, albums or [], tracks, meta_text, style_tags)
     if is_compare:
         summary = _compare_summary(entities[0], entities[1])
         related = [entities[1]]
@@ -930,6 +988,7 @@ def build_dossier(
         audience_reception=_audience_reception(citations),
         key_tracks=tracks[:8],
         listening_guide=guide,
+        career_phases=career_phases,
         related_albums=(albums or [])[:6],
         related_entities=related,
         citations=citations,
@@ -940,6 +999,39 @@ def build_dossier(
     )
     write_cached_dossier(agent, dossier)
     return dossier
+
+
+def _artist_career_answer(dossier: MusicDossier) -> str:
+    """artist_deep_dive 专属渲染：职业生涯脉络（时间跨度/代表作）+ 入门路线，
+    与专辑解读（曲目/乐评共识）明显区分。仅承载可追溯证据，不臆造分期。"""
+    lines = [f"{dossier.entity.name}：{dossier.summary}"]
+    if dossier.partial and dossier.degraded_reason:
+        lines.append(f"\n资料状态：{dossier.degraded_reason}。")
+    if dossier.style_tags:
+        lines.append("\n风格定位：" + "、".join(dossier.style_tags[:6]))
+    lines.append("\n职业生涯脉络：")
+    for phase in dossier.career_phases:
+        show_period = bool(phase.period) and phase.period != phase.phase_name
+        head = f"- {phase.phase_name}" + (f"（{phase.period}）" if show_period else "")
+        lines.append(head)
+        if phase.key_releases:
+            lines.append("  代表作品：" + "、".join(f"《{r}》" for r in phase.key_releases if r))
+        if phase.sound_change:
+            lines.append("  声音/风格：" + phase.sound_change)
+        if phase.career_context:
+            lines.append("  " + phase.career_context)
+    if dossier.key_tracks:
+        names = "、".join(f"《{t.title}》" for t in dossier.key_tracks[:5] if t.title)
+        if names:
+            lines.append("\n入门聆听路线：先听 " + names + "，再按上面的代表作扩展。")
+    if dossier.critical_consensus:
+        lines.append("\n乐评/资料共识：" + dossier.critical_consensus)
+    if dossier.citations:
+        lines.append("\n参考来源：")
+        for c in dossier.citations[:3]:
+            label = c.title or c.source
+            lines.append(f"- {label}：{c.url}" if c.url else f"- {label}")
+    return "\n".join(lines)
 
 
 def dossier_answer(dossier: MusicDossier) -> str:
@@ -959,6 +1051,8 @@ def dossier_answer(dossier: MusicDossier) -> str:
                 label = c.title or c.source
                 lines.append(f"- {label}：{c.url}" if c.url else f"- {label}")
         return "\n".join(lines)
+    if dossier.entity.type == "artist" and dossier.career_phases:
+        return _artist_career_answer(dossier)
     lines = [f"{dossier.entity.name}：{dossier.summary}"]
     if dossier.partial and dossier.degraded_reason:
         lines.append(f"\n资料状态：{dossier.degraded_reason}。")

@@ -420,6 +420,17 @@ class MusicEntity(BaseModel):
     external_ids: dict[str, str] = Field(default_factory=dict)
     image: str = ""
     source: str = "unknown"
+    # ── 消歧状态（知识链路 Phase 0 止血）──────────────────────────────────────
+    # resolve 阶段把裸名/裸标题钉成权威实体后，下游据此判断是否值得构建完整 dossier。
+    #   resolved    = 高置信钉准（MB 精确命中 + 艺人一致），允许合成完整答案；
+    #   ambiguous   = 同名异实体、歧义过大，禁止合成「看似完整」的答案，改为返回消歧提示；
+    #   unresolved  = 尚未跑消歧（默认值，MB 关闭/离线/测试直接构造），保持旧行为不动。
+    # 默认 unresolved 至关重要：它保证所有既有的直接构造 entity（不带这些字段）的调用点
+    # 与测试行为不变——只有 canonicalize_entities 显式产出 ambiguous 才会触发新分支。
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    ambiguity: Literal["resolved", "ambiguous", "unresolved"] = "unresolved"
+    candidates: list[dict[str, Any]] = Field(default_factory=list)
+    query_origin: str = ""
 
 
 class MusicCitation(BaseModel):
@@ -458,6 +469,21 @@ class MusicDossier(BaseModel):
     uncertainties: list[str] = Field(default_factory=list)
     partial: bool = False
     degraded_reason: str | None = None
+
+
+class EvidenceConsistencyReport(BaseModel):
+    """证据一致性校验报告（Phase 0 止血）：在合成 dossier 前验证 metadata/乐评/曲目
+    是否都归属于同一个 canonical entity，治「同名专辑把不同来源资料拼成一个答案」。
+
+    kept_citations / kept_tracks 是已剔除明显归属错误条目后的存活集；ok=False 表示
+    证据互相冲突或全部偏题，上层不得输出正常完整 summary，应降级为 partial/ambiguous。
+    """
+
+    ok: bool = True
+    problems: list[str] = Field(default_factory=list)
+    confidence: float = 0.0
+    kept_citations: list[MusicCitation] = Field(default_factory=list)
+    kept_tracks: list[TrackRef] = Field(default_factory=list)
 
 
 class KnowledgeEvidencePack(BaseModel):

@@ -12,6 +12,7 @@ from app.config import settings
 from app.concurrency import run_parallel
 from app.llm.structured import extract_json_dict
 from app.models import (
+    EvidenceConsistencyReport,
     KnowledgeEvidencePack,
     MusicCitation,
     MusicDossier,
@@ -200,15 +201,109 @@ def _explicit_artist_entity_from_query(query: str, entity_type: str, intent: str
     return None
 
 
+def _apply_release_hit(entity: MusicEntity, hit: dict[str, Any]) -> None:
+    """把单个 MB release-group 候选回填到 entity（权威名/艺人/MBID）。"""
+    if hit.get("title"):
+        entity.name = hit["title"]
+    if hit.get("artist") and not entity.artist:
+        entity.artist = hit["artist"]
+    if hit.get("mbid"):
+        entity.external_ids.setdefault("musicbrainz", hit["mbid"])
+    if not entity.query_origin:
+        entity.query_origin = "musicbrainz"
+
+
+def _canonicalize_release_entity(client: Any, entity: MusicEntity) -> None:
+    """album/track 消歧：基于 MB 候选判定 resolved/ambiguous/unresolved。
+
+    歧义判定聚焦真正的 bug 场景——**精确同名 + 不同艺人 + 用户未给消歧艺人**：
+    例：裸查「Blonde」时 MB 同时返回 Frank Ocean《Blonde》与另一艺人《Blonde》，
+    此时无法可靠选择，标记 ambiguous，交由 build_dossier 返回消歧提示而非硬编一个。
+    用户已给艺人、或只有一个精确同名作品时，正常 resolved。
+    """
+    hits = client.search_release_group(entity.name, entity.artist, limit=5)
+    if not hits:
+        entity.ambiguity = "unresolved"
+        return
+    title_key = _match_norm(entity.name)
+    exact_title = [h for h in hits if _match_norm(h.get("title", "")) == title_key]
+    artist_key = _match_norm(entity.artist)
+
+    if entity.artist:
+        with_artist = [h for h in exact_title if artist_key and (
+            artist_key in _match_norm(h.get("artist", "")) or _match_norm(h.get("artist", "")).endswith(artist_key)
+        )]
+        if with_artist:
+            best = max(with_artist, key=lambda h: h.get("score", 0))
+            _apply_release_hit(entity, best)
+            entity.ambiguity = "resolved"
+            entity.confidence = min(1.0, best.get("score", 0) / 100.0)
+            entity.candidates = hits[:5]
+            return
+        # 给了艺人但没有「精确标题+该艺人」命中：回落精确标题里 score 最高，置信降档。
+        if exact_title:
+            best = max(exact_title, key=lambda h: h.get("score", 0))
+            _apply_release_hit(entity, best)
+            entity.ambiguity = "resolved" if best.get("score", 0) >= 60 else "unresolved"
+            entity.confidence = min(1.0, best.get("score", 0) / 100.0)
+            entity.candidates = hits[:5]
+            return
+
+    # 未给艺人：精确同名候选里出现 ≥2 个不同艺人 → 歧义过大
+    if exact_title:
+        distinct_artists = {
+            _match_norm(h.get("artist", "")) for h in exact_title if h.get("artist")
+        }
+        best = max(exact_title, key=lambda h: h.get("score", 0))
+        _apply_release_hit(entity, best)
+        entity.candidates = exact_title[:5]
+        if len(distinct_artists) >= 2:
+            entity.ambiguity = "ambiguous"
+            entity.confidence = min(0.5, best.get("score", 0) / 100.0)
+        else:
+            entity.ambiguity = "resolved"
+            entity.confidence = min(1.0, best.get("score", 0) / 100.0)
+        return
+
+    # 仅模糊命中（标题不完全相同）：保守 unresolved，但仍回填最佳，保持旧行为不拒答。
+    best = max(hits, key=lambda h: h.get("score", 0))
+    _apply_release_hit(entity, best)
+    entity.ambiguity = "unresolved"
+    entity.confidence = min(0.5, best.get("score", 0) / 100.0)
+    entity.candidates = hits[:5]
+
+
+def _canonicalize_artist_entity(client: Any, entity: MusicEntity) -> None:
+    """artist 消歧：同名艺人较少见，有精确名命中即视为 resolved。"""
+    hits = client.search_artist(entity.name, limit=5)
+    if not hits:
+        entity.ambiguity = "unresolved"
+        return
+    name_key = _match_norm(entity.name)
+    exact = [h for h in hits if _match_norm(h.get("name", "")) == name_key]
+    pool = exact or hits
+    best = max(pool, key=lambda h: h.get("score", 0))
+    if best.get("name"):
+        entity.name = best["name"]
+        if not entity.query_origin:
+            entity.query_origin = "musicbrainz"
+    if best.get("mbid"):
+        entity.external_ids.setdefault("musicbrainz", best["mbid"])
+    entity.candidates = hits[:5]
+    entity.confidence = min(1.0, best.get("score", 0) / 100.0)
+    entity.ambiguity = "resolved" if best.get("score", 0) >= 60 else "unresolved"
+
+
 def canonicalize_entities(entities: list[MusicEntity], deadline_at: float | None = None) -> list[MusicEntity]:
-    """消歧阶段：用 MusicBrainz 把裸名/裸标题钉成权威 (name, artist, type)。
+    """消歧阶段：用 MusicBrainz 把裸名/裸标题钉成权威 (name, artist, type)，并给出歧义状态。
 
-    这是知识链路的「消歧」职责所在——在 resolve 阶段一次性钉准实体，下游 metadata/review
-    全部继承，避免各源(MB/Spotify/Discogs)各自对裸标题模糊匹配出三个不同的同名作品
-    (Blonde 实测被解析成 Frank Ocean / Bob Dylan《Blonde on Blonde》/ West Norwood 三个)。
+    这是知识链路的「消歧」职责所在——在 resolve 阶段一次性钉准实体并判定歧义，下游
+    metadata/review 全部继承，避免各源(MB/Spotify/Discogs)各自对裸标题模糊匹配出三个
+    不同的同名作品（Blonde 实测被解析成 Frank Ocean / Bob Dylan《Blonde on Blonde》/
+    West Norwood 三个）。album 类型且缺 artist 时收益最大。
 
-    album 类型且缺 artist 时收益最大：MB 回填权威艺人后，Spotify/Discogs 带着 artist 检索
-    即可收敛。失败/超时/关闭 MB 时原样返回，绝不报错（保持 offline 测试与降级契约）。
+    失败/超时/关闭 MB 时原样返回（ambiguity 保持默认 unresolved），绝不报错——
+    保持 offline 测试与降级契约：默认 unresolved 即「未跑消歧、维持旧行为」。
     """
     if not getattr(settings, "enable_musicbrainz", True):
         return entities
@@ -221,22 +316,146 @@ def canonicalize_entities(entities: list[MusicEntity], deadline_at: float | None
         client = MusicBrainzClient()
         for entity in entities:
             if entity.type == "artist":
-                hit = client.resolve_artist(entity.name)
-                if hit and hit.get("name"):
-                    entity.name = hit["name"]
-                    if hit.get("mbid"):
-                        entity.external_ids.setdefault("musicbrainz", hit["mbid"])
+                _canonicalize_artist_entity(client, entity)
             elif entity.type in {"album", "track"}:
-                hit = client.resolve_release_group(entity.name, entity.artist)
-                if hit and hit.get("title"):
-                    entity.name = hit["title"]
-                    if hit.get("artist") and not entity.artist:
-                        entity.artist = hit["artist"]
-                    if hit.get("mbid"):
-                        entity.external_ids.setdefault("musicbrainz", hit["mbid"])
+                _canonicalize_release_entity(client, entity)
     except Exception:
         logger.debug("canonicalize_entities 失败，按原实体降级", exc_info=True)
     return entities
+
+
+def _match_norm(value: str) -> str:
+    """实体名「包含」比对用的归一化：小写 + 仅保留字母数字与 CJK，去掉一切标点空白。
+
+    与 MusicBrainz 客户端的 _norm 同构，确保 canonicalize 阶段与 evidence 校验阶段
+    用同一套归一化口径判定「标题/艺人是否实质出现」。
+    """
+    return re.sub(r"[^a-z0-9一-鿿]+", "", (value or "").lower())
+
+
+# ── 证据归属校验（Phase 0 止血核心）────────────────────────────────────────────
+# 治同名实体错配：乐评/曲目/资料常把多个同名作品混进同一次检索结果。下面这套打分在
+# 合成 dossier 前把「明显归属错误」的条目剔除，并在证据互相冲突时阻止合成完整答案。
+_PROSE_CITATION_KINDS = {"review", "encyclopedia", "user_comment"}
+
+
+def citation_entity_score(citation: MusicCitation, entity: MusicEntity) -> float:
+    """单条 citation 对 canonical entity 的归属得分（0~1）。
+
+    关键设计：**结构化源**（metadata/platform：MB/Spotify/Discogs/网易云）是按该实体
+    检索来的，按构造即归属，默认高分保留；**散文类源**（review/encyclopedia/user_comment）
+    才是同名混拼的高发地，靠文本匹配判定——album/track 已知艺人时，艺人是否出现是消歧
+    关键（只命中裸标题 'blonde' 区分不了 Frank Ocean 与 Bob Dylan，给弱分）。
+    """
+    if citation.kind in {"metadata", "platform"}:
+        return 0.8
+    text = _match_norm(" ".join([citation.title or "", citation.excerpt or ""]))
+    name_key = _match_norm(entity.name)
+    name_hit = bool(name_key) and name_key in text
+    artist = (entity.artist or "").strip()
+    artist_key = _match_norm(artist)
+    artist_hit = bool(artist_key) and artist_key in text
+    if entity.type in {"album", "track"}:
+        if artist:
+            if artist_hit and name_hit:
+                return 1.0
+            if artist_hit:
+                return 0.6
+            if name_hit:
+                # 同名异艺人高风险：标题命中但完全不提目标艺人
+                return 0.2
+            return 0.0
+        return 0.6 if name_hit else 0.0
+    # artist 类型实体：name 即艺人名，出现即归属
+    return 1.0 if (artist_hit or name_hit) else 0.0
+
+
+def _track_matches_artist(track: TrackRef, artist: str) -> str | bool:
+    """曲目是否归属该艺人（同名专辑防混入别家曲目）。曲目艺人未知时保守保留。"""
+    track_artist = _match_norm(getattr(track, "artist", "") or "")
+    if not track_artist:
+        return True
+    target = _match_norm(artist)
+    return bool(target) and (target in track_artist or track_artist in target)
+
+
+def validate_evidence_consistency(
+    entity: MusicEntity,
+    metadata_citations: list[MusicCitation],
+    review_citations: list[MusicCitation],
+    tracks: list[TrackRef],
+) -> EvidenceConsistencyReport:
+    """合成前一致性校验：剔除明显归属错误的 citation/曲目，并报告证据是否仍可靠。
+
+    返回 kept_citations/kept_tracks（已过滤）与 ok/problems/confidence。
+    ok=False 表示已知艺人却没有任何资料命中艺人（全部偏题/疑似同名异作品），上层应抑制
+    完整 summary 以防把错误实体的资料拼成答案。
+    """
+    all_citations = [*metadata_citations, *review_citations]
+    kept: list[MusicCitation] = []
+    dropped = 0
+    for citation in all_citations:
+        score = citation_entity_score(citation, entity)
+        if score <= 0.0:
+            dropped += 1
+            continue
+        # 已知艺人的 album/track：散文类来源必须提到目标艺人才保留，否则大概率是同名异作品
+        # （例：查 Frank Ocean《Blonde》却抓到 Bob Dylan《Blonde on Blonde》的乐评）。
+        if (
+            entity.type in {"album", "track"}
+            and entity.artist
+            and citation.kind in _PROSE_CITATION_KINDS
+            and score < 0.5
+        ):
+            dropped += 1
+            continue
+        kept.append(citation)
+
+    problems: list[str] = []
+    on_target = [c for c in kept if citation_entity_score(c, entity) >= 0.5]
+
+    kept_tracks = tracks
+    artist = (entity.artist or "").strip()
+    if entity.type in {"album", "track"} and artist:
+        kept_tracks = [t for t in tracks if _track_matches_artist(t, artist)]
+        dropped_tracks = len(tracks) - len(kept_tracks)
+        if dropped_tracks:
+            problems.append(f"剔除 {dropped_tracks} 首疑似归属其他艺人的曲目")
+    if dropped:
+        problems.append(f"剔除 {dropped} 条与目标实体无关的资料")
+
+    confidence = (len(on_target) / len(all_citations)) if all_citations else 0.0
+    ok = True
+    if all_citations and not on_target:
+        problems.append("所有资料都未明确指向目标实体")
+        ok = False
+    if entity.type in {"album", "track"} and artist and all_citations and not any(
+        citation_entity_score(c, entity) >= 0.5 for c in kept
+    ):
+        ok = False
+    return EvidenceConsistencyReport(
+        ok=ok,
+        problems=problems,
+        confidence=confidence,
+        kept_citations=kept,
+        kept_tracks=kept_tracks,
+    )
+
+
+def _ambiguous_summary(entity: MusicEntity) -> str:
+    """同名歧义时的消歧提示：列出候选，请用户补艺人名，绝不凭猜测拼完整答案。"""
+    names: list[str] = []
+    for cand in (entity.candidates or [])[:4]:
+        title = cand.get("title") or cand.get("name") or ""
+        cand_artist = cand.get("artist") or ""
+        if title:
+            names.append(f"《{title}》" + (f" - {cand_artist}" if cand_artist else ""))
+    listing = "；".join(names) if names else "（未能取到候选列表）"
+    return (
+        f"「{entity.name}」存在多个同名作品，我不想凭猜测拼出一份答案。"
+        f"可能的指代：{listing}。请补上艺人名（例如「{entity.name} 是谁的」），"
+        f"我再给你完整、可靠的解读。"
+    )
 
 
 def lookup_metadata(agent: Any, entities: list[MusicEntity], deadline_at: float | None = None) -> dict[str, Any]:
@@ -639,9 +858,17 @@ def build_dossier(
     cached = read_cached_dossier(agent, entity)
     if cached and not skipped:
         return cached.model_copy(update={"partial": False, "degraded_reason": None})
-    citations = _limit_citations([*metadata_citations, *review_citations])
+
+    # ── Phase 0 证据一致性校验：剔除归属错误的 citation/曲目，治同名实体资料混拼 ──
+    report = validate_evidence_consistency(entity, metadata_citations, review_citations, tracks)
+    citations = _limit_citations(report.kept_citations)
+    tracks = report.kept_tracks
+    # 合成只喂「命中目标实体」的资料，避免把同名异作品的乐评混进 LLM 总结。
+    on_target = [c for c in report.kept_citations if citation_entity_score(c, entity) >= 0.5]
+    synth_citations = on_target or report.kept_citations
+
     meta_text = _first_nonempty(*(m.get("summary", "") for m in metadata), *(m.get("bio", "") for m in metadata))
-    evidence_pack = build_evidence_pack(metadata, review_citations, opinions)
+    evidence_pack = build_evidence_pack(metadata, synth_citations, opinions)
     style_tags = _merge_unique([*_tags_from_metadata(metadata), *evidence_pack.sound_descriptors])[:8]
     partial_reasons: list[str] = []
     skipped = skipped or []
@@ -650,39 +877,57 @@ def build_dossier(
         partial_reasons.append("部分知识工具因时间预算不足被跳过：" + "、".join(sorted(set(skipped))))
     if timed_out:
         partial_reasons.append("部分知识工具在本轮时间内未返回，已超时降级：" + "、".join(sorted(set(timed_out))))
-    if not review_citations:
+    if not report.kept_citations and (metadata_citations or review_citations):
+        partial_reasons.append("部分资料经一致性校验被判定与目标实体无关，已剔除")
+    elif not review_citations:
         partial_reasons.append("乐评来源本轮未在时间预算内取回足够结果")
     if not citations:
         partial_reasons.append("外部资料来源不足，无法做完整乐评总结")
+    if report.problems:
+        partial_reasons.extend(report.problems)
     if remaining_seconds(deadline_at) is not None and remaining_seconds(deadline_at) <= 0:
         partial_reasons.append(f"本轮达到 {int(settings.knowledge_turn_budget_seconds)} 秒知识链路预算")
 
+    is_compare = intent == "music_compare" and len(entities) >= 2
+    ambiguous = entity.ambiguity == "ambiguous" and not is_compare
     guide = _listening_guide(entity, tracks, style_tags)
-    if intent == "music_compare" and len(entities) >= 2:
+    if is_compare:
         summary = _compare_summary(entities[0], entities[1])
         related = [entities[1]]
-        consensus = _critical_consensus(review_citations, opinions)
+        consensus = _critical_consensus(citations, opinions)
+    elif ambiguous:
+        # 同名歧义过大：不合成、不拼凑，返回消歧提示让用户补艺人名。
+        summary = _ambiguous_summary(entity)
+        related = entities[1:]
+        consensus = ""
+        partial_reasons.append("实体存在同名歧义，已改为返回消歧提示而非完整答案")
+    elif not report.ok:
+        # 证据归属不一致/全部偏题：抑制完整总结，回落机械兜底，防混拼错误实体。
+        related = entities[1:]
+        summary = meta_text[:220] if meta_text else f"我整理了 {entity.name} 的可追溯音乐资料，但本轮证据归属不一致，无法给出可靠总结。"
+        consensus = ""
+        partial_reasons.append("证据归属不一致，已抑制完整总结以防混拼错误实体")
     else:
         related = entities[1:]
         # 合成层：把零散英文证据(MB/Spotify/Discogs/乐评摘录)交给 LLM 翻译+总结成
         # 连贯中文 summary/乐评共识，治"原始摘录直出、半句英文"。失败/无预算/无证据时
         # 回落机械摘要，保证 offline(MockLLM)与降级路径确定可用。
         synth = _synthesize_dossier_prose(
-            agent, entity, meta_text, style_tags, evidence_pack, review_citations, opinions, deadline_at,
+            agent, entity, meta_text, style_tags, evidence_pack, synth_citations, opinions, deadline_at,
         )
         if synth:
             summary = synth.get("summary") or (meta_text[:220] if meta_text else f"我整理了 {entity.name} 的可追溯音乐资料。")
-            consensus = synth.get("critical_consensus") or _critical_consensus(review_citations, opinions)
+            consensus = synth.get("critical_consensus") or _critical_consensus(citations, opinions)
         else:
             summary = meta_text[:220] if meta_text else f"我整理了 {entity.name} 的可追溯音乐资料。"
-            consensus = _critical_consensus(review_citations, opinions)
+            consensus = _critical_consensus(citations, opinions)
     dossier = MusicDossier(
         entity=entity,
         summary=summary,
         background=meta_text[:800] if meta_text else "本轮没有拿到足够稳定的背景资料。",
         style_tags=style_tags,
         critical_consensus=consensus,
-        audience_reception=_audience_reception(review_citations),
+        audience_reception=_audience_reception(citations),
         key_tracks=tracks[:8],
         listening_guide=guide,
         related_albums=(albums or [])[:6],
@@ -690,7 +935,7 @@ def build_dossier(
         citations=citations,
         review_opinions=opinions[:settings.knowledge_max_review_sources],
         uncertainties=[*partial_reasons, *evidence_pack.disagreements[:2]][:4],
-        partial=bool(partial_reasons),
+        partial=bool(partial_reasons) or ambiguous or not report.ok,
         degraded_reason="；".join(partial_reasons) if partial_reasons else None,
     )
     write_cached_dossier(agent, dossier)

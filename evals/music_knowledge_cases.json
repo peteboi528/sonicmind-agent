@@ -1,0 +1,95 @@
+{
+  "_comment": "音乐知识能力黄金评测集（Phase 0 起步）。每个 case 锁定实体消歧与证据归属的正确结果，用于回归「同名专辑/艺人资料混拼」类 bug。must_not_include 是防混拼红线：一旦答案里出现，说明把同名异实体资料拼了进来。eval 脚本与确定性测试据此断言。",
+  "version": 1,
+  "cases": [
+    {
+      "id": "frank_ocean_blonde",
+      "query": "讲讲 Frank Ocean 的 Blonde 这张专辑，乐评怎么说？",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "Blonde", "artist": "Frank Ocean"},
+      "must_include": ["Frank Ocean", "Blonde"],
+      "must_not_include": ["Blonde on Blonde", "Bob Dylan", "West Norwood"]
+    },
+    {
+      "id": "bob_dylan_blonde_on_blonde",
+      "query": "解读 Bob Dylan 的 Blonde on Blonde",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "Blonde on Blonde", "artist": "Bob Dylan"},
+      "must_include": ["Bob Dylan", "Blonde on Blonde"],
+      "must_not_include": ["Frank Ocean", "West Norwood"]
+    },
+    {
+      "id": "beyonce_renaissance",
+      "query": "Beyoncé 的 Renaissance 这张专辑怎么样",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "Renaissance", "artist": "Beyoncé"},
+      "must_include": ["Beyoncé", "Renaissance"],
+      "must_not_include": ["Boyz II Men"]
+    },
+    {
+      "id": "radiohead_kid_a",
+      "query": "讲讲 Radiohead 的 Kid A",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "Kid A", "artist": "Radiohead"},
+      "must_include": ["Radiohead", "Kid A"],
+      "must_not_include": []
+    },
+    {
+      "id": "frank_ocean_channel_orange",
+      "query": "Frank Ocean 的 Channel Orange 乐评",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "Channel Orange", "artist": "Frank Ocean"},
+      "must_include": ["Frank Ocean", "Channel Orange"],
+      "must_not_include": ["Blonde on Blonde"]
+    },
+    {
+      "id": "kanye_yeezus",
+      "query": "Kanye West 的 Yeezus 评价如何",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "Yeezus", "artist": "Kanye West"},
+      "must_include": ["Kanye", "Yeezus"],
+      "must_not_include": []
+    },
+    {
+      "id": "aphex_twin_saw",
+      "query": "Aphex Twin 的 Selected Ambient Works 85-92",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "Selected Ambient Works 85-92", "artist": "Aphex Twin"},
+      "must_include": ["Aphex Twin"],
+      "must_not_include": []
+    },
+    {
+      "id": "kendrick_tpab",
+      "query": "Kendrick Lamar 的 To Pimp a Butterfly",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "To Pimp a Butterfly", "artist": "Kendrick Lamar"},
+      "must_include": ["Kendrick"],
+      "must_not_include": []
+    },
+    {
+      "id": "daft_punk_discovery",
+      "query": "Daft Punk 的 Discovery 这张专辑",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "Discovery", "artist": "Daft Punk"},
+      "must_include": ["Daft Punk", "Discovery"],
+      "must_not_include": []
+    },
+    {
+      "id": "tyler_igor",
+      "query": "Tyler, The Creator 的 IGOR",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "IGOR", "artist": "Tyler, The Creator"},
+      "must_include": ["Tyler"],
+      "must_not_include": []
+    },
+    {
+      "id": "bare_blonde_is_ambiguous",
+      "query": "讲讲 Blonde 这张专辑",
+      "intent": "album_deep_dive",
+      "expected_entity": {"type": "album", "name": "Blonde"},
+      "_note": "裸标题「Blonde」存在 Frank Ocean / Bob Dylan《Blonde on Blonde》等同名作品。当 MusicBrainz 返回多个精确同名且艺人各异、且用户未给消歧艺人时，应判 ambiguous，返回消歧提示而非硬编一个完整答案。",
+      "expected_ambiguity": "ambiguous_or_prompt",
+      "must_not_include_when_ambiguous": ["Blonde on Blonde 完整解读"]
+    }
+  ]
+}

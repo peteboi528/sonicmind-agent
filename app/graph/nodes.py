@@ -726,6 +726,9 @@ def _record_runtime_result(
             content=runtime_result.data.get("answer", "已生成音乐档案。"),
             payload={"dossier": runtime_result.data.get("dossier")},
         ))
+        # 聆听路线的真实专辑作为可播放/可收藏卡片下发（复用前端 album_card 渲染）。
+        for album in (runtime_result.data.get("dossier") or {}).get("related_albums", []):
+            events.append(StreamEvent(type="album_card", content=album.get("name", ""), payload={"album": album}))
     if handler == "build_sample_dossier" and runtime_result.data.get("sample_dossier"):
         events.append(StreamEvent(
             type="sample_relations",

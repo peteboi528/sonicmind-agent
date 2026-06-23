@@ -88,8 +88,8 @@ class ToolRuntime:
                             tool=spec.name,
                             status=ToolStatus.EMPTY,
                             summary=f"{spec.name} 在知识链路预算内未返回，已降级继续。",
-                            data={"type": spec.name, "skipped_due_to_deadline": [spec.name]},
-                            metrics={"deadline_skipped": True, "timeout_as_degraded": True},
+                            data={"type": spec.name, "timed_out_tools": [spec.name]},
+                            metrics={"deadline_skipped": False, "timeout_as_degraded": True},
                         )
                         return self._finish(spec, context, span_id, started, started_at, retries, result)
                     result = ToolResult(

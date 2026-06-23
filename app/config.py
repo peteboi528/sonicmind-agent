@@ -61,6 +61,9 @@ class Settings:
         self.external_source: str = os.getenv("EXTERNAL_SOURCE", "netease")
         self.lastfm_api_key: str = os.getenv("LASTFM_API_KEY", "")
         self.tavily_api_key: str = os.getenv("TAVILY_API_KEY", "")
+        self.spotify_client_id: str = os.getenv("SPOTIFY_CLIENT_ID", "")
+        self.spotify_client_secret: str = os.getenv("SPOTIFY_CLIENT_SECRET", "")
+        self.discogs_token: str = os.getenv("DISCOGS_TOKEN", "")
         store_env = os.getenv("STORE_ROOT", "").strip()
         store_root = _absolute_path(store_env) if store_env else _default_store_root()
         self.store_candidates: dict[str, int] = {
@@ -115,15 +118,22 @@ class Settings:
         )
         # Music knowledge agent latency budget. 这些链路会并行查资料/乐评，
         # 必须有全链路墙钟上限，避免单个请求因为搜索链条过长而崩掉。
-        self.knowledge_turn_budget_seconds: float = float(os.getenv("KNOWLEDGE_TURN_BUDGET_SECONDS", "12"))
+        self.knowledge_turn_budget_seconds: float = float(os.getenv("KNOWLEDGE_TURN_BUDGET_SECONDS", "16"))
         self.knowledge_quick_budget_seconds: float = float(os.getenv("KNOWLEDGE_QUICK_BUDGET_SECONDS", "6"))
         self.knowledge_source_timeout_seconds: float = float(os.getenv("KNOWLEDGE_SOURCE_TIMEOUT_SECONDS", "3"))
-        self.knowledge_review_timeout_seconds: float = float(os.getenv("KNOWLEDGE_REVIEW_TIMEOUT_SECONDS", "4"))
+        self.knowledge_review_timeout_seconds: float = float(os.getenv("KNOWLEDGE_REVIEW_TIMEOUT_SECONDS", "8"))
         self.knowledge_llm_timeout_seconds: float = float(os.getenv("KNOWLEDGE_LLM_TIMEOUT_SECONDS", "5"))
         self.knowledge_max_review_sources: int = max(1, int(os.getenv("KNOWLEDGE_MAX_REVIEW_SOURCES", "5")))
         self.knowledge_max_search_queries: int = max(1, int(os.getenv("KNOWLEDGE_MAX_SEARCH_QUERIES", "3")))
         self.knowledge_max_citations: int = max(1, int(os.getenv("KNOWLEDGE_MAX_CITATIONS", "8")))
         self.knowledge_deep_review_enabled: bool = os.getenv("KNOWLEDGE_DEEP_REVIEW_ENABLED", "false").lower() == "true"
+        # MusicBrainz 结构化知识层（免费、无 key）：实体消歧 + 权威元数据。
+        # 评测/离线测试可关，保证确定性。
+        self.enable_musicbrainz: bool = os.getenv("ENABLE_MUSICBRAINZ", "true").lower() == "true"
+        # Spotify(audio_features/genres/popularity)与 Discogs(发行/styles/tracklist)结构化知识层。
+        # 都需凭证；缺失或关闭时知识链路自动降级到其余来源。
+        self.enable_spotify: bool = os.getenv("ENABLE_SPOTIFY", "true").lower() == "true"
+        self.enable_discogs: bool = os.getenv("ENABLE_DISCOGS", "true").lower() == "true"
         # P1-G 记忆升级：语义召回 + LLM 偏好抽取兜底 + 巩固画像。
         # 仅真实 LLM 下做 LLM 抽取/巩固；语义召回随 embeddings 开关自动降级。
         self.enable_semantic_memory: bool = os.getenv("ENABLE_SEMANTIC_MEMORY", "true").lower() == "true"

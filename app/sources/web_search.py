@@ -13,17 +13,23 @@ import urllib.request
 logger = logging.getLogger(__name__)
 
 
-def search_web_info(query: str, max_results: int = 5, api_key: str = "") -> list[dict[str, str]]:
+def search_web_info(
+    query: str,
+    max_results: int = 5,
+    api_key: str = "",
+    timeout: float | None = None,
+) -> list[dict[str, str]]:
     """搜索网页，返回结构化摘要列表。
 
     Returns list of {"title": ..., "content": ..., "url": ...} dicts.
     """
+    timeout = max(0.5, float(timeout or 15.0))
     if api_key:
-        results = _search_tavily(query, max_results, api_key)
+        results = _search_tavily(query, max_results, api_key, timeout=timeout)
         if results:
             return results
         logger.info("Tavily returned no results, falling back to DuckDuckGo")
-    return _search_duckduckgo(query, max_results)
+    return _search_duckduckgo(query, max_results, timeout=timeout)
 
 
 async def asearch_web_info(query: str, max_results: int = 5, api_key: str = "") -> list[dict[str, str]]:
@@ -67,7 +73,7 @@ async def _asearch_duckduckgo(query: str, max_results: int) -> list[dict[str, st
         return []
 
 
-def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict[str, str]]:
+def _search_tavily(query: str, max_results: int, api_key: str, timeout: float = 15.0) -> list[dict[str, str]]:
     """Tavily Search API — 高质量结构化搜索结果。"""
     url = "https://api.tavily.com/search"
     payload = json.dumps({
@@ -82,7 +88,7 @@ def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict[str,
     }
     try:
         req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
         return _parse_tavily_results(data, max_results)
     except Exception:
@@ -90,7 +96,7 @@ def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict[str,
         return []
 
 
-def _search_duckduckgo(query: str, max_results: int) -> list[dict[str, str]]:
+def _search_duckduckgo(query: str, max_results: int, timeout: float = 10.0) -> list[dict[str, str]]:
     """DuckDuckGo Instant Answer API — 纯 urllib 兜底，无需 key。
 
     质量不如 Tavily，但零配置可用。
@@ -102,7 +108,7 @@ def _search_duckduckgo(query: str, max_results: int) -> list[dict[str, str]]:
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
     try:
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
         return _parse_duckduckgo_results(data, max_results)
     except Exception:

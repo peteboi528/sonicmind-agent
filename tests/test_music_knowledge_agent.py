@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 
+from app.config import settings
 from app.graph import nodes
 from app.graph.builder import AgentGraphRunner
 from app.models import AgentPlan, StreamEvent
@@ -52,6 +53,64 @@ def test_music_compare_cleans_common_album_aliases():
     assert [entity.name for entity in entities] == ["Blonde", "Channel Orange"]
 
 
+def test_album_query_binds_explicit_artist_before_canonicalization():
+    from app.knowledge import resolve_music_entities
+
+    entities = resolve_music_entities("讲讲 Frank Ocean 的 Blonde 这张专辑，乐评怎么说？", "review_summary", {"intent": "review_summary"})
+
+    assert len(entities) == 1
+    assert entities[0].type == "album"
+    assert entities[0].name == "Blonde"
+    assert entities[0].artist == "Frank Ocean"
+
+
+def test_field_style_album_input_preserves_title_and_artist():
+    from app.knowledge import resolve_music_entities
+
+    query = "album\nBlonde\nFrank Ocean"
+    entities = resolve_music_entities(query, "review_summary", {"intent": "review_summary"})
+
+    assert len(entities) == 1
+    assert entities[0].type == "album"
+    assert entities[0].name == "Blonde"
+    assert entities[0].artist == "Frank Ocean"
+
+
+def test_two_line_album_input_preserves_title_and_artist():
+    from app.knowledge import resolve_music_entities
+
+    query = "Blonde\nFrank Ocean"
+    entities = resolve_music_entities(query, "review_summary", {"intent": "review_summary"})
+
+    assert len(entities) == 1
+    assert entities[0].type == "album"
+    assert entities[0].name == "Blonde"
+    assert entities[0].artist == "Frank Ocean"
+
+
+def test_review_search_passes_bounded_timeout(monkeypatch):
+    from app.knowledge import search_reviews
+    from app.models import MusicEntity
+
+    seen: list[float] = []
+
+    def fake_search(_query, max_results=5, api_key="", timeout=None):
+        seen.append(timeout)
+        return [{
+            "title": "Blonde / Endless Album Review - Frank Ocean - Pitchfork",
+            "url": "https://pitchfork.com/reviews/albums/22295-blonde-endless/",
+            "content": "Frank Ocean returns with richly emotional songwriting.",
+        }]
+
+    monkeypatch.setattr("app.knowledge.web_search_source.search_web_info", fake_search)
+
+    payload = search_reviews([MusicEntity(type="album", name="Blonde", artist="Frank Ocean")])
+
+    assert payload["citations"]
+    assert seen
+    assert all(value is not None and value <= settings.knowledge_review_timeout_seconds for value in seen)
+
+
 def test_kid_a_ok_computer_compare_uses_professional_profile():
     from app.knowledge import build_dossier, dossier_answer
     from app.models import MusicEntity
@@ -81,6 +140,59 @@ def test_knowledge_planned_arguments_keep_original_compare_query():
     plan.retrieval_plan.search_query = "Blonde Orange Channel Frank Ocean"
     args = nodes._planned_arguments("resolve_music_entity", "Blonde 和 orange channel的区别", plan, 5)
     assert args["query"] == "Blonde 和 orange channel的区别"
+
+
+def test_dossier_synthesizes_chinese_prose_from_evidence():
+    """有真实证据 + LLM 返回 JSON 时，summary/critical_consensus 走合成而非原始摘录直出。"""
+    from app.knowledge import build_dossier
+    from app.models import MusicCitation, MusicEntity, ReviewOpinion
+
+    class _StubLLM:
+        def generate(self, prompt, system=None, temperature=0.7, thinking=None):
+            return (
+                '{"summary": "Blonde 是 Frank Ocean 2016 年的另类 R&B 专辑，以氛围化制作著称。",'
+                ' "critical_consensus": "乐评普遍称赞其情绪深度与制作，少数认为结构松散。"}'
+            )
+
+    class _Agent:
+        llm = _StubLLM()
+
+    entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
+    metadata = [{"entity": entity.model_dump(mode="json"), "summary": "alternative R&B record from 2016", "tags": ["r&b"]}]
+    reviews = [MusicCitation(source="pitchfork", title="Blonde review", url="https://pitchfork.com/x",
+                             kind="review", excerpt="Four years after Channel Orange, Frank Ocean returns", confidence=0.9)]
+    opinions = [ReviewOpinion(source="pitchfork", sentiment="positive", summary="praises the production", citation_id=0)]
+
+    dossier = build_dossier(
+        _Agent(), "讲讲 Blonde", "album_deep_dive", [entity],
+        metadata, [], reviews, opinions, [],
+    )
+    assert "Frank Ocean" in dossier.summary
+    assert "另类 R&B" in dossier.summary or "氛围" in dossier.summary
+    # 不再是原始英文摘录直出
+    assert "Four years after" not in dossier.critical_consensus
+    assert "乐评" in dossier.critical_consensus
+
+
+def test_dossier_falls_back_to_mechanical_when_llm_returns_non_json():
+    """LLM 返回非 JSON（如 MockLLM 散文）时，安全回落机械摘要，不抛错。"""
+    from app.knowledge import build_dossier
+    from app.models import MusicEntity
+
+    class _ProseLLM:
+        def generate(self, prompt, system=None, temperature=0.7, thinking=None):
+            return "这是一段没有 JSON 结构的散文回复。"
+
+    class _Agent:
+        llm = _ProseLLM()
+
+    entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
+    metadata = [{"entity": entity.model_dump(mode="json"), "summary": "alternative R&B record", "tags": ["r&b"]}]
+    dossier = build_dossier(
+        _Agent(), "讲讲 Blonde", "album_deep_dive", [entity], metadata, [], [], [], [],
+    )
+    # 回落到机械 summary（meta_text 截断）
+    assert dossier.summary.startswith("alternative R&B record")
 
 
 def test_sample_lookup_routes_to_sample_tool_chain():
@@ -159,6 +271,8 @@ def test_runtime_degrades_knowledge_timeout_without_error(monkeypatch):
     assert result.status == ToolStatus.EMPTY
     assert result.error is None
     assert result.metrics["timeout_as_degraded"] is True
+    assert result.metrics["deadline_skipped"] is False
+    assert result.data["timed_out_tools"] == ["review_search"]
 
 
 def test_sample_source_ranking_and_relation_extraction():
@@ -206,12 +320,16 @@ def test_sample_stream_returns_dossier_and_source_cards(agent, monkeypatch):
 
 def test_knowledge_stream_returns_dossier_and_latency_budget(agent, monkeypatch):
     monkeypatch.setattr("app.knowledge.web_search_source.search_web_info", lambda *args, **kwargs: [])
+    # 关掉所有结构化外部源，保证 dossier.partial 由 web 空决定，确定性（不依赖网络）。
+    monkeypatch.setattr("app.config.settings.enable_musicbrainz", False)
+    monkeypatch.setattr("app.config.settings.enable_spotify", False)
+    monkeypatch.setattr("app.config.settings.enable_discogs", False)
     events = _events(agent, "讲讲 Blonde 这张专辑，乐评怎么说？")
     assert events[-1].type == "final"
     assert any(event.type == "dossier" for event in events)
     payload = events[-1].payload
     assert payload["dossier"]["partial"] is True
     latency = payload["trace_summary"]["latency_budget"]
-    assert latency["budget_seconds"] == 12.0
+    assert latency["budget_seconds"] == settings.knowledge_turn_budget_seconds
     assert latency["partial"] is True
     assert payload["trace_summary"]["recovery"] is False

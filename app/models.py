@@ -451,6 +451,7 @@ class MusicDossier(BaseModel):
     audience_reception: str = ""
     key_tracks: list[TrackRef] = Field(default_factory=list)
     listening_guide: list[str] = Field(default_factory=list)
+    related_albums: list[dict[str, Any]] = Field(default_factory=list)
     related_entities: list[MusicEntity] = Field(default_factory=list)
     citations: list[MusicCitation] = Field(default_factory=list)
     review_opinions: list[ReviewOpinion] = Field(default_factory=list)

@@ -21,6 +21,7 @@ class _FakeResp:
 
 
 def _patch_urlopen(monkeypatch, payload):
+    musicbrainz_client._RESPONSE_CACHE.clear()  # 进程缓存跨测试持久，逐测试清空保隔离
     monkeypatch.setattr(
         musicbrainz_client.urllib.request, "urlopen",
         lambda req, timeout: _FakeResp(payload),

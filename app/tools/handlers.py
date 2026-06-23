@@ -284,11 +284,17 @@ def _knowledge_entities_from_prior(ctx: ToolContext) -> list[Any]:
 
 
 def _resolve_music_entity(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    from app.knowledge import resolve_music_entities
+    from app.knowledge import canonicalize_entities, resolve_music_entities
 
     plan = ctx.plan or {}
     intent = str(args.get("intent") or plan.get("intent") or "")
     entities = resolve_music_entities(args.get("query") or ctx.query, intent, plan)
+    # 消歧：在这一阶段用 MusicBrainz 把裸名/裸标题钉成权威 (name, artist)，
+    # 下游 metadata/review 全部继承，避免各源对同名作品各自解析出不同实体。
+    # 但 sample_lookup 例外——采样溯源的证据匹配依赖用户给的逐字曲名，
+    # MB 把标题改写成规范名(如 "Bound 2"→release-group 名)会打断 canonical 证据匹配。
+    if intent != "sample_lookup":
+        entities = canonicalize_entities(entities, ctx.deadline_at)
     data = {
         "type": "music_entity_resolution",
         "entities": [entity.model_dump(mode="json") for entity in entities],
@@ -345,22 +351,28 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     review_citations: list[MusicCitation] = []
     opinions: list[ReviewOpinion] = []
     tracks: list[TrackRef] = []
+    albums: list[dict[str, Any]] = []
     skipped: list[str] = []
+    timed_out: list[str] = []
     for result in ctx.prior_results or []:
         if result.get("type") == "music_metadata":
             metadata.extend(result.get("metadata") or [])
             metadata_citations.extend(MusicCitation.model_validate(item) for item in result.get("citations", []) or [])
             tracks.extend(TrackRef.model_validate(item) for item in result.get("tracks", []) or [])
+            albums.extend(result.get("albums") or [])
             skipped.extend(result.get("skipped_due_to_deadline") or [])
+            timed_out.extend(result.get("timed_out_tools") or [])
         elif result.get("type") == "review_search":
             review_citations.extend(MusicCitation.model_validate(item) for item in result.get("citations", []) or [])
             opinions.extend(ReviewOpinion.model_validate(item) for item in result.get("opinions", []) or [])
             skipped.extend(result.get("skipped_due_to_deadline") or [])
+            timed_out.extend(result.get("timed_out_tools") or [])
         elif result.get("type") == "music_entity_resolution" and not entities:
             entities = [MusicEntity.model_validate(item) for item in result.get("entities", []) or []]
     dossier = build_dossier(
         ctx.agent, query, intent, entities, metadata, metadata_citations,
-        review_citations, opinions, tracks, ctx.deadline_at, skipped,
+        review_citations, opinions, tracks, ctx.deadline_at, skipped, albums,
+        timed_out=timed_out,
     )
     data = {
         "type": "music_dossier",

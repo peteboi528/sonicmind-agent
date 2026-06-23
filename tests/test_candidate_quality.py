@@ -8,6 +8,7 @@ from app.agent import (
     _classify_candidate_kind,
     _is_playlist_context_compatible,
     _is_recommendation_quality_track,
+    _playlist_online_queries,
     _query_requests_variant_content,
     _valid_external_track,
 )
@@ -243,3 +244,43 @@ class TestPlaylistContextGate:
             external_id="sleep-1", title="雨声 白噪音", artist="纯音乐馆", source="netease"
         )
         assert _is_playlist_context_compatible("帮我做睡前放松歌单", track) is True
+
+    def test_afternoon_scene_rejects_functional_audio_titles(self):
+        noisy = [
+            ("舒适的下午", "咖啡厅音乐"),
+            ("放松chill（轻音乐）", "轻松治愈"),
+            ("下午茶音乐 放松身心", "音眠治愈所"),
+            ("午后放松时光（优美旋律）", "治愈音乐集"),
+            ("放松chill", "轻松治愈"),
+            ("轻松放松（舒缓解压）", "解压放松治愈"),
+        ]
+        for index, (title, artist) in enumerate(noisy):
+            track = ExternalTrack(
+                external_id=f"afternoon-bad-{index}",
+                title=title,
+                artist=artist,
+                source="netease",
+            )
+            assert _is_playlist_context_compatible("推荐适合下午的歌", track) is False, title
+
+    def test_afternoon_scene_keeps_normal_song_candidates(self):
+        clean = [
+            ("Sunset Lover", "Petit Biscuit"),
+            ("Sweet Disposition", "The Temper Trap"),
+            ("踊り子", "Vaundy"),
+        ]
+        for index, (title, artist) in enumerate(clean):
+            track = ExternalTrack(
+                external_id=f"afternoon-ok-{index}",
+                title=title,
+                artist=artist,
+                source="netease",
+            )
+            assert _is_playlist_context_compatible("推荐适合下午的歌", track) is True, title
+
+    def test_afternoon_playlist_queries_use_music_style_seeds(self):
+        queries = _playlist_online_queries("推荐适合下午的歌 轻快 律动", "推荐适合下午的歌")
+        joined = " ".join(queries).lower()
+        assert "indie pop" in joined
+        assert "city pop" in joined
+        assert "下午茶音乐" not in joined

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -23,18 +24,34 @@ _BASE_URL = "https://musicbrainz.org/ws/2"
 _HEADERS = {"User-Agent": "MusicAgent/1.0 (https://github.com/peteboi528/MusicAgent)"}
 _TIMEOUT = 6
 
+# 进程级响应缓存：MB 建议 ≤1 req/s，而知识链路对同一实体会调两次——消歧阶段
+# (canonicalize_entities) 和元数据阶段 (_metadata_for_entity) 各一次。缓存让第二次
+# 命中内存、不再发起被限流的冗余请求，省下一整个网络 round-trip 给慢源腾预算。
+_RESPONSE_CACHE: dict[str, dict] = {}
+_RESPONSE_CACHE_LOCK = threading.Lock()
+_RESPONSE_CACHE_MAX = 128
+
 
 def _get(path: str, **params: Any) -> dict:
-    """统一 GET MusicBrainz REST API(fmt=json)。失败返回 {}。"""
+    """统一 GET MusicBrainz REST API(fmt=json)。失败返回 {}。命中进程缓存则跳过网络。"""
+    cache_key = path + "?" + urllib.parse.urlencode(sorted({"fmt": "json", **params}.items()))
+    with _RESPONSE_CACHE_LOCK:
+        if cache_key in _RESPONSE_CACHE:
+            return _RESPONSE_CACHE[cache_key]
     query = {"fmt": "json", **params}
     url = f"{_BASE_URL}/{path.lstrip('/')}?{urllib.parse.urlencode(query)}"
     try:
         req = urllib.request.Request(url, headers=_HEADERS)
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-            return json.loads(resp.read().decode())
+            data = json.loads(resp.read().decode())
     except Exception:
         logger.debug("MusicBrainz API call failed: path=%s params=%s", path, params, exc_info=True)
         return {}
+    with _RESPONSE_CACHE_LOCK:
+        if len(_RESPONSE_CACHE) >= _RESPONSE_CACHE_MAX:
+            _RESPONSE_CACHE.clear()
+        _RESPONSE_CACHE[cache_key] = data
+    return data
 
 
 def _as_int(value: Any, default: int = 0) -> int:

@@ -2703,6 +2703,7 @@ class AudioVisualAgent:
         memory_query = self.memory.weighted_query(memory, include_artists=False)
         search_goal = _extract_search_query(goal)
         anchors = _extract_recommendation_anchors(goal)
+        scene_queries = _scene_playlist_queries(goal) or _scene_playlist_queries(search_goal)
         has_entity = self._query_has_entity(search_goal)
         taste_summary = self.summarize_taste(user_id, include_artists=has_entity, memory=memory) if memory.taste_profile else ""
         library_artists = list({a.artist for a in self.list_assets() if a.artist})[:10] if has_entity else []
@@ -2720,7 +2721,7 @@ class AudioVisualAgent:
 
         if seed_supply >= top_k:
             trace_lines.append(f"route=seed_candidates, supplied={seed_supply}")
-        elif has_entity or anchors.explicit:
+        elif (has_entity and not scene_queries) or anchors.explicit:
             # 路由C：精确/锚点搜索。复杂小众 query 不能只拿一条长 search_goal 搜；
             # 逐个艺人/曲风 seed 召回，再统一去重和重排，避免 long query 召回空或偏移。
             seeds = _recommendation_search_seeds(search_goal, goal, anchors, search_variants)
@@ -2749,8 +2750,13 @@ class AudioVisualAgent:
             taste_genres = ""
             if memory.taste_profile and memory.taste_profile.top_genres:
                 taste_genres = " ".join(g for g, _ in memory.taste_profile.top_genres[:2])
-            playlist_query = f"{taste_genres} {search_goal}".strip() or goal
-            playlist_tracks = search_and_extract(playlist_query, max_playlists=3, tracks_per_playlist=top_k)
+            playlist_query = scene_queries[0] if scene_queries else (f"{taste_genres} {search_goal}".strip() or goal)
+            candidate_budget = max(top_k * 3, 12)
+            playlist_tracks = search_and_extract(
+                playlist_query,
+                max_playlists=3,
+                tracks_per_playlist=candidate_budget,
+            )
             trace_lines.append(f"route=playlist, query={playlist_query!r}, extracted={len(playlist_tracks)}")
             all_candidates.extend(playlist_tracks)
 
@@ -2761,7 +2767,7 @@ class AudioVisualAgent:
                 taste_summary=taste_summary,
                 exclusion_rules=memory.exclusion_rules,
                 library_artists=library_artists,
-                target_count=top_k,
+                target_count=max(top_k * 2, 8),
                 llm=self.llm,
             )
             trace_lines.append(f"route=llm_candidates, generated={len(llm_tracks)}")
@@ -2774,11 +2780,24 @@ class AudioVisualAgent:
             lastfm_tracks = discover_from_lastfm(
                 top_artists=taste_artists or library_artists,
                 top_genres=taste_genre_names,
-                target_count=top_k,
+                target_count=max(top_k * 2, 8),
             )
             if lastfm_tracks:
                 trace_lines.append(f"route=lastfm, verified={len(lastfm_tracks)}")
                 all_candidates.extend(lastfm_tracks)
+
+            # 场景型请求可宽召回，但使用风格/情绪 seed，不再用“下午/放松”这类
+            # 容易被功能音频标题劫持的原词补位。
+            for scene_query in scene_queries[1:]:
+                if len(_dedupe_tracks(all_candidates)) >= max(top_k * 3, top_k):
+                    break
+                batch = search_and_extract(
+                    scene_query,
+                    max_playlists=2,
+                    tracks_per_playlist=max(top_k * 2, 10),
+                )
+                trace_lines.append(f"route=scene_playlist, query={scene_query!r}, extracted={len(batch)}")
+                all_candidates.extend(batch)
 
         # 本地曲库必须真正参与推荐，而不只是被压缩成画像后再去线上搜。
         # 精确实体查询只加入标题/歌手匹配项；场景查询加入画像/场景相关项。
@@ -2794,6 +2813,7 @@ class AudioVisualAgent:
             and _is_recommendation_quality_track(
                 track, allow_variants=_query_requests_variant_content(goal)
             )
+            and _is_playlist_context_compatible(goal, track)
         ]
 
         # 过滤上一轮已展示的曲目（延续指令去重）
@@ -2802,14 +2822,21 @@ class AudioVisualAgent:
 
         # 兜底：用 search_goal 再搜一次。带 offset 翻页（已排除 + 已收集数），
         # 否则同查询永远返回 top-N，与首轮 batch 重复，dedup 全跳过、补不了量。
-        if len(verified) < top_k and search_goal and not anchors.explicit:
+        if len(verified) < top_k and search_goal and not anchors.explicit and not scene_queries:
             fb_offset = len(excluded_tracks or []) + len(verified)
             fallback_batch = self.search_web_music(
                 search_goal, top_k=max(top_k * 2, top_k), offset=fb_offset,
                 variants=search_variants,
             )
             for track in fallback_batch:
-                if _is_verified_online_track(track) and not self.library.is_disliked(user_id, track):
+                if (
+                    _is_verified_online_track(track)
+                    and not self.library.is_disliked(user_id, track)
+                    and _is_recommendation_quality_track(
+                        track, allow_variants=_query_requests_variant_content(goal)
+                    )
+                    and _is_playlist_context_compatible(goal, track)
+                ):
                     if not any(_track_key(track) == _track_key(v) for v in verified):
                         verified.append(track)
 
@@ -2829,7 +2856,14 @@ class AudioVisualAgent:
             pool_hits = self._dense_library_fallback(
                 search_goal or goal, verified, limit=max(top_k * 2, top_k),
             )
-            pool_hits = [t for t in pool_hits if not self.library.is_disliked(user_id, t)]
+            pool_hits = [
+                t for t in pool_hits
+                if not self.library.is_disliked(user_id, t)
+                and _is_recommendation_quality_track(
+                    t, allow_variants=_query_requests_variant_content(goal)
+                )
+                and _is_playlist_context_compatible(goal, t)
+            ]
             if anchors.explicit:
                 pool_hits = [t for t in pool_hits if _track_matches_recommendation_anchors(t, anchors)]
             if pool_hits:
@@ -3420,8 +3454,8 @@ def _track_matches_recommendation_anchors(track: Asset | ExternalTrack, anchors:
 def _playlist_search_terms(instruction: str) -> str:
     terms = [instruction]
     lowered = instruction.lower()
-    if "chill" in lowered or "lofi" in lowered:
-        terms.extend(["放松", "治愈", "浪漫", "民谣", "R&B"])
+    if "chill" in lowered or "lofi" in lowered or any(token in instruction for token in ("下午", "午后", "下午茶")):
+        terms.extend(["轻快", "律动", "indie pop", "city pop", "R&B"])
     if "跑步" in instruction or "运动" in instruction:
         terms.extend(["激昂", "热血", "电子", "摇滚"])
     if "工作" in instruction or "专注" in instruction:
@@ -3432,6 +3466,7 @@ def _playlist_search_terms(instruction: str) -> str:
 _SCENARIO_PLAYLIST_SIGNALS = {
     "跑步", "运动", "健身", "workout", "running", "通勤", "开车", "学习", "专注",
     "工作", "睡眠", "助眠", "派对", "聚会", "散步", "旅行", "约会", "泡澡",
+    "下午", "午后", "下午茶", "深夜", "夜晚", "早晨", "上午", "傍晚", "周末",
 }
 
 
@@ -3445,6 +3480,12 @@ def _curated_playlist_query(instruction: str) -> str:
     lowered = instruction.lower()
     if any(token in lowered for token in ("跑步", "运动", "健身", "running", "workout")):
         return "跑步 动感 节奏"
+    if any(token in lowered or token in instruction for token in ("下午", "午后", "afternoon")):
+        return "午后 chill indie pop"
+    if any(token in lowered or token in instruction for token in ("深夜", "夜晚", "凌晨", "late night")):
+        return "深夜 chill R&B"
+    if any(token in lowered or token in instruction for token in ("早晨", "早上", "清晨", "morning")):
+        return "清晨 轻快 indie pop"
     if any(token in lowered for token in ("学习", "专注", "工作")):
         return "学习 专注 工作 纯音乐"
     if any(token in lowered for token in ("睡眠", "助眠", "泡澡")):
@@ -3454,6 +3495,47 @@ def _curated_playlist_query(instruction: str) -> str:
     if any(token in lowered for token in ("派对", "聚会")):
         return "派对 高能 热门"
     return _extract_search_query(instruction) or instruction
+
+
+def _scene_playlist_queries(instruction: str) -> list[str]:
+    """Map human scenes to musical recall seeds instead of literal title words."""
+    lowered = (instruction or "").lower()
+    queries: list[str] = []
+
+    def add_many(values: tuple[str, ...]) -> None:
+        for value in values:
+            if value and value not in queries:
+                queries.append(value)
+
+    if any(token in lowered or token in instruction for token in ("下午", "午后", "下午茶", "afternoon")):
+        add_many((
+            "午后 chill indie pop",
+            "afternoon mellow pop",
+            "city pop chill",
+            "chill R&B neo soul",
+            "轻快 放松 华语流行",
+        ))
+    if any(token in lowered or token in instruction for token in ("深夜", "夜晚", "凌晨", "late night")):
+        add_many((
+            "深夜 chill R&B",
+            "late night neo soul",
+            "dream pop 夜晚",
+            "ambient pop 深夜",
+        ))
+    if any(token in lowered or token in instruction for token in ("早晨", "早上", "清晨", "morning")):
+        add_many((
+            "清晨 轻快 indie pop",
+            "morning acoustic pop",
+            "sunny city pop",
+            "起床 清新 流行",
+        ))
+    if any(token in lowered for token in ("chill", "lofi", "lo-fi")):
+        add_many((
+            "chill R&B",
+            "lo-fi hip hop",
+            "mellow indie pop",
+        ))
+    return queries[:6]
 
 
 def _query_requests_variant_content(query: str) -> bool:
@@ -3541,17 +3623,92 @@ _LONG_VIDEO_RECOMMENDATION_MARKERS = (
 )
 
 
+_FUNCTIONAL_AUDIO_PATTERNS = (
+    r"白噪音", r"粉噪音", r"褐噪音", r"助眠", r"催眠", r"睡前", r"睡眠", r"入睡",
+    r"工作学习", r"学习工作", r"学习(?:时|用|专注|必备|音乐)?", r"专注力", r"提高专注",
+    r"放松(?:音乐|身心|催眠|冥想|疗愈|解压)?", r"舒缓解压", r"解压放松",
+    r"轻音乐", r"纯音乐", r"背景音乐", r"咖啡厅音乐", r"下午茶音乐", r"午后放松时光",
+    r"舒适的下午", r"冥想", r"spa", r"asmr", r"雨声", r"雨水声", r"下雨声", r"雷声",
+    r"雨林", r"自然(?:声|白噪音)", r"睡觉", r"安眠",
+    r"white\s*noise", r"brown\s*noise", r"pink\s*noise", r"sleep(?:ing)?",
+    r"study(?:ing)?", r"focus", r"concentrat(?:e|ion)", r"meditation", r"relax(?:ing|ation)?",
+    r"coffee\s*(?:shop|house|cafe)\s*music", r"background\s*music",
+    r"rain\s*sounds?", r"thunder\s*sounds?", r"lullaby",
+)
+
+_FUNCTIONAL_AUDIO_ARTIST_PATTERNS = (
+    r"纯音乐馆", r"轻松治愈", r"音眠治愈所", r"治愈音乐集", r"解压放松治愈",
+    r"休闲音乐", r"睡眠音乐", r"助眠音乐", r"白噪音", r"背景音乐", r"轻音乐",
+    r"咖啡厅音乐", r"咖啡馆音乐", r"咖啡音乐", r"放松治愈", r"催眠", r"冥想",
+    r"sleep\s*music", r"relax(?:ing|ation)?\s*music", r"study\s*music",
+    r"coffee\s*(?:shop|house|cafe)\s*music",
+)
+
+_GENERIC_SCENE_TITLE_COMPACTS = {
+    "放松chill轻音乐",
+    "放松chill",
+    "舒适的下午",
+    "下午茶音乐放松身心",
+    "午后放松时光优美旋律",
+    "轻松放松舒缓解压",
+    "工作学习时听的音乐提高专注力",
+    "工作学习时听的音乐",
+    "提高专注力",
+    "雨林下雨声自然白噪音工作学习睡觉",
+    "高音质白噪音雨水声雷声放松催眠学习睡前音乐工作学习必备",
+}
+
+_GENERIC_SCENE_ARTIST_COMPACTS = {
+    "轻松治愈", "音眠治愈所", "治愈音乐集", "解压放松治愈",
+    "纯音乐馆", "休闲音乐", "睡眠音乐", "助眠音乐", "背景音乐",
+    "咖啡厅音乐", "咖啡馆音乐", "咖啡音乐",
+}
+
+
+def _is_scene_recommendation_instruction(instruction: str) -> bool:
+    lowered = (instruction or "").lower()
+    strict_scene_tokens = (
+        *_RUNNING_PLAYLIST_TOKENS,
+        "通勤", "开车", "派对", "聚会", "散步", "旅行", "约会",
+    )
+    return bool(_scene_playlist_queries(instruction)) or any(token in lowered for token in strict_scene_tokens)
+
+
+def _looks_like_functional_audio(track: Any) -> bool:
+    title = (getattr(track, "title", "") or "").strip()
+    artist = (getattr(track, "artist", "") or "").strip()
+    lowered_title = title.lower()
+    lowered_artist = artist.lower()
+    combined = f"{lowered_title} {lowered_artist}"
+    compact = re.sub(r"\s+", "", combined)
+    title_compact = re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", lowered_title)
+    artist_compact = re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", lowered_artist)
+
+    if title_compact in _GENERIC_SCENE_TITLE_COMPACTS or artist_compact in _GENERIC_SCENE_ARTIST_COMPACTS:
+        return True
+    if any(re.search(pattern, combined) or re.search(pattern, compact) for pattern in _FUNCTIONAL_AUDIO_PATTERNS):
+        return True
+    if any(re.search(pattern, lowered_artist) or re.search(pattern, artist_compact) for pattern in _FUNCTIONAL_AUDIO_ARTIST_PATTERNS):
+        return True
+    scene_words = ("下午", "午后", "放松", "治愈", "舒缓", "解压", "chill", "睡眠", "学习", "专注", "咖啡")
+    title_scene_hits = sum(1 for word in scene_words if word in lowered_title)
+    if title_scene_hits >= 2 and (len(title) > 12 or artist_compact in _GENERIC_SCENE_ARTIST_COMPACTS):
+        return True
+    return False
+
+
 def _is_playlist_context_compatible(instruction: str, track: Any) -> bool:
     """Reject candidates that are formally valid songs but clash with a scene playlist.
 
     The generic quality gate answers “does this look recommendable at all?”.  This
-    layer answers “does it obviously violate the current playlist scene?”.  Keep it
-    intentionally conservative: for now we only hard-filter running/workout lists,
-    where sleepy/study/noise candidates are especially damaging.
+    layer answers “does it obviously violate the current playlist scene?”.
     """
     lowered_instruction = (instruction or "").lower()
-    if not any(token in lowered_instruction for token in _RUNNING_PLAYLIST_TOKENS):
+    if not _is_scene_recommendation_instruction(instruction):
         return True
+
+    if _looks_like_functional_audio(track):
+        return False
 
     title = (getattr(track, "title", "") or "").strip()
     artist = (getattr(track, "artist", "") or "").strip()
@@ -3562,7 +3719,10 @@ def _is_playlist_context_compatible(instruction: str, track: Any) -> bool:
     combined = f"{lowered_title} {lowered_artist}"
     compact = re.sub(r"\s+", "", combined)
 
-    if any(re.search(pattern, combined) or re.search(pattern, compact) for pattern in _RUNNING_PLAYLIST_ANTI_CONTEXT_PATTERNS):
+    if any(token in lowered_instruction for token in _RUNNING_PLAYLIST_TOKENS) and any(
+        re.search(pattern, combined) or re.search(pattern, compact)
+        for pattern in _RUNNING_PLAYLIST_ANTI_CONTEXT_PATTERNS
+    ):
         return False
 
     # B 站/视频搜索常返回“推荐文案标题”，它们可能包含真实歌曲名，但不是干净的
@@ -3588,14 +3748,16 @@ def _is_playlist_context_compatible(instruction: str, track: Any) -> bool:
     return True
 
 
-def _playlist_online_queries(search_terms: str) -> list[str]:
+def _playlist_online_queries(search_terms: str, instruction: str | None = None) -> list[str]:
     queries = [search_terms]
     lowered = search_terms.lower()
+    for scene_query in _scene_playlist_queries(instruction or search_terms):
+        queries.append(scene_query)
     if "chill" in lowered or "放松" in search_terms:
         queries.extend([
-            "chill R&B 放松 歌曲推荐",
-            "华语 chill 放松 歌单",
-            "R&B 民谣 放松 歌曲",
+            "chill R&B neo soul",
+            "华语 chill 流行",
+            "mellow indie pop",
         ])
     if "跑步" in search_terms or "运动" in search_terms:
         queries.extend([

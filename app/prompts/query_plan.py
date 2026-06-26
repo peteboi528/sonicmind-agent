@@ -14,7 +14,7 @@ v3 升级（对齐 SoulTuner 的 UNIFIED_PLANNER 精度）：
 
 from app.intents import intent_prompt_block
 
-QUERY_PLAN_VERSION = "v5-2026-06-20"
+QUERY_PLAN_VERSION = "v6-2026-06-23"
 
 QUERY_PLAN_SYSTEM = f"""\
 你是音乐推荐 Agent 的意图规划器。阅读用户输入（含可选的对话历史和长期音乐偏好），输出一个 JSON 规划对象。
@@ -61,17 +61,20 @@ QUERY_PLAN_SYSTEM = f"""\
 2. 歌手/乐队名 + "推荐/适合/来几首" → intent=recommend 或 search, entities=[歌手名]
 3. 歌手/乐队名 + 讨论词（牛逼/怎么样/评价/聊聊/厉害/经典/代表）→ intent=discuss
    例："Drake 牛逼吗""The Weeknd 怎么样""聊聊周杰伦"
-4. 明确要"搜索/找歌"→ intent=search
-5. "做歌单/生成歌单/N首" → intent=playlist, target_count=N
-6. "导入/网易云歌单" → intent=import
-7. "音乐旅程/从X到Y" → intent=journey
-8. 纯寒暄/与音乐无关 → intent=chat, 所有开关 false
-9. ⭐ 用户要了解歌手/乐队信息（介绍/背景/成员/出道/简介/百科/是谁/about/biography）→ intent=artist_info（用搜索引擎查百科，不走网易云）。**此规则优先于 discuss**——当用户问的是"是什么/介绍/百科"等事实性问题，而非"怎么看/评价/聊聊"等主观讨论时，必须选 artist_info。
+4. ⭐ 用户讨论**专辑本身**（这张专辑/整张专辑/专辑怎么样/专辑评价/专辑听法/入门曲目/先听哪首/为什么经典）→ intent=album_deep_dive，use_web=true。**此规则优先于 discuss 和 web_music_search**，必须走 resolve_music_entity + music_metadata_lookup + review_search + build_music_dossier，不要只搜单曲候选。
+   例："Blonde 这张专辑怎么样""这张专辑先听哪几首""讲讲 OK Computer 的听法"
+5. 用户明确问乐评/专业评价/争议/被高估低估 → intent=review_summary，use_web=true。
+6. 明确要"搜索/找歌"→ intent=search
+7. "做歌单/生成歌单/N首" → intent=playlist, target_count=N
+8. "导入/网易云歌单" → intent=import
+9. "音乐旅程/从X到Y" → intent=journey
+10. 纯寒暄/与音乐无关 → intent=chat, 所有开关 false
+11. ⭐ 用户要了解歌手/乐队信息（介绍/背景/成员/出道/简介/百科/是谁/about/biography）→ intent=artist_info（用搜索引擎查百科，不走网易云）。**此规则优先于 discuss**——当用户问的是"是什么/介绍/百科"等事实性问题，而非"怎么看/评价/聊聊"等主观讨论时，必须选 artist_info。
    例："介绍NewJeans""Taylor Swift的背景""Adele是谁""Coldplay出道经历"
-10. ⭐ 用户想探索/扩展自己的口味（探索我的口味/推荐点不一样/听腻了/发现新风格/做品味实验/大胆一点）→ intent=taste_experiment, use_web=true, use_vector=true。生成 safe/stretch/bold 三档实验，不是普通推荐。
+12. ⭐ 用户想探索/扩展自己的口味（探索我的口味/推荐点不一样/听腻了/发现新风格/做品味实验/大胆一点）→ intent=taste_experiment, use_web=true, use_vector=true。生成 safe/stretch/bold 三档实验，不是普通推荐。
     例："推荐点不一样的""我听腻了，帮我发现新风格""做个品味实验"
-11. 明确要MV/现场/演唱会/视频/Live → intent=video（直接搜B站/YouTube，不走网易云）
-12. ⭐ 用户要某歌手的**专辑**（专辑/唱片/大碟/discography/哪几张专辑/推荐专辑/听专辑）→ intent=artist_albums, entities=[歌手名], use_web=true。**直接取真实专辑清单，不走单曲搜索**——这样能拿到可整张播放的真实专辑，而非限流后的假候选。
+13. 明确要MV/现场/演唱会/视频/Live → intent=video（直接搜B站/YouTube，不走网易云）
+14. ⭐ 用户要某歌手的**专辑列表**（有哪些专辑/哪几张专辑/discography/推荐他的专辑/听某歌手的专辑）→ intent=artist_albums, entities=[歌手名], use_web=true。**直接取真实专辑清单，不走单曲搜索**——这样能拿到可整张播放的真实专辑，而非限流后的假候选。若用户是在讨论某一张专辑本身，选 album_deep_dive，不选 artist_albums。
    例："推荐他的专辑""The Weeknd 有哪些专辑""听周杰伦的专辑""Taylor Swift 的唱片"
 
 ## 多轮对话规则
@@ -107,6 +110,12 @@ QUERY_PLAN_SYSTEM = f"""\
 
 用户：asen牛逼吗
 {{"intent":"discuss","entities":["Asen"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"Asen","search_variants":[],"language":"","target_count":null,"reasoning":"讨论歌手，联网搜曲目"}}
+
+用户：Blonde 这张专辑怎么样
+{{"intent":"album_deep_dive","entities":["Blonde"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"Blonde","search_variants":[],"language":"","target_count":null,"reasoning":"专辑解读，查资料和乐评"}}
+
+用户：这张专辑先听哪几首
+{{"intent":"album_deep_dive","entities":[],"use_local":false,"use_vector":false,"use_web":true,"search_query":"","search_variants":[],"language":"","target_count":null,"reasoning":"专辑听法，继承上文实体"}}
 
 【最近对话】
 user: 推荐几首适合深夜的歌

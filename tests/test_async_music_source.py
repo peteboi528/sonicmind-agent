@@ -19,6 +19,7 @@ from app.tools.registry import TOOL_REGISTRY
 from app.tools.runtime import ToolRuntime
 
 _REAL_ASYNC_VIDEO_SEARCH = AudioVisualAgent.search_videos_async
+_REAL_ASYNC_WEB_SEARCH = AudioVisualAgent.search_web_music_async
 
 
 class _Response:
@@ -110,6 +111,51 @@ def test_async_runtime_prefers_async_handler():
 
     assert result.status == ToolStatus.OK
     assert calls == {"sync": 0, "async": 1}
+
+
+def test_async_web_music_fallback_uses_keyword_arguments(tmp_path, monkeypatch):
+    agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("offline")
+
+    called = {}
+
+    def fake_sync(*, query, top_k=5, relevance_query="", include_video_sources=False, offset=0, variants=None):
+        called.update({
+            "query": query,
+            "top_k": top_k,
+            "relevance_query": relevance_query,
+            "include_video_sources": include_video_sources,
+            "offset": offset,
+            "variants": variants,
+        })
+        return [_track for _track in [
+            ExternalTrack(external_id="1", title="Night Song", artist="Artist", source="netease")
+        ]]
+
+    monkeypatch.setattr("app.sources.netease.asearch_netease_many", boom)
+    monkeypatch.setattr(agent, "search_web_music", fake_sync)
+
+    result = asyncio.run(_REAL_ASYNC_WEB_SEARCH(
+        agent,
+        "night run",
+        top_k=4,
+        relevance_query="night",
+        include_video_sources=True,
+        offset=2,
+        variants=None,
+    ))
+
+    assert called == {
+        "query": "night run",
+        "top_k": 4,
+        "relevance_query": "night",
+        "include_video_sources": True,
+        "offset": 2,
+        "variants": None,
+    }
+    assert result[0].title == "Night Song"
 
 
 def test_streaming_graph_uses_async_music_handler(tmp_path, monkeypatch):

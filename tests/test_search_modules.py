@@ -414,12 +414,19 @@ class TestSearchAndExtract:
         assert "Song B" in titles
         assert "Song C" in titles
 
+    @patch("app.search.netease_playlist._offline_playlist_fallback")
     @patch("app.search.netease_playlist.search_netease_playlists")
-    def test_no_playlists_returns_empty(self, mock_search):
+    def test_no_playlists_uses_offline_fallback(self, mock_search, mock_fallback):
         mock_search.return_value = []
+        mock_fallback.return_value = [
+            ExternalTrack(external_id="fallback-1", title="Fallback Song", artist="Offline", source="local"),
+        ]
         from app.search.netease_playlist import search_and_extract
 
-        assert search_and_extract("test") == []
+        result = search_and_extract("test")
+
+        assert [track.title for track in result] == ["Fallback Song"]
+        mock_fallback.assert_called_once()
 
     @patch("app.search.netease_playlist.get_playlist_tracks")
     @patch("app.search.netease_playlist.search_netease_playlists")

@@ -51,13 +51,21 @@ async function dislike() {
 }
 
 async function addToLibrary() {
-  const url = props.card.playback_url;
+  const card = props.card;
+  // 入库靠「解析来源页 URL → 识别 → 入库」（与歌单导入同路径），不是喂 CDN 直链。
+  // 推荐/每日卡片不预带 playback_url（播放时才取流），故按 source+source_id 构造页 URL。
+  let url = "";
+  if (card.source === "netease" && card.source_id) {
+    url = `https://music.163.com/song?id=${card.source_id}`;
+  } else if (card.playback_url) {
+    url = card.playback_url;  // bilibili/youtube 等回退到直链
+  }
   if (!url) { emit("toast", "⚠️ 无可入库链接"); return; }
   adding.value = true;
   try {
     await api.ingest(url);
-    emit("toast", `《${props.card.title}》已加入曲库 📥`);
-    emit("added", props.card);
+    emit("toast", `《${card.title}》已加入曲库 📥`);
+    emit("added", card);
   } catch { emit("toast", "⚠️ 入库失败，请稍后重试"); }
   finally { adding.value = false; }
 }

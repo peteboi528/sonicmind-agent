@@ -16,7 +16,7 @@ _KNOWLEDGE_TOOL_LIMITS = {
     "resolve_music_entity": "knowledge_source_timeout_seconds",
     "music_metadata_lookup": "knowledge_source_timeout_seconds",
     "review_search": "knowledge_review_timeout_seconds",
-    "build_music_dossier": "knowledge_llm_timeout_seconds",
+    "build_music_dossier": "knowledge_dossier_timeout_seconds",
     "sample_relation_search": "knowledge_review_timeout_seconds",
     "locate_sample_sources": "knowledge_source_timeout_seconds",
     "build_sample_dossier": "knowledge_llm_timeout_seconds",

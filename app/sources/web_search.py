@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import urllib.parse
 import urllib.request
 
@@ -38,6 +39,55 @@ async def asearch_web_info(query: str, max_results: int = 5, api_key: str = "") 
         if results:
             return results
     return await _asearch_duckduckgo(query, max_results)
+
+
+def fetch_url_content(url: str, api_key: str = "", timeout: float | None = None, max_chars: int = 2000) -> str:
+    """按 URL 取网页正文（Tavily Extract）。
+
+    与 search_web_info（关键词搜索）互补——后者只返回摘要片段，本函数给定具体乐评
+    URL（如 MusicBrainz relations 里的 last.fm/Discogs/Genius 链接）取回正文，供合成
+    LLM 写专业乐评。失败/反爬/超时一律返回 ""（与 search_web_info 同样的零异常降级）。
+    未配置 TAVILY_API_KEY 时直接返回空——没有可靠的免 key 单 URL 抓取兜底。
+    """
+    url = (url or "").strip()
+    if not url or not api_key:
+        return ""
+    timeout = max(0.5, float(timeout or 15.0))
+    payload = json.dumps({"urls": [url]}).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    try:
+        req = urllib.request.Request(
+            "https://api.tavily.com/extract", data=payload, headers=headers, method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        logger.debug("Tavily extract failed for url=%s", url, exc_info=True)
+        return ""
+    results = data.get("results") or []
+    if not results:
+        return ""
+    item = results[0] if isinstance(results[0], dict) else {}
+    if item.get("text") is not None:
+        # Tavily Extract 成功命中字段为 "text"（新版）；旧版用 raw_content/content。
+        text = str(item.get("text") or item.get("raw_content") or item.get("content") or "")
+    else:
+        text = str(item.get("raw_content") or item.get("content") or "")
+    return _clean_extracted_text(text, max_chars)
+
+
+def _clean_extracted_text(text: str, max_chars: int) -> str:
+    """压缩抓回的正文：去多余空白，丢掉常见导航噪音后截断到 max_chars。"""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit(" ", 1)[0] + "…"
+    return text.strip()
 
 
 async def _asearch_tavily(query: str, max_results: int, api_key: str) -> list[dict[str, str]]:

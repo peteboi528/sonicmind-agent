@@ -46,6 +46,56 @@ def test_album_deep_dive_keyword_routes_to_fixed_knowledge_stages():
     assert plan.stages[1].parallel is True
 
 
+def test_album_listening_note_routes_to_knowledge_not_discuss():
+    query = (
+        "这张专辑，我最想让你先听《Self Control》和《White Ferrari》。"
+        "前者那种断断续续的假声，像在深夜对着自己说话；"
+        "后者则是一段公路上的沉默，钢琴和氛围音把揉得很轻。"
+        "如果你喜欢那种的感觉，这两首最对味。"
+    )
+
+    plan = nodes.build_agent_plan(query)
+    assert plan.intent == "album_deep_dive"
+    plan = nodes._materialize_tool_stages(plan, query, 5)
+    assert [[call.name for call in stage.calls] for stage in plan.stages] == [
+        ["resolve_music_entity"],
+        ["music_metadata_lookup", "review_search"],
+        ["build_music_dossier"],
+    ]
+    assert "web_music_search" not in plan.tools_needed
+
+
+def test_album_keyword_overrides_llm_discuss_plan(agent):
+    from app.models import RetrievalPlan
+
+    query = "这张专辑先听哪几首？我想知道哪些歌最能进入它的状态。"
+    llm_plan = AgentPlan(
+        intent="discuss",
+        tools_needed=["web_music_search"],
+        online_required=True,
+        retrieval_plan=RetrievalPlan(use_web=True, search_query="Self Control White Ferrari"),
+        reasoning_summary="误判为普通音乐讨论",
+    )
+    state = {
+        "query": query,
+        "user_id": "u-knowledge",
+        "top_k": 5,
+        "context": {"semantic_recall_pending": False},
+        "trace": [],
+        "events": [],
+    }
+
+    out = nodes._finish_plan_intent(agent, state, llm_plan, {}, {})
+    plan = out["plan"]
+    assert plan.intent == "album_deep_dive"
+    assert plan.tools_needed == [
+        "resolve_music_entity",
+        "music_metadata_lookup",
+        "review_search",
+        "build_music_dossier",
+    ]
+
+
 def test_music_compare_cleans_common_album_aliases():
     from app.knowledge import resolve_music_entities
 
@@ -191,8 +241,9 @@ def test_dossier_falls_back_to_mechanical_when_llm_returns_non_json():
     dossier = build_dossier(
         _Agent(), "讲讲 Blonde", "album_deep_dive", [entity], metadata, [], [], [], [],
     )
-    # 回落到机械 summary（meta_text 截断）
-    assert dossier.summary.startswith("alternative R&B record")
+    # LLM 非 JSON：安全回落到中文机械 summary（不再直出英文 meta_text，避免半句英文），并标记降级。
+    assert dossier.summary.startswith("我整理了《Blonde》")
+    assert dossier.partial is True
 
 
 def test_sample_lookup_routes_to_sample_tool_chain():

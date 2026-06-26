@@ -55,8 +55,8 @@ export const api = {
   // ---- 搜索 / 推荐 ----
   search: (userId, query) =>
     jsonFetch("/search", { method: "POST", body: JSON.stringify({ user_id: userId, query, include_external: true, top_k: 12 }) }),
-  dailyRecommend: (userId, timeOfDay) =>
-    jsonFetch("/recommend/daily", { method: "POST", body: JSON.stringify({ user_id: userId, time_of_day: timeOfDay }) }),
+  dailyRecommend: (userId, timeOfDay, noLocal = false) =>
+    jsonFetch("/recommend/daily", { method: "POST", body: JSON.stringify({ user_id: userId, time_of_day: timeOfDay, no_local: noLocal }) }),
 
   // ---- 库 ----
   listAssets: () => jsonFetch("/assets"),
@@ -98,6 +98,17 @@ export const api = {
   deleteTasteExperiment: (userId, experimentId) =>
     jsonFetch(`/taste/experiment/${encodeURIComponent(userId)}/${encodeURIComponent(experimentId)}`, { method: "DELETE" }),
   getRatings: (userId) => jsonFetch(`/ratings/${encodeURIComponent(userId)}`),
+
+  // ---- 用户画像（可解释品味仪表盘）----
+  getProfile: (userId) => jsonFetch(`/profile/${encodeURIComponent(userId)}`),
+  profileInsightFeedback: (userId, insightId, action) =>
+    jsonFetch(`/profile/insights/${encodeURIComponent(insightId)}/feedback`, {
+      method: "POST", body: JSON.stringify({ user_id: userId, action }),
+    }),
+  deleteProfileInsight: (userId, insightId) =>
+    jsonFetch(`/profile/insights/${encodeURIComponent(userId)}/${encodeURIComponent(insightId)}`, { method: "DELETE" }),
+  clearProfile: (userId) =>
+    jsonFetch(`/profile/${encodeURIComponent(userId)}`, { method: "DELETE" }),
   dislike: (userId, track) =>
     jsonFetch("/feedback/dislike", { method: "POST", body: JSON.stringify({
       user_id: userId, title: track.title, artist: track.artist,
@@ -120,6 +131,12 @@ export const api = {
   listen: (userId, assetId, duration, completed, context = "player") =>
     jsonFetch("/listen", { method: "POST", body: JSON.stringify({
       user_id: userId, asset_id: assetId, duration, completed, context,
+    }) }),
+
+  // ---- 歌词 ----
+  getLyrics: (userId, { title, artist, sourceId }) =>
+    jsonFetch("/lyrics", { method: "POST", body: JSON.stringify({
+      user_id: userId, title, artist, source_id: sourceId || "",
     }) }),
 
   // ---- 发现 / 歌手 ----

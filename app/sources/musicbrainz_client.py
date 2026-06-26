@@ -84,6 +84,79 @@ def _best_by_exact_name(hits: list[dict], query: str, key: str) -> dict | None:
     return max(pool, key=lambda h: h.get("score", 0))
 
 
+def _url_relations(raw: Any) -> list[dict[str, str]]:
+    """Normalize MusicBrainz URL relations into compact source links.
+
+    MB keeps valuable curated outbound links (BBC reviews/pages, AllMusic,
+    Discogs, RateYourMusic, archived Pitchfork reviews, etc.) under
+    ``relations``. Search endpoints do not always include them, so lookup
+    methods use ``inc=url-rels`` and pass these through to the knowledge layer.
+    """
+    out: list[dict[str, str]] = []
+    for rel in raw or []:
+        if not isinstance(rel, dict) or rel.get("target-type") != "url":
+            continue
+        url = (rel.get("url") or {}).get("resource") or ""
+        url = str(url).strip()
+        if not url:
+            continue
+        rel_type = str(rel.get("type") or "").strip()
+        out.append({
+            "type": rel_type,
+            "url": url,
+            "ended": "true" if rel.get("ended") else "",
+        })
+    return out
+
+
+def _artist_from_raw(a: dict[str, Any], score: int = 0) -> dict[str, Any]:
+    aliases = [
+        str(al.get("name", "")).strip()
+        for al in (a.get("aliases") or [])
+        if isinstance(al, dict) and al.get("name")
+    ]
+    tags = [
+        str(tg.get("name", "")).strip()
+        for tg in (a.get("tags") or [])
+        if isinstance(tg, dict) and tg.get("name")
+    ]
+    return {
+        "mbid": a.get("id", ""),
+        "name": a.get("name", ""),
+        "score": score or _as_int(a.get("score"), 0),
+        "country": a.get("country", ""),
+        "type": a.get("type", ""),
+        "disambiguation": a.get("disambiguation", ""),
+        "aliases": aliases,
+        "tags": tags,
+        "relations": _url_relations(a.get("relations")),
+    }
+
+
+def _release_group_from_raw(rg: dict[str, Any], score: int = 0) -> dict[str, Any]:
+    credit = rg.get("artist-credit") or []
+    artists = [
+        str(ac.get("name", "")).strip()
+        for ac in credit
+        if isinstance(ac, dict) and ac.get("name")
+    ]
+    tags = [
+        str(tg.get("name", "")).strip()
+        for tg in (rg.get("tags") or [])
+        if isinstance(tg, dict) and tg.get("name")
+    ]
+    return {
+        "mbid": rg.get("id", ""),
+        "title": rg.get("title", ""),
+        "artist": " & ".join(artists),
+        "score": score or _as_int(rg.get("score"), 0),
+        "date": _first_release_date(rg.get("first-release-date")),
+        "type": rg.get("primary-type", ""),
+        "tags": tags,
+        "relations": _url_relations(rg.get("relations")),
+    }
+
+
 
 class MusicBrainzClient:
     """同步 MusicBrainz 客户端。所有方法失败时返回空结构，调用方负责降级。"""
@@ -102,18 +175,7 @@ class MusicBrainzClient:
         for a in raw:
             if not isinstance(a, dict):
                 continue
-            aliases = [str(al.get("name", "")).strip() for al in (a.get("aliases") or []) if isinstance(al, dict) and al.get("name")]
-            tags = [str(tg.get("name", "")).strip() for tg in (a.get("tags") or []) if isinstance(tg, dict) and tg.get("name")]
-            out.append({
-                "mbid": a.get("id", ""),
-                "name": a.get("name", ""),
-                "score": _as_int(a.get("score"), 0),
-                "country": a.get("country", ""),
-                "type": a.get("type", ""),
-                "disambiguation": a.get("disambiguation", ""),
-                "aliases": aliases,
-                "tags": tags,
-            })
+            out.append(_artist_from_raw(a))
         return out
 
     def resolve_artist(self, name: str) -> dict | None:
@@ -146,18 +208,7 @@ class MusicBrainzClient:
         for rg in raw:
             if not isinstance(rg, dict):
                 continue
-            credit = rg.get("artist-credit") or []
-            artists = [str(ac.get("name", "")).strip() for ac in credit if isinstance(ac, dict) and ac.get("name")]
-            tags = [str(tg.get("name", "")).strip() for tg in (rg.get("tags") or []) if isinstance(tg, dict) and tg.get("name")]
-            out.append({
-                "mbid": rg.get("id", ""),
-                "title": rg.get("title", ""),
-                "artist": " & ".join(artists),
-                "score": _as_int(rg.get("score"), 0),
-                "date": _first_release_date(rg.get("first-release-date")),
-                "type": rg.get("primary-type", ""),
-                "tags": tags,
-            })
+            out.append(_release_group_from_raw(rg))
         return out
 
     def resolve_release_group(self, title: str, artist: str = "") -> dict | None:
@@ -178,3 +229,23 @@ class MusicBrainzClient:
             if artist_exact:
                 return max(artist_exact, key=lambda h: h.get("score", 0))
         return _best_by_exact_name(hits, title, key="title")
+
+    def lookup_artist(self, mbid: str) -> dict | None:
+        """Lookup one artist by MBID, including tags, aliases and URL relations."""
+        mbid = (mbid or "").strip()
+        if not mbid:
+            return None
+        data = _get(f"artist/{mbid}", inc="url-rels+tags+aliases")
+        if not data or not data.get("id"):
+            return None
+        return _artist_from_raw(data, score=100)
+
+    def lookup_release_group(self, mbid: str) -> dict | None:
+        """Lookup one release-group by MBID, including tags, credits and URL relations."""
+        mbid = (mbid or "").strip()
+        if not mbid:
+            return None
+        data = _get(f"release-group/{mbid}", inc="url-rels+tags+artist-credits")
+        if not data or not data.get("id"):
+            return None
+        return _release_group_from_raw(data, score=100)

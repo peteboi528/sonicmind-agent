@@ -127,7 +127,12 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         strategy_web="online_first",
         strategy_no_web="online_first",
         online_default=True,
-        keyword_signals=("这张专辑", "专辑解读", "解读专辑", "为什么经典", "为什么这么经典", "album deep dive", "分析这张"),
+        keyword_signals=(
+            "这张专辑", "这张先听", "整张专辑", "专辑解读", "解读专辑",
+            "为什么经典", "为什么这么经典", "album deep dive", "分析这张",
+            "专辑听法", "听法", "从哪首听", "先听哪首", "最值得先听",
+            "入门曲目", "这两首最对味", "这首最对味",
+        ),
     ),
     "artist_deep_dive": IntentDef(
         name="artist_deep_dive",
@@ -313,10 +318,26 @@ def valid_intents() -> set[str]:
     return set(INTENT_REGISTRY)
 
 
+def _is_explicit_journey_query(query: str) -> bool:
+    lowered = query.lower()
+    if any(signal in lowered or signal in query for signal in ("音乐旅程", "旅程", "journey")):
+        return True
+    if "从" in query and "到" in query:
+        return True
+    phase_hits = sum(int(signal in query) for signal in ("热身", "推进", "冲刺", "放松", "收尾", "起步"))
+    return phase_hits >= 2 and any(connector in query for connector in ("->", "→", "再", "然后", "最后", "先"))
+
+
 def match_intent_by_keywords(query: str) -> str | None:
     """关键词 fallback：按优先级遍历 keyword_signals，命中返回意图名，否则 None。"""
     lowered = query.lower()
+    explicit_journey = _is_explicit_journey_query(query)
+    has_playlist_signal = any(sig in lowered or sig in query for sig in INTENT_REGISTRY["playlist"].keyword_signals)
     for name in _INTENT_PRIORITY:
+        if name == "journey" and has_playlist_signal and not explicit_journey:
+            continue
+        if name == "playlist" and explicit_journey:
+            continue
         signals = INTENT_REGISTRY[name].keyword_signals
         if any(sig in lowered or sig in query for sig in signals):
             return name

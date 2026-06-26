@@ -4,6 +4,8 @@ from typing import Any
 
 from app.answer import song_card
 from app.intents import expand_content_negation, normalize_content_negation
+from app.models import ExternalTrack, ResultHygieneReport
+from app.recommend.hygiene import filter_music_tracks
 from app.tools.actions import AUX_TOOL_NAMES, execute_aux_tool
 from app.tools.contracts import ToolContext, ToolResult, ToolStatus
 from app.tools.registry import bind_async_tool_handler, bind_tool_handler
@@ -141,6 +143,72 @@ def _filter_content_exclusions(tracks: list[Any], exclusions: list[str]) -> list
     return [track for track in tracks if not blocked(track)]
 
 
+# ── Track Hygiene：把教程/合集/歌单/节目/新闻/vlog 等非歌曲实体挡在结果与资源库之外 ──
+# candidate_kind 七分类里明确不是单曲的实体（搜索阶段已标注）。
+_NON_TRACK_KINDS = {"playlist", "compilation", "long_mix", "lyrics_video"}
+# 脏标题黑名单：candidate_kind 漏网的教程/解说/合集/歌单/广播剧/BGM/新闻类文案。
+_BAD_TITLE_KEYWORDS = (
+    "教程", "教学", "怎么做", "怎么唱", "编曲技巧", "合集", "全集", "精选集",
+    "歌单", "playlist", "节目", "电台", "混剪", "串烧", "连播", "纯音乐合集",
+    "现场合集", "翻唱合集", "cover合集", "cover 合集", "dj mix", "reaction",
+    "真的好难做", "弹跳全集", "音乐制作", "编曲", "乐理",
+    # 广播剧/OST/BGM/同人/新闻/vlog 类（非歌曲）
+    "广播剧", "原声带", "ost", "bgm", "同人", "警示录", "日记", "纪实", "监控",
+    "录像", "现场实录", "车祸", "事故", "实录", "解说", "旁白", "字幕",
+)
+# 句子/新闻/节目型标题的强标点——歌曲几乎不用：句号/感叹号/问号/方括号。
+# 出现这些基本可断定是新闻稿、vlog、节目片段而非单曲。
+_SENTENCE_PUNCT = ("。", "！", "？", "【", "】", "」", "」")
+
+
+def is_valid_music_track(track: Any) -> bool:
+    """判断一条结果是否是「真正的歌曲」——拦截教程/合集/歌单/节目/新闻/vlog 等脏数据。
+
+    判定顺序：必要条件(title/artist 非空) → candidate_kind 非歌曲实体拦截 →
+    句子型标题(。！？【】)拦截 → 脏标题黑名单 → source 特殊规则(bilibili 高风险)。
+    真实歌曲（Ditto/ETA/Firework/深夜（Night）等）不受影响。
+    """
+    if track is None:
+        return False
+    title = str(getattr(track, "title", "") or "").strip()
+    artist = str(getattr(track, "artist", "") or "").strip()
+    if not title or not artist:
+        return False
+    kind = str(getattr(track, "candidate_kind", "") or "").strip().lower()
+    if kind in _NON_TRACK_KINDS:
+        return False
+    # 句子/新闻/节目型标题：带句号/感叹/问号/方括号的基本不是单曲（车祸新闻/vlog/节目）。
+    if any(p in title for p in _SENTENCE_PUNCT):
+        return False
+    text = f"{title} {artist}".lower()
+    if any(kw in text for kw in _BAD_TITLE_KEYWORDS):
+        return False
+    source = str(getattr(track, "source", "") or "").strip().lower()
+    # bilibili 默认高风险：带逗号的长句标题（新闻/vlog）、问答/教学类一律拦。
+    if source == "bilibili" and any(w in title for w in ("，", "？", "?", "怎么", "为什么", "教你", "如何", "技巧", "！")):
+        return False
+    return True
+
+
+def _filter_invalid_tracks(tracks: list[Any]) -> list[Any]:
+    """统一出口过滤：只保留真正的歌曲（教程/合集/歌单/节目一律剔除）。"""
+    return [t for t in (tracks or []) if is_valid_music_track(t)]
+
+
+def _hygiene_suffix(report: ResultHygieneReport) -> str:
+    """summary 里附带的剔除说明，让 trace/SSE 一眼看到过滤成本（原始→清洗后）。"""
+    if report.removed_total() <= 0:
+        return ""
+    parts = []
+    if report.removed_invalid_tracks:
+        parts.append(f"非歌曲 {report.removed_invalid_tracks}")
+    if report.removed_by_exclusion:
+        parts.append(f"排除项 {report.removed_by_exclusion}")
+    if report.removed_by_language_filter:
+        parts.append(f"语言 {report.removed_by_language_filter}")
+    return f"（原始 {report.raw_count}，剔除 {'、'.join(parts)}）"
+
+
 def install_default_handlers() -> None:
     handlers = {
         "recommend": _recommend,
@@ -199,6 +267,19 @@ def _result(
     )
 
 
+def _normalize_track_items(items: list[Any]) -> list[Any]:
+    normalized: list[Any] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            try:
+                normalized.append(ExternalTrack.model_validate(item))
+                continue
+            except Exception:
+                pass
+        normalized.append(item)
+    return normalized
+
+
 def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if ctx.asset_id:
         answer = ctx.agent.recommend_with_memory(ctx.asset_id, ctx.user_id, args["query"], args.get("top_k", 5))
@@ -212,6 +293,7 @@ def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         search_variants=retrieval.get("search_variants") or None,
     )
     tracks = [item.asset for item in recommendation.tracks]
+    raw = len(tracks)
     kept = _filter_content_exclusions(tracks, retrieval.get("excluded_terms") or [])
     if len(kept) != len(tracks):
         allowed = {
@@ -226,7 +308,35 @@ def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             ) in allowed
         ]
         tracks = kept
-    return _result("recommend", {"type": "daily_recommend", "recommendation": recommendation}, f"生成 {len(tracks)} 首推荐。", tracks, expects_tracks=True)
+    after_excl = len(tracks)
+    # 候选质量闸门：把教程/合集/DJ串烧/节目等非歌曲实体剔出推荐结果。
+    clean, gate = filter_music_tracks(tracks, ctx.query, allow_maybe=False, target_count=args.get("top_k"))
+    if len(clean) != len(tracks):
+        clean_ids = {
+            (getattr(t, "external_id", "") or getattr(t, "asset_id", ""), t.title.lower())
+            for t in clean
+        }
+        recommendation.tracks = [
+            item for item in recommendation.tracks
+            if (
+                getattr(item.asset, "external_id", "") or getattr(item.asset, "asset_id", ""),
+                item.asset.title.lower(),
+            ) in clean_ids
+        ]
+        tracks = clean
+    report = ResultHygieneReport(
+        requested_count=int(args.get("top_k") or 0),
+        raw_count=raw, cleaned_count=len(tracks),
+        removed_by_exclusion=raw - after_excl,
+        removed_invalid_tracks=gate.rejected_count,
+        rejected_examples=gate.rejected_examples, reasons=gate.reasons,
+    )
+    return _result(
+        "recommend",
+        {"type": "daily_recommend", "recommendation": recommendation, "hygiene": report.model_dump()},
+        f"生成 {len(tracks)} 首推荐{_hygiene_suffix(report)}。",
+        tracks, expects_tracks=True,
+    )
 
 
 def _search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -242,6 +352,9 @@ def _search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         response.external = _filter_excluded(response.external, excluded)
     response.external = _filter_content_exclusions(response.external, retrieval.get("excluded_terms") or [])
     response.local = _filter_content_exclusions(response.local, retrieval.get("excluded_terms") or [])
+    # 候选质量闸门：搜索结果也只留真正的歌曲。
+    response.external, _ = filter_music_tracks(response.external, ctx.query, allow_maybe=False)
+    response.local, _ = filter_music_tracks(response.local, ctx.query, allow_maybe=False)
     tracks = [*response.external, *response.local]
     return _result("search", {"type": "search", "response": response}, f"本地 {len(response.local)} 首，外部 {len(response.external)} 首。", tracks, expects_tracks=True)
 
@@ -251,12 +364,31 @@ def _playlist(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     retrieval = plan.get("retrieval_plan") or {}
     excluded = plan.get("_excluded_tracks") or []
     playlist = ctx.agent.generate_playlist(ctx.user_id, args["instruction"], seed_tracks=_collect_tracks(ctx.prior_results), target_count=args.get("target_count"))
+    raw = len(playlist.tracks)
     if excluded and playlist.tracks:
         playlist.tracks = _filter_excluded(playlist.tracks, excluded)
     playlist.tracks = _filter_content_exclusions(
         list(playlist.tracks), retrieval.get("excluded_terms") or [],
     )
-    return _result("playlist", {"type": "playlist", "playlist": playlist}, f"生成 {len(playlist.tracks)} 首歌单。", list(playlist.tracks), expects_tracks=True)
+    after_excl = len(playlist.tracks)
+    # 候选质量闸门：歌单只由真正的歌曲组成（教程/合集/DJ串烧/节目一律挡）；过滤后真实数量=cleaned，
+    # 下游文案/卡片一律以此为准（不再用 target_count 谎报）。
+    clean, gate = filter_music_tracks(list(playlist.tracks), ctx.query, allow_maybe=False, target_count=args.get("target_count"))
+    playlist.tracks = clean
+    cleaned = len(playlist.tracks)
+    report = ResultHygieneReport(
+        requested_count=int(args.get("target_count") or 0),
+        raw_count=raw, cleaned_count=cleaned,
+        removed_by_exclusion=raw - after_excl,
+        removed_invalid_tracks=gate.rejected_count,
+        rejected_examples=gate.rejected_examples, reasons=gate.reasons,
+    )
+    return _result(
+        "playlist",
+        {"type": "playlist", "playlist": playlist, "hygiene": report.model_dump()},
+        f"生成 {cleaned} 首歌单{_hygiene_suffix(report)}。",
+        list(playlist.tracks), expects_tracks=True,
+    )
 
 
 def _taste(_args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -369,6 +501,25 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             timed_out.extend(result.get("timed_out_tools") or [])
         elif result.get("type") == "music_entity_resolution" and not entities:
             entities = [MusicEntity.model_validate(item) for item in result.get("entities", []) or []]
+    # 正文抓取（Tavily Extract + Discogs API）：把 MusicBrainz relations 里 last.fm/Discogs/Genius
+    # 等来源的真实正文读回来填进 excerpt（之前只有 URL、excerpt 为空），喂给合成 LLM 写专业中文乐评。
+    # _enrich_review_content 就地改写 citation，受保护预算、不拖垮整条链路。
+    if entities:
+        from app.knowledge import _enrich_review_content, _opinions_from_citations
+        # 合流后抓正文：就地填充已有 citation 的 excerpt，并补入构造的 last.fm/Discogs 兜底 citation。
+        combined = list(metadata_citations) + list(review_citations)
+        known_ids = {id(c) for c in combined}
+        _enrich_review_content(combined, entities[0], ctx.deadline_at)
+        # 新构造的 citation（非原 metadata/review 列表里的）并入 review_citations，确保喂进 build_dossier。
+        for c in combined:
+            if id(c) not in known_ids and c.excerpt:
+                review_citations.append(c)
+        # 抓回正文的 citation 也贡献 sentiment/aspect，充实乐评共识（按 source 去重，不覆盖已有）。
+        existing_sources = {o.source for o in opinions}
+        for op in _opinions_from_citations(combined):
+            if op.source not in existing_sources:
+                opinions.append(op)
+                existing_sources.add(op.source)
     dossier = build_dossier(
         ctx.agent, query, intent, entities, metadata, metadata_citations,
         review_citations, opinions, tracks, ctx.deadline_at, skipped, albums,
@@ -505,13 +656,30 @@ def _web_music_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         args["query"], top_k=max(target, args.get("top_k", 5)),
         relevance_query=search_core, offset=rec_offset, variants=variants,
     )
+    raw = len(tracks)
     if excluded:
         tracks = _filter_excluded(tracks, excluded)
     tracks = _filter_content_exclusions(tracks, retrieval.get("excluded_terms") or [])
+    after_excl = len(tracks)
     tracks = _apply_language_filter(tracks, language_filter, target)
+    after_lang = len(tracks)
+    # 候选质量闸门：先剔非歌曲，再写库——脏数据(教程/合集/DJ串烧)不得沉淀进 resource library。
+    tracks, gate = filter_music_tracks(tracks, ctx.query, allow_maybe=False, target_count=target)
+    report = ResultHygieneReport(
+        requested_count=int(target or 0), raw_count=raw, cleaned_count=len(tracks),
+        removed_by_exclusion=raw - after_excl,
+        removed_by_language_filter=after_excl - after_lang,
+        removed_invalid_tracks=gate.rejected_count,
+        rejected_examples=gate.rejected_examples, reasons=gate.reasons,
+    )
     for track in tracks:
         ctx.agent.library.upsert_external(track)
-    return _result("web_music_search", {"type": "web_music_search", "tracks": tracks}, f"获取 {len(tracks)} 个线上候选。", tracks, expects_tracks=True)
+    return _result(
+        "web_music_search",
+        {"type": "web_music_search", "tracks": tracks, "hygiene": report.model_dump()},
+        f"获取 {len(tracks)} 个线上候选{_hygiene_suffix(report)}。",
+        tracks, expects_tracks=True,
+    )
 
 
 async def _web_music_search_async(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -527,25 +695,39 @@ async def _web_music_search_async(args: dict[str, Any], ctx: ToolContext) -> Too
         args["query"], top_k=max(target, args.get("top_k", 5)),
         relevance_query=search_core, offset=rec_offset, variants=variants,
     )
+    raw = len(tracks)
     if excluded:
         tracks = _filter_excluded(tracks, excluded)
     tracks = _filter_content_exclusions(tracks, retrieval.get("excluded_terms") or [])
+    after_excl = len(tracks)
     tracks = _apply_language_filter(tracks, language_filter, target)
+    after_lang = len(tracks)
+    # 候选质量闸门：只返回真正的歌曲（async 路径不写库，但同样过滤）。
+    tracks, gate = filter_music_tracks(tracks, ctx.query, allow_maybe=False, target_count=target)
+    report = ResultHygieneReport(
+        requested_count=int(target or 0), raw_count=raw, cleaned_count=len(tracks),
+        removed_by_exclusion=raw - after_excl,
+        removed_by_language_filter=after_excl - after_lang,
+        removed_invalid_tracks=gate.rejected_count,
+        rejected_examples=gate.rejected_examples, reasons=gate.reasons,
+    )
     return _result(
-        "web_music_search", {"type": "web_music_search", "tracks": tracks},
-        f"获取 {len(tracks)} 个线上候选。", tracks, expects_tracks=True,
+        "web_music_search",
+        {"type": "web_music_search", "tracks": tracks, "hygiene": report.model_dump()},
+        f"获取 {len(tracks)} 个线上候选{_hygiene_suffix(report)}。",
+        tracks, expects_tracks=True,
     )
 
 
 def _artist_albums(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    albums = ctx.agent.recommend_artist_albums(ctx.user_id, args["query"], limit=6)
+    albums = ctx.agent.recommend_artist_albums(ctx.user_id, args["query"], limit=12)
     result = _result("artist_albums", {"type": "artist_albums", "albums": albums}, f"获取 {len(albums)} 张专辑。")
     result.status = ToolStatus.OK if albums else ToolStatus.EMPTY
     return result
 
 
 async def _artist_albums_async(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    albums = await ctx.agent.recommend_artist_albums_async(ctx.user_id, args["query"], limit=6)
+    albums = await ctx.agent.recommend_artist_albums_async(ctx.user_id, args["query"], limit=12)
     result = _result(
         "artist_albums", {"type": "artist_albums", "albums": albums},
         f"获取 {len(albums)} 张专辑。",
@@ -620,8 +802,15 @@ def _similar_artists(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 def _import_netease_playlist(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     imported = ctx.agent.import_netease_playlist(args["playlist_ref"], user_id=ctx.user_id, limit=args.get("limit", 100))
-    tracks = imported.get("tracks", [])
-    return _result("import_netease_playlist", {"type": "import_netease_playlist", "result": imported}, f"导入《{imported.get('name', '')}》：新增 {imported.get('imported', 0)} 首。", tracks[:12], expects_tracks=True)
+    tracks = _normalize_track_items(imported.get("tracks", []))
+    normalized_import = {**imported, "tracks": tracks}
+    return _result(
+        "import_netease_playlist",
+        {"type": "import_netease_playlist", "result": normalized_import},
+        f"导入《{imported.get('name', '')}》：新增 {imported.get('imported', 0)} 首。",
+        tracks[:12],
+        expects_tracks=True,
+    )
 
 
 def _journey(_args: dict[str, Any], ctx: ToolContext) -> ToolResult:

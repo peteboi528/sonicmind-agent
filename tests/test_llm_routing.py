@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from app.agent import AudioVisualAgent
 from app.config import settings
 from app.llm.client import OpenAICompatibleLLM, build_llm
+from app.llm.mock import MockLLM
 from app.llm.observability import capture_llm_stats, format_runtime_metrics, merge_runtime_metrics, tier_call_metrics
 from app.llm.routing import select_llm
 from app.storage import JsonStore
@@ -30,6 +31,15 @@ def test_build_llm_selects_configured_model_tiers(monkeypatch):
     assert strong.tier == "strong"
     assert default.model == "balanced-model"
     assert default.tier == "default"
+
+
+def test_build_llm_uses_mock_when_api_key_missing_and_endpoint_is_remote(monkeypatch):
+    monkeypatch.setattr(settings, "llm_api_key", "")
+    monkeypatch.setattr(settings, "llm_base_url", "https://llm.example.test/v1")
+
+    llm = build_llm()
+
+    assert isinstance(llm, MockLLM)
 
 
 def test_agent_reuses_default_llm_when_tier_models_match(monkeypatch, tmp_path):

@@ -97,7 +97,7 @@ def fake_online_music_search(monkeypatch):
     async def _fake_search_artist_info_async(self, query: str):
         return self.search_artist_info(query)
 
-    async def _fake_recommend_artist_albums_async(self, user_id: str, artist: str, limit: int = 6):
+    async def _fake_recommend_artist_albums_async(self, user_id: str, artist: str, limit: int = 12):
         return self.recommend_artist_albums(user_id, artist, limit)
 
     monkeypatch.setattr(AudioVisualAgent, "search_videos_async", _fake_search_videos_async)

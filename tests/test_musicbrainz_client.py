@@ -70,6 +70,44 @@ def test_search_release_group_parses_date_type_artist(monkeypatch):
     assert "alternative r&b" in hits[0]["tags"]
 
 
+def test_lookup_release_group_parses_url_relations(monkeypatch):
+    _patch_urlopen(monkeypatch, {
+        "id": "rg1",
+        "title": "OK Computer",
+        "primary-type": "Album",
+        "first-release-date": "1997-06-16",
+        "artist-credit": [{"name": "Radiohead"}],
+        "tags": [{"name": "alternative rock"}],
+        "relations": [
+            {"target-type": "url", "type": "review", "url": {"resource": "https://www.bbc.co.uk/music/reviews/wcp2"}},
+            {"target-type": "artist", "type": "member of band", "artist": {"name": "Radiohead"}},
+        ],
+    })
+    hit = musicbrainz_client.MusicBrainzClient().lookup_release_group("rg1")
+    assert hit["title"] == "OK Computer"
+    assert hit["relations"] == [{
+        "type": "review",
+        "url": "https://www.bbc.co.uk/music/reviews/wcp2",
+        "ended": "",
+    }]
+
+
+def test_lookup_artist_parses_bbc_relation(monkeypatch):
+    _patch_urlopen(monkeypatch, {
+        "id": "artist1",
+        "name": "Radiohead",
+        "type": "Group",
+        "country": "GB",
+        "relations": [
+            {"target-type": "url", "type": "BBC Music page", "ended": True, "url": {"resource": "https://www.bbc.co.uk/music/artists/artist1"}},
+        ],
+    })
+    hit = musicbrainz_client.MusicBrainzClient().lookup_artist("artist1")
+    assert hit["name"] == "Radiohead"
+    assert hit["relations"][0]["type"] == "BBC Music page"
+    assert hit["relations"][0]["ended"] == "true"
+
+
 def test_get_returns_empty_on_network_failure(monkeypatch):
     monkeypatch.setattr(
         musicbrainz_client.urllib.request, "urlopen",

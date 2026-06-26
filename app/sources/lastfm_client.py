@@ -117,8 +117,9 @@ class LastfmClient:
         # 头像：从大到小取第一个非空尺寸（mega 尺寸 #text 常为空，旧逻辑盲取最后一张
         # 导致大量歌手返回空图、前端只显示占位 emoji）
         image_url = _pick_image(raw.get("image"))
-        # 简介
-        bio = (raw.get("bio") or {}).get("summary", "") or ""
+        # 简介：优先更完整的 content，缺失时回退 summary。
+        bio_block = raw.get("bio") or {}
+        bio = bio_block.get("content", "") or bio_block.get("summary", "") or ""
         # 清理 Last.fm 里的 HTML 标签
         import re
         bio = re.sub(r"<[^>]+>", "", bio).strip()

@@ -234,6 +234,100 @@ def test_artist_info_top_albums_use_netease_ids(monkeypatch):
     assert [track["title"] for track in resp.json()["top_tracks"]] == ["晴天"]
 
 
+def test_artist_info_localizes_english_bio_and_keeps_twelve_albums(monkeypatch):
+    from app.api import main as main_module
+    from app.sources import netease as ns
+    from app.sources.lastfm_client import LastfmClient
+
+    monkeypatch.setattr("app.api.main.settings.lastfm_api_key", "dummy-key")
+    monkeypatch.setattr("app.api.main.settings.llm_api_key", "dummy-key")
+    monkeypatch.setattr(LastfmClient, "get_artist_info", lambda self, artist: {
+        "name": "Kanye West",
+        "image": "lfm-image",
+        "bio": (
+            "Kanye West, born Kanye Omari West on June 8, 1977, is an American rapper, singer, "
+            "songwriter, record producer, and fashion designer. Read more on Last.fm"
+        ),
+        "tags": ["hip hop", "producer"],
+    })
+    monkeypatch.setattr(LastfmClient, "get_artist_top_albums", lambda self, artist, limit=12: [
+        {"name": f"Lastfm Album {idx}", "image": ""}
+        for idx in range(limit)
+    ])
+    monkeypatch.setattr(ns, "search_netease_artist_albums", lambda artist, limit=12: [
+        {"id": str(idx), "name": f"Album {idx}", "image": "", "artist": "Kanye West", "track_count": 10 + idx}
+        for idx in range(limit)
+    ])
+    monkeypatch.setattr(ns, "search_netease_artist_image", lambda artist: None)
+    monkeypatch.setattr("app.sources.web_search.search_web_info", lambda *args, **kwargs: [])
+    monkeypatch.setattr(main_module.agent, "search_web_music", lambda *args, **kwargs: [])
+
+    async def _fake_agenerate(prompt, system=None, temperature=0.2, thinking=None):
+        return "Kanye West 是美国说唱歌手、制作人和时尚设计师，以多变的制作风格和强烈个人表达闻名。"
+
+    monkeypatch.setattr(main_module.agent.llm_fast, "agenerate", _fake_agenerate)
+
+    resp = TestClient(app).post("/artist/info", json={"artist": "Kanye West"})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "美国说唱歌手" in data["bio"]
+    assert "Read more on Last.fm" not in data["bio"]
+    assert len(data["top_albums"]) == 12
+
+
+def test_artist_info_falls_back_to_chinese_web_bio_when_localization_fails(monkeypatch):
+    from app.api import main as main_module
+    from app.sources import netease as ns
+    from app.sources.lastfm_client import LastfmClient
+
+    monkeypatch.setattr("app.api.main.settings.lastfm_api_key", "dummy-key")
+    monkeypatch.setattr("app.api.main.settings.llm_api_key", "dummy-key")
+    monkeypatch.setattr(LastfmClient, "get_artist_info", lambda self, artist: {
+        "name": "Kanye West",
+        "image": "lfm-image",
+        "bio": (
+            "Ye, born Kanye Omari West on June 8, 1977, is an American rapper, singer, songwriter, "
+            "record producer, and fashion designer. He is one of the most prominent figures in hip hop."
+        ),
+        "tags": ["hip hop", "producer"],
+    })
+    monkeypatch.setattr(LastfmClient, "get_artist_top_albums", lambda self, artist, limit=12: [])
+    monkeypatch.setattr(ns, "search_netease_artist_albums", lambda artist, limit=12: [
+        {"id": str(idx), "name": f"Album {idx}", "image": "", "artist": "Kanye West", "track_count": 10 + idx}
+        for idx in range(12)
+    ])
+    monkeypatch.setattr(ns, "search_netease_artist_image", lambda artist: None)
+    monkeypatch.setattr(
+        "app.sources.web_search.search_web_info",
+        lambda *args, **kwargs: [{
+            "title": "Kanye West 简介",
+            "url": "https://example.com/kanye",
+            "content": (
+                "Kanye West 是美国说唱歌手、制作人和时装设计师，早年以 Roc-A-Fella 的制作人身份崭露头角，"
+                "之后凭《The College Dropout》《Late Registration》《Graduation》奠定地位。"
+                "他在《808s & Heartbreak》《My Beautiful Dark Twisted Fantasy》《Yeezus》等阶段不断调整声音方向，"
+                "既推动主流嘻哈审美变化，也因公开言论和跨界项目长期处于舆论中心。"
+            ),
+        }],
+    )
+    monkeypatch.setattr(main_module.agent, "search_web_music", lambda *args, **kwargs: [])
+
+    async def _fail_agenerate(*args, **kwargs):
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr(main_module.agent.llm_fast, "agenerate", _fail_agenerate)
+
+    resp = TestClient(app).post("/artist/info", json={"artist": "Kanye West"})
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "美国说唱歌手" in data["bio"]
+    assert "The College Dropout" in data["bio"]
+    assert "Ye, born Kanye" not in data["bio"]
+    assert len(data["top_albums"]) == 12
+
+
 def test_discover_classify_routes_activity_away_from_artist_page():
     client = TestClient(app)
 
@@ -245,6 +339,28 @@ def test_discover_classify_routes_activity_away_from_artist_page():
     assert data["browse_category"] == "scene"
     assert "运动" in data["tags"]["scenario"]
     assert "电子" in data["tags"]["genre"]
+
+
+def test_discover_classify_treats_bare_artist_name_as_artist():
+    client = TestClient(app)
+
+    response = client.post("/discover/classify", json={"query": "周杰伦"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["kind"] == "artist"
+    assert data["normalized_query"] == "周杰伦"
+    assert data["reason"] == "bare_artist_shape"
+
+
+def test_discover_classify_keeps_focus_like_terms_off_artist_route():
+    client = TestClient(app)
+
+    response = client.post("/discover/classify", json={"query": "专注"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["kind"] != "artist"
 
 
 def test_discover_search_returns_local_and_bounded_external_results(monkeypatch):

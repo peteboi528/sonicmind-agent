@@ -134,6 +134,23 @@ def test_import_emits_candidates_and_final_tracks():
     assert "netease" in summary["sources"]
 
 
+def test_import_normalizes_dict_tracks_and_keeps_import_trace_alias():
+    class Agent:
+        def import_netease_playlist(self, *args, **kwargs):
+            return {
+                "name": "Imported", "imported": 2, "skipped": 0, "total": 2,
+                "tracks": [_track(1).model_dump(mode="json"), _track(2).model_dump(mode="json")],
+            }
+
+    plan = _plan("import")
+    results, trace, events = _run(Agent(), "import", plan)
+
+    assert any(line.startswith("[import]") for line in trace)
+    assert len(_select_listed_tracks(results, plan)) == 2
+    candidate = next(event for event in events if event.type == "candidates")
+    assert candidate.payload["cards"][0]["title"] == "Track 1"
+
+
 def test_album_cards_are_counted_in_trace_summary():
     class Agent:
         async def recommend_artist_albums_async(self, *args, **kwargs):

@@ -13,6 +13,7 @@ from app.models import ExternalTrack, RankingBreakdown, TasteProfile
 from app.recommend.rerank import (
     PreferenceProfile,
     _normalized_weights,
+    apply_profile_artist_adjust,
     bandit_select,
     mmr_rerank,
     rerank_candidates,
@@ -25,6 +26,14 @@ def _track(title, genre, mood, source="netease", ext_id=None):
         external_id=ext_id or title, title=title, artist="A",
         genre=genre, mood=mood, source=source,
     )
+
+
+def _track_artist(title: str, artist: str) -> ExternalTrack:
+    return ExternalTrack(external_id=title, title=title, artist=artist, genre=["pop"], mood=["放松"], source="netease")
+
+
+def _bd(score: float) -> RankingBreakdown:
+    return RankingBreakdown(title="t", source="netease", score=score, reason="x", components={})
 
 
 # ---- 四锚归一化（默认 CF 不可用，退回三锚） ----
@@ -253,3 +262,48 @@ def test_ts_sample_for_unknown_track_is_uniform(lib):
     t = _track("Unknown", ["R&B"], ["放松"])
     score = list(lib.sample_ts_scores([t]).values())[0]
     assert 0.0 <= score <= 1.0
+
+
+# ---- 画像艺人信号（core/rising 加分、avoid 减分）----
+
+def test_profile_artist_adjust_boosts_core_and_penalizes_avoid():
+    """同分候选：画像 core 艺人升到最前，avoid 艺人沉到最后。"""
+    a = _track_artist("Song A", "Core Artist")
+    b = _track_artist("Song B", "Neutral Artist")
+    c = _track_artist("Song C", "Avoided Artist")
+    scored = [(a, _bd(0.5)), (b, _bd(0.5)), (c, _bd(0.5))]
+    out = apply_profile_artist_adjust(scored, boost={"Core Artist"}, penalty={"Avoided Artist"})
+    assert [t.title for t, _ in out] == ["Song A", "Song B", "Song C"]
+    assert out[0][1].components.get("profile_core_artist", 0) > 0
+    assert out[-1][1].components.get("profile_avoid_artist", 0) < 0
+
+
+def test_profile_artist_adjust_substring_match_on_compound_artist():
+    """候选 artist 形如「A、B」，画像艺人作为子串命中即生效。"""
+    t = _track_artist("Song", "Mac Miller、Asen")
+    scored = [(t, _bd(0.4))]
+    out = apply_profile_artist_adjust(scored, boost={"Mac Miller"}, penalty=None)
+    assert out[0][1].score > 0.4
+    assert "profile_core_artist" in out[0][1].components
+
+
+def test_profile_artist_adjust_noop_without_signals():
+    """boost/penalty 为空时不改分，行为与旧版一致。"""
+    t = _track_artist("Song", "X")
+    out = apply_profile_artist_adjust([(t, _bd(0.5))], None, None)
+    assert out[0][1].score == 0.5
+    assert "profile_core_artist" not in out[0][1].components
+
+
+def test_rerank_candidates_accepts_profile_signals_without_crash():
+    """rerank_candidates 新增的画像参数为可选：传与不传都不崩。"""
+    tracks = [_track_artist("Song", "Core Artist"), _track_artist("Other", "Nobody")]
+    taste = TasteProfile()
+    # 不传画像（旧行为）
+    rerank_candidates("test", tracks, taste, top_k=2, apply_mmr=False)
+    # 传画像（加分生效、不崩）
+    out = rerank_candidates(
+        "test", tracks, taste, top_k=2, apply_mmr=False,
+        profile_boost_artists={"Core Artist"}, profile_penalty_artists=None,
+    )
+    assert len(out) == 2

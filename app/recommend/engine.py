@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -60,6 +61,21 @@ def score_track(
     return base
 
 
+_ARTIST_SPLIT_RE = re.compile(r"[、,/;&]|\b(?:feat|ft|featuring|with)\b\.?", re.IGNORECASE)
+
+
+def _split_artists(name: str | None) -> list[str]:
+    """把多艺人字符串拆成个体（小写、去空）。
+
+    网易云导入把多歌手拼成 'a、b、c' 一串；计数前必须拆开，否则合作歌手无法单独提出，
+    画像/推荐里会看到 'kanye west、ye' 这种合并条目。分隔符：、 , / ; & 以及
+    feat./ft./featuring/with（末尾可选的点会被一起消耗，避免留 '. b' 残段）。
+    """
+    if not name:
+        return []
+    return [p.strip().strip(".").strip().lower() for p in _ARTIST_SPLIT_RE.split(name) if p and p.strip()]
+
+
 def compute_taste_profile(
     assets: list[Asset],
     listening_history: list[Any],
@@ -78,10 +94,9 @@ def compute_taste_profile(
             genre_counts[g] = genre_counts.get(g, 0) + 1
         for m in asset.mood:
             mood_counts[m] = mood_counts.get(m, 0) + 1
-        # 艺术家计数
-        if asset.artist:
-            artist_key = asset.artist.lower().strip()
-            artist_counts[artist_key] = artist_counts.get(artist_key, 0) + 1
+        # 艺术家计数（合作歌手按分隔符拆开，各自计数）
+        for _a in _split_artists(asset.artist):
+            artist_counts[_a] = artist_counts.get(_a, 0) + 1
         if asset.energy_level is not None:
             energy_sum += asset.energy_level
             energy_n += 1
@@ -102,12 +117,10 @@ def compute_taste_profile(
                 genre_counts[g] = genre_counts.get(g, 0) + weight
             for m in moods:
                 mood_counts[m] = mood_counts.get(m, 0) + weight
-            # 高分艺术家偏好加强
+            # 高分艺术家偏好加强（合作歌手拆开各自加权）
             if rating.score >= 7:
-                artist_name = rating.artist or ""
-                if artist_name:
-                    artist_key = artist_name.lower().strip()
-                    artist_counts[artist_key] = artist_counts.get(artist_key, 0) + weight * 0.5
+                for _a in _split_artists(rating.artist):
+                    artist_counts[_a] = artist_counts.get(_a, 0) + weight * 0.5
             # 能量偏好
             if rating.score >= 4:
                 rated_asset = asset_map.get(rating.asset_id)

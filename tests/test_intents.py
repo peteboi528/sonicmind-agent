@@ -96,6 +96,8 @@ class TestKeywordFallback:
         ("推荐 The Weeknd 的专辑", "artist_albums"),
         ("周杰伦有哪几张专辑", "artist_albums"),
         ("Asen 牛逼吗", "discuss"),
+        ("这张专辑先听哪几首", "album_deep_dive"),
+        ("这张专辑，我最想让你先听《Self Control》和《White Ferrari》。", "album_deep_dive"),
     ])
     def test_keyword_matches(self, query, expected):
         assert match_intent_by_keywords(query) == expected
@@ -106,6 +108,9 @@ class TestKeywordFallback:
     def test_import_priority_over_playlist(self):
         # "导入歌单" 同时含 import 和 playlist 信号，import 优先
         assert match_intent_by_keywords("帮我导入这个歌单") == "import"
+
+    def test_playlist_beats_generic_journey_phase_words(self):
+        assert match_intent_by_keywords("帮我做 8 首适合跑步冲刺的歌单") == "playlist"
 
 
 class TestPromptBlock:

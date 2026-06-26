@@ -65,6 +65,7 @@ function normalizeAlbumCard(payload) {
     name: raw.name || "",
     artist: raw.artist || payload?.artist || "",
     image: raw.image || raw.cover || "",
+    tags: Array.isArray(raw.tags) ? raw.tags : [],
     track_count: raw.track_count || raw.size || null,
     tracks: Array.isArray(raw.tracks) ? raw.tracks.map(trackToCard) : [],
     loading: false,
@@ -209,6 +210,7 @@ async function toggleAlbumSave(album) {
       artist: album.artist || "",
       image: album.image || "",
       track_count: album.track_count ?? tracks.length,
+      tags: album.tags || [],
       tracks: tracks.map(cardToExternalTrack),
     });
     album.saved = true;
@@ -375,7 +377,7 @@ function onKey(e) {
         <p class="welcome-sub">你的私人音乐 Agent。告诉我心情、场景或歌手，我来找到真实可追溯的音乐。</p>
         <div class="quick-grid">
           <button v-for="(q, i) in QUICK" :key="i" class="quick-card"
-            :style="{ animationDelay: `${i * 70}ms` }"
+            :style="{ animationDelay: `${i * 70}ms`, '--bar-color': ['#1DB954','#4ca8ff','#ba82ff','#ffc400','#ff6b6b'][i] }"
             @click="send(q.prompt)">
             <span class="quick-text">{{ q.text }}</span>
             <svg class="quick-arrow" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
@@ -396,12 +398,11 @@ function onKey(e) {
 
         <TransitionGroup name="msg-list">
           <div v-for="m in messages" :key="m.id" class="msg" :class="m.role === 'user' ? 'msg-user' : 'msg-bot'">
-            <div class="avatar" v-html="m.role === 'user'
+            <div class="avatar" :title="m.role === 'user' ? '你' : 'SonicMind'" v-html="m.role === 'user'
               ? `<svg width='16' height='16' viewBox='0 0 24 24' fill='currentColor'><path d='M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z'/></svg>`
               : `<svg width='16' height='16' viewBox='0 0 24 24' fill='currentColor'><path d='M12 3v10.55c-.59-.34-1.27-.55-2-.55C7.79 13 6 14.79 6 17s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z'/></svg>`
             "></div>
             <div class="body">
-              <div class="role-label">{{ m.role === "user" ? "你" : "SonicMind" }}</div>
               <div v-if="m.text" class="text">{{ m.text }}</div>
               <div v-for="action in m.pendingActions || []" :key="action.action_id" class="confirmation-card">
                 <span>{{ action.text || "需要确认账号操作" }}</span>
@@ -548,9 +549,8 @@ function onKey(e) {
         <!-- ── Thinking ── -->
         <Transition name="thinking">
           <div v-if="thinking" class="msg msg-bot thinking-msg">
-            <div class="avatar thinking-avatar" v-html="`<svg width='16' height='16' viewBox='0 0 24 24' fill='currentColor'><path d='M12 3v10.55c-.59-.34-1.27-.55-2-.55C7.79 13 6 14.79 6 17s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z'/></svg>`"></div>
+            <div class="avatar thinking-avatar" title="SonicMind" v-html="`<svg width='16' height='16' viewBox='0 0 24 24' fill='currentColor'><path d='M12 3v10.55c-.59-.34-1.27-.55-2-.55C7.79 13 6 14.79 6 17s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z'/></svg>`"></div>
             <div class="body">
-              <div class="role-label">SonicMind</div>
               <div class="thinking">
                 <span class="thinking-text">{{ thinking }}</span>
                 <span class="thinking-dots">
@@ -649,19 +649,28 @@ function onKey(e) {
   margin-bottom: 36px;
 }
 .quick-grid {
-  display: grid; grid-template-columns: repeat(2, 1fr);
-  gap: 10px; max-width: 520px; width: 100%;
+  display: grid; grid-template-columns: 1fr;
+  gap: 8px; max-width: 480px; width: 100%;
 }
 .quick-card {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 18px;
+  padding: 12px 18px 12px 20px;
   background: var(--bg-card); border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text-sub); font-size: 0.88rem;
-  text-align: left;
+  text-align: left; position: relative; overflow: hidden;
   transition: all var(--dur-norm) var(--ease-out);
   animation: fadeInUp 0.5s var(--ease-out) both;
 }
+.quick-card::before {
+  content: "";
+  position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--bar-color, var(--accent));
+  border-radius: 0 2px 2px 0;
+  opacity: 0.6;
+  transition: opacity var(--transition), width var(--transition);
+}
+.quick-card:hover::before { opacity: 1; width: 4px; }
 .quick-card:hover {
   background: var(--bg-hover); color: var(--text);
   border-color: var(--border-light);
@@ -699,28 +708,21 @@ function onKey(e) {
 .clear-btn:hover { background: var(--bg-hover); color: var(--text); }
 
 .msg {
-  display: flex; gap: 14px; margin-bottom: 28px;
+  display: flex; gap: 12px; margin-bottom: 20px;
   animation: fadeInUp 0.35s var(--ease-out) both;
 }
 .msg-user { flex-direction: row-reverse; }
 
 .avatar {
-  width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0;
+  width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
   display: flex; align-items: center; justify-content: center;
   font-size: 1rem; margin-top: 2px;
+  cursor: default;
 }
 .msg-user .avatar { color: var(--text-sub); }
 .msg-bot .avatar { color: var(--accent); }
 
 .body { min-width: 0; flex: 1; }
-.role-label {
-  font-family: var(--font-display);
-  font-size: 0.75rem; font-weight: 700;
-  color: var(--text-muted);
-  text-transform: uppercase; letter-spacing: 0.04em;
-  margin-bottom: 6px;
-}
-.msg-user .role-label { text-align: right; }
 
 .text {
   font-size: 0.95rem; line-height: 1.7;
@@ -728,13 +730,21 @@ function onKey(e) {
 }
 .msg-user .text {
   background: var(--accent-dim);
-  padding: 12px 16px;
-  border-radius: var(--radius);
+  padding: 11px 15px;
+  border-radius: var(--radius) var(--radius) 2px var(--radius);
   border: 1px solid rgba(29,185,84,0.1);
   display: inline-block;
+  max-width: calc(100% - 8px);
 }
+.msg-user .body { display: flex; flex-direction: column; align-items: flex-end; }
 
-.cards { margin-top: 14px; }
+.cards {
+  margin-top: 12px;
+  background: rgba(255,255,255,0.025);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+}
 
 .confirmation-card {
   margin-top: 12px; padding: 12px 14px; max-width: 560px;
@@ -1092,9 +1102,9 @@ function onKey(e) {
 
 .artist-cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
   gap: 10px;
-  margin-top: 14px;
+  margin-top: 12px;
 }
 
 .artist-card {
@@ -1102,45 +1112,72 @@ function onKey(e) {
   flex-direction: column;
   align-items: flex-start;
   gap: 5px;
-  padding: 13px 14px;
+  padding: 13px 14px 13px 52px;
   text-align: left;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  transition: border-color var(--transition), transform var(--transition);
+  position: relative;
+  transition: border-color var(--transition), transform var(--transition), box-shadow var(--transition);
 }
-
-.artist-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+.artist-card::before {
+  content: "♪";
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--accent-dim);
+  border: 1px solid rgba(29,185,84,0.2);
+  color: var(--accent);
+  font-size: 0.78rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  text-align: center;
+  padding-top: 1px;
+}
+.artist-card:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 2px var(--accent-dim), 0 4px 16px rgba(29,185,84,0.12);
+}
 .artist-card strong { color: var(--text); font-family: var(--font-display); }
 .artist-card span { color: var(--text-sub); font-size: 0.82rem; }
 .artist-card small { color: var(--text-muted); font-size: 0.74rem; }
 
 .album-card {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr) auto;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
   padding: 10px;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
+  transition: border-color var(--transition);
 }
+.album-card:hover { border-color: var(--border-light); }
 
 .album-cover-wrap {
-  width: 64px;
-  height: 64px;
-  border-radius: 8px;
+  width: 72px;
+  height: 72px;
+  border-radius: 10px;
   overflow: hidden;
   background: var(--bg-hover);
   flex-shrink: 0;
 }
-
 .album-cover {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+  transition: transform 0.4s var(--ease-out);
 }
+.album-card:hover .album-cover { transform: scale(1.06); }
 
 .album-cover-ph {
   width: 100%;
@@ -1171,14 +1208,16 @@ function onKey(e) {
 
 .album-track-list {
   display: grid;
-  gap: 4px;
+  gap: 3px;
   margin-top: 8px;
   color: var(--text-sub);
   font-size: 0.74rem;
   line-height: 1.3;
-  max-height: 190px;
-  overflow: auto;
-  padding-right: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255,255,255,0.1) transparent;
 }
 
 .album-track-list span {
@@ -1244,11 +1283,15 @@ function onKey(e) {
 /* ── Thinking ── */
 .thinking {
   display: inline-flex; align-items: center; gap: 10px;
-  background: var(--bg-card); padding: 10px 16px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px) saturate(1.3);
+  -webkit-backdrop-filter: blur(12px) saturate(1.3);
+  padding: 10px 16px;
   border-radius: var(--radius);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-light);
+  box-shadow: 0 4px 20px rgba(0,0,0,0.25);
 }
-.thinking-text { color: var(--text-sub); font-size: 0.85rem; }
+.thinking-text { color: var(--text); font-size: 0.85rem; font-weight: 500; }
 .thinking-dots { display: flex; gap: 4px; }
 .thinking-dots .dot {
   width: 5px; height: 5px; border-radius: 50%;

@@ -94,3 +94,27 @@ class DiscogsClient:
             "genres": r.get("genre") or [],
             "styles": r.get("style") or [],
         }
+
+    def fetch_release_notes(self, title: str, artist: str = "", max_chars: int = 1600) -> str:
+        """取专辑发行的 notes/描述正文（Discogs API，绕开网页反爬）。
+
+        Discogs 网页被 Tavily Extract 反爬挡住取空，但 API（需 token）能拿到 master/release
+        的 notes 字段——常含厂牌、版本、幕后信息，是 AllMusic/RYM 全文不可得时的稳定补充。
+        失败/token 缺失返回 ""，知识链路据此降级，不报错。
+        """
+        if not self.available:
+            return ""
+        resolved = self.resolve_release(title, artist)
+        if not resolved or not resolved.get("id"):
+            return ""
+        rid = resolved["id"]
+        rtype = (resolved.get("type") or "master")
+        # master 走 /masters/{id}；release 走 /releases/{id}。两者都有 notes 字段。
+        data = self._get(f"{rtype}s/{rid}") if rtype in {"master", "release"} else {}
+        notes = str(data.get("notes") or "").strip()
+        if not notes:
+            return ""
+        # Discogs notes 含 [a12345] 之类的引用锚点，清掉以减少噪音。
+        notes = re.sub(r"\[[a-z]\d+\]", "", notes)
+        notes = re.sub(r"\s+", " ", notes).strip()
+        return notes[:max_chars]

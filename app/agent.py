@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import math
@@ -610,12 +611,28 @@ class AudioVisualAgent:
 
     # --- 推荐功能 ---
 
+    def _apply_netease_cookie(self, user_id: str) -> None:
+        """把当前 user 绑定的网易云登录 cookie 注入搜索请求（治匿名限流）。
+
+        搜索默认匿名，网易云按 IP 限得很狠；绑定登录后带上 MUSIC_U 额度远高。未绑定则
+        退回匿名（兼容旧行为）。在推荐/搜索入口调用一次，下游所有网易云请求都带上。
+        """
+        try:
+            from app.netease_auth import load_cookie
+            from app.sources import netease as netease_source
+            info = load_cookie(user_id) or {}
+            netease_source.set_default_cookie(info.get("cookie") or "")
+        except Exception:
+            logger.debug("apply netease cookie skipped for %s", user_id, exc_info=True)
+
     def daily_recommend(
         self,
         user_id: str,
         time_of_day: str | None = None,
         count: int | None = None,
+        no_local: bool = False,
     ) -> DailyRecommendation:
+        self._apply_netease_cookie(user_id)
         count = count or settings.daily_rec_count
         memory = self.memory.get_memory(user_id)
         library = [a for a in self.list_assets() if a.status == "analyzed"]
@@ -640,7 +657,13 @@ class AudioVisualAgent:
             goal_parts.append(" ".join(taste_moods))
         goal = " ".join(goal_parts) if goal_parts else "推荐好听的音乐"
 
-        return self.recommend_for_query(user_id, goal, top_k=count)
+        # 每日是纯「时间+风格+情绪」氛围推荐、无实体 → 走 route B（策划歌单 + LLM/Last.fm
+        # 发现），而非 route C（歌曲关键词搜索，会把风格词搜成业余「(R&B版)」翻唱）。
+        # local_ratio：默认 0.3（略压本地、让位线上发现）；每日 tab「仅线上」开关 → 0.0。
+        local_ratio = 0.0 if no_local else 0.3
+        return self.recommend_for_query(
+            user_id, goal, top_k=count, prefer_playlist=True, local_ratio=local_ratio,
+        )
 
     def find_similar_assets(self, asset_id: str, top_k: int = 5) -> list[SimilarAssetResult]:
         return self.similarity.find_similar_assets(asset_id, top_k)
@@ -651,6 +674,7 @@ class AudioVisualAgent:
     # --- 搜索 ---
 
     def search(self, user_id: str, query: str, include_external: bool = True, top_k: int = 20, offset: int = 0) -> SearchResponse:
+        self._apply_netease_cookie(user_id)
         memory = self.memory.get_memory(user_id)
         memory_query = self.memory.weighted_query(memory, include_artists=False)
         expanded_query = f"{query} {memory_query}".strip()
@@ -900,7 +924,19 @@ class AudioVisualAgent:
 
         from app.sources.netease import asearch_netease_many
 
-        metadata = await asearch_netease_many(query, limit=top_k, offset=offset)
+        try:
+            metadata = await asearch_netease_many(query, limit=top_k, offset=offset)
+        except Exception:
+            logger.debug("async web music search failed; falling back to sync path for query=%s", query, exc_info=True)
+            return await asyncio.to_thread(
+                self.search_web_music,
+                query=query,
+                top_k=top_k,
+                relevance_query=relevance_query,
+                include_video_sources=include_video_sources,
+                offset=offset,
+                variants=variants,
+            )
         tracks = [
             ExternalTrack(
                 external_id=item["song_id"],
@@ -929,6 +965,16 @@ class AudioVisualAgent:
                 if _valid_external_track(fallback, rel_q):
                     tracks.append(fallback)
         selected = _dedupe_tracks(tracks)[:top_k]
+        if not selected:
+            return await asyncio.to_thread(
+                self.search_web_music,
+                query=query,
+                top_k=top_k,
+                relevance_query=relevance_query,
+                include_video_sources=include_video_sources,
+                offset=offset,
+                variants=variants,
+            )
         await asyncio.gather(*(asyncio.to_thread(self.library.upsert_external, track) for track in selected))
         return selected
 
@@ -1059,10 +1105,14 @@ class AudioVisualAgent:
     async def search_videos_async(self, query: str, top_k: int = 5) -> list[ExternalTrack]:
         import asyncio
 
-        bili_items, youtube_items = await asyncio.gather(
-            bilibili_source.asearch_bilibili_many(query, limit=min(top_k, 5)),
-            youtube_source.asearch_youtube_many(query, limit=min(top_k, 3)),
-        )
+        try:
+            bili_items, youtube_items = await asyncio.gather(
+                bilibili_source.asearch_bilibili_many(query, limit=min(top_k, 5)),
+                youtube_source.asearch_youtube_many(query, limit=min(top_k, 3)),
+            )
+        except Exception:
+            logger.debug("async video search failed; falling back to sync path for query=%s", query, exc_info=True)
+            return await asyncio.to_thread(self.search_videos, query=query, top_k=top_k)
         tracks = [
             ExternalTrack(
                 external_id=item["bvid"], title=item["title"], artist=item.get("author", ""),
@@ -1078,7 +1128,10 @@ class AudioVisualAgent:
                 candidate_kind=_classify_candidate_kind(title, "youtube"),
                 playback_url=f"https://www.youtube.com/embed/{item['video_id']}?autoplay=1&rel=0",
             ))
-        return _dedupe_tracks(tracks)[:top_k]
+        selected = _dedupe_tracks(tracks)[:top_k]
+        if selected:
+            return selected
+        return await asyncio.to_thread(self.search_videos, query=query, top_k=top_k)
 
     def search_artist_info(self, query: str) -> list[dict[str, str]]:
         """用 Tavily/DuckDuckGo 搜索歌手/乐队百科信息。
@@ -1091,17 +1144,25 @@ class AudioVisualAgent:
         )
 
     async def search_artist_info_async(self, query: str) -> list[dict[str, str]]:
-        return await web_search_source.asearch_web_info(
-            query, max_results=5, api_key=settings.tavily_api_key,
-        )
+        import asyncio
+
+        try:
+            result = await web_search_source.asearch_web_info(
+                query, max_results=5, api_key=settings.tavily_api_key,
+            )
+        except Exception:
+            logger.debug("async artist info search failed; falling back to sync path for query=%s", query, exc_info=True)
+            return await asyncio.to_thread(self.search_artist_info, query=query)
+        if result:
+            return result
+        return await asyncio.to_thread(self.search_artist_info, query=query)
 
     def classify_discover_query(self, query: str) -> dict[str, Any]:
         """Classify Discover input before choosing category, artist, or track UI.
 
-        Artist cards are intentionally conservative: bare names must exactly match an
-        artist already present in the user's library; unknown artists need an explicit
-        cue such as “歌手 Adele”. This prevents moods and activities from becoming
-        fuzzy artist pages while keeping song-title search broad.
+        Prefer artist cards for queries that already look like a bare artist name.
+        Category/activity words still stay out of this branch so moods like “专注”
+        or “workout” do not become fuzzy artist pages.
         """
         from app.graph.tag_rules import extract_tags
 
@@ -1122,6 +1183,13 @@ class AudioVisualAgent:
             (name for name, aliases in artist_catalog.items() if normalized_key and normalized_key in aliases),
             "",
         )
+        exact_track = next(
+            (
+                asset.title for asset in self.list_assets()
+                if normalized_key and _normalize_match_text(asset.title) == normalized_key
+            ),
+            "",
+        )
 
         if explicit_artist or exact_artist:
             canonical = exact_artist or normalized
@@ -1131,6 +1199,13 @@ class AudioVisualAgent:
                 "confidence": 0.98 if exact_artist else 0.92,
                 "matched_artist": exact_artist,
                 "reason": "explicit_artist" if explicit_artist and not exact_artist else "library_artist_exact",
+            }
+
+        if exact_track:
+            return {
+                "kind": "track", "normalized_query": exact_track,
+                "label": "歌曲搜索", "tags": tags,
+                "confidence": 0.97, "reason": "library_track_exact",
             }
 
         category_order = (("scenario", "scene", "场景电台"), ("mood", "mood", "情绪电台"), ("genre", "genre", "曲风探索"))
@@ -1163,6 +1238,15 @@ class AudioVisualAgent:
                     "matched_artist": best_artist,
                     "reason": "library_artist_fuzzy",
                 }
+
+        if _looks_like_bare_artist_query(raw, normalized, tags):
+            return {
+                "kind": "artist", "normalized_query": normalized,
+                "label": "歌手档案", "tags": tags,
+                "confidence": 0.74,
+                "matched_artist": "",
+                "reason": "bare_artist_shape",
+            }
 
         return {
             "kind": "track", "normalized_query": normalized,
@@ -1309,6 +1393,29 @@ class AudioVisualAgent:
             except Exception:
                 logger.exception("LangGraph invoke failed")
         return _graph_unavailable_answer()
+
+    def chat(
+        self,
+        user_id: str,
+        message: str,
+        history: list[dict[str, Any]] | None = None,
+        thread_id: str | None = None,
+        run_id: str | None = None,
+    ) -> AgentAnswer:
+        """Backward-compatible sync wrapper used by local scripts and smoke tools."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self.chat_async(
+                    user_id=user_id,
+                    message=message,
+                    history=history,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                )
+            )
+        raise RuntimeError("AudioVisualAgent.chat() cannot run inside an active event loop; use chat_async().")
 
     async def stream_chat_async(
         self,
@@ -1664,6 +1771,35 @@ class AudioVisualAgent:
     def _get_netease_audio_url(self, song_id: str, cookie: str = "") -> str | None:
         return netease_source.get_netease_audio_url(song_id, cookie)
 
+    def get_lyrics(self, title: str, artist: str, source_id: str = "") -> dict:
+        """取当前曲歌词。网易云在线曲用 source_id(song_id) 直取；本地曲按标题+艺人搜命中后取。
+
+        复用 fetch_netease_lyrics / search_netease_many / artist_name_matches（与 _lyrics 工具同源）。
+        返回 {title, artist, song_id, lines, found}；找不到 lines 为空。
+        """
+        from app.sources.netease import fetch_netease_lyrics_timed, search_netease_many
+
+        def _norm(value: str) -> str:
+            return re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", (value or "").lower())
+
+        song_id = str(source_id or "").strip()
+        if not song_id.isdigit():
+            song_id = ""  # source_id 必须是数字网易云 song_id
+        resolved_title = title
+        if not song_id and title:
+            for candidate in search_netease_many(" ".join(filter(None, [title, artist])), limit=8):
+                if _norm(title) == _norm(candidate.get("title", "")) and (
+                    not artist or self.artist_name_matches(artist, candidate.get("artist", ""))
+                ):
+                    song_id = str(candidate.get("song_id", ""))
+                    resolved_title = candidate.get("title", title)
+                    break
+        lines = fetch_netease_lyrics_timed(song_id) if song_id else []
+        return {
+            "title": resolved_title, "artist": artist, "song_id": song_id,
+            "lines": lines, "found": bool(lines),
+        }
+
     # --- 歌单 ---
 
     def generate_playlist(
@@ -1801,6 +1937,10 @@ class AudioVisualAgent:
 
     def save_album(self, user_id: str, album: SavedAlbum) -> SavedAlbum:
         self.store.write_model("saved_albums", f"{user_id}_{album.album_id}", album)
+        try:
+            self.memory.refresh_taste_profile(user_id, self.list_assets())
+        except Exception:
+            logger.debug("refresh_taste_profile failed after save_album(%s)", album.album_id, exc_info=True)
         return album
 
     def list_saved_albums(self, user_id: str) -> list[SavedAlbum]:
@@ -1818,7 +1958,13 @@ class AudioVisualAgent:
         return albums
 
     def delete_saved_album(self, user_id: str, album_id: str) -> bool:
-        return self.store.delete_key("saved_albums", f"{user_id}_{album_id}")
+        deleted = self.store.delete_key("saved_albums", f"{user_id}_{album_id}")
+        if deleted:
+            try:
+                self.memory.refresh_taste_profile(user_id, self.list_assets())
+            except Exception:
+                logger.debug("refresh_taste_profile failed after delete_saved_album(%s)", album_id, exc_info=True)
+        return deleted
 
     def is_album_saved(self, user_id: str, album_id: str) -> bool:
         return self.store.read_model("saved_albums", f"{user_id}_{album_id}", SavedAlbum) is not None
@@ -2067,7 +2213,74 @@ class AudioVisualAgent:
         parts.append(f"显式表达过的偏好包括 {pref_text}。")
         return "".join(parts)
 
-    def recommend_artist_albums(self, user_id: str, artist: str, limit: int = 6) -> list[dict[str, Any]]:
+    def profile_context_text(self, user_id: str) -> str:
+        """压缩画像仪表盘（app/profile/）为 query_plan 用的品位上下文（软参考）。
+
+        与 summarize_taste（听歌历史频次）互补：这里带场景偏好、探索风格、画像级排除/回避，
+        以及被用户「纠错」后落地的信号。空画像/异常返 ""——调用方据此跳过注入，行为不变。
+        """
+        try:
+            from app.profile.service import UserProfileService
+            ctx = UserProfileService(self.store, self.memory).get_context_for_llm(user_id)
+        except Exception:
+            logger.debug("profile_context_text 失败，跳过画像注入", exc_info=True)
+            return ""
+        parts: list[str] = []
+        if ctx.taste_summary:
+            parts.append(f"当前品味：{ctx.taste_summary}")
+        if ctx.active_scene_preference:
+            parts.append(f"常听场景：{ctx.active_scene_preference}")
+        if ctx.discovery_mode:
+            parts.append(f"探索风格：{ctx.discovery_mode}")
+        if ctx.hard_constraints:
+            parts.append(f"明确排除：{'、'.join(ctx.hard_constraints[:5])}")
+        if ctx.avoid_features:
+            parts.append(f"场景应回避：{'、'.join(ctx.avoid_features[:5])}")
+        if ctx.rejected_signals:
+            # 用户在画像页「纠错」否定过的判断——推荐应反转/回避，别再按这些推。
+            parts.append(f"用户已否定（勿据此推荐）：{'；'.join(ctx.rejected_signals[:4])}")
+        return "；".join(parts)
+
+    def _profile_rerank_signals(self, user_id: str) -> tuple[set[str], set[str]]:
+        """从画像仪表盘取 rerank 艺人信号：core/rising→加分，avoid→减分。
+
+        与 memory.taste_profile（听歌频次）互补——画像是可解释的艺人关系判断。
+        **纠错回流**：用户在画像页否定的艺人洞察会反转关系——
+          否定「X 是核心艺人」→ X 从加分移到减分（别再按核心推）；
+          否定「不要推 X」→ X 从减分移除（用户其实不排斥 X）。
+        空画像/异常返回空集，rerank 行为不变。
+        """
+        try:
+            from app.profile.service import UserProfileService
+            profile = UserProfileService(self.store, self.memory).get_profile(user_id)
+        except Exception:
+            logger.debug("_profile_rerank_signals 失败，降级无画像信号", exc_info=True)
+            return set(), set()
+        if getattr(profile, "is_empty", True):
+            return set(), set()
+        # 纠错回流：被否定的艺人洞察（title 含艺人名）决定关系反转方向——
+        #   core/rising 被否定 → 从加分改减分；avoid 被否定 → 不再减分。
+        # 直接按关系+是否被否定一次建表，避免先加进 penalty 又被第二轮扫描误删。
+        rejected_titles = [
+            i.title for i in profile.insights
+            if i.status == "rejected" and i.dimension == "artist"
+        ]
+
+        def _rejected(name: str) -> bool:
+            return any(name in t for t in rejected_titles)
+
+        boost: set[str] = set()
+        penalty: set[str] = set()
+        for a in profile.artists:
+            if not a.artist:
+                continue
+            if a.relation_type in {"core", "rising"}:
+                (penalty if _rejected(a.artist) else boost).add(a.artist)
+            elif a.relation_type == "avoid" and not _rejected(a.artist):
+                penalty.add(a.artist)
+        return boost, penalty
+
+    def recommend_artist_albums(self, user_id: str, artist: str, limit: int = 12) -> list[dict[str, Any]]:
         """推荐某歌手的真实专辑清单：走网易云专辑搜索（type=10，与单曲搜索不同端点），
         返回带真实 album_id 的专辑，前端可整张播放。
 
@@ -2085,7 +2298,7 @@ class AudioVisualAgent:
             return []
 
     async def recommend_artist_albums_async(
-        self, user_id: str, artist: str, limit: int = 6,
+        self, user_id: str, artist: str, limit: int = 12,
     ) -> list[dict[str, Any]]:
         import asyncio
 
@@ -2093,12 +2306,25 @@ class AudioVisualAgent:
         if not artist:
             return []
         try:
-            return await netease_source.asearch_netease_artist_albums(artist, limit)
+            result = await netease_source.asearch_netease_artist_albums(artist, limit)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.debug("async recommend_artist_albums failed for %s", artist, exc_info=True)
-            return []
+            return await asyncio.to_thread(
+                self.recommend_artist_albums,
+                user_id=user_id,
+                artist=artist,
+                limit=limit,
+            )
+        if result:
+            return result
+        return await asyncio.to_thread(
+            self.recommend_artist_albums,
+            user_id=user_id,
+            artist=artist,
+            limit=limit,
+        )
 
     def generate_taste_experiment(self, user_id: str, prompt: str, total: int = 12) -> TasteExperiment:
         """生成 safe/stretch/bold 三档品味实验。
@@ -2698,7 +2924,12 @@ class AudioVisualAgent:
         excluded_tracks: list[dict[str, str]] | None = None,
         search_variants: list[str] | None = None,
         seed_tracks: list[Asset | ExternalTrack] | None = None,
+        prefer_playlist: bool = False,
+        local_ratio: float = 0.4,
     ) -> DailyRecommendation:
+        self._apply_netease_cookie(user_id)
+        # 用户明确「不要/减少 local」→ 覆盖默认本地比例（chat 默认 0.4、每日 0.3）
+        local_ratio = _local_ratio_from_query(goal, local_ratio)
         memory = self.memory.get_memory(user_id)
         memory_query = self.memory.weighted_query(memory, include_artists=False)
         search_goal = _extract_search_query(goal)
@@ -2721,7 +2952,7 @@ class AudioVisualAgent:
 
         if seed_supply >= top_k:
             trace_lines.append(f"route=seed_candidates, supplied={seed_supply}")
-        elif (has_entity and not scene_queries) or anchors.explicit:
+        elif not prefer_playlist and ((has_entity and not scene_queries) or anchors.explicit):
             # 路由C：精确/锚点搜索。复杂小众 query 不能只拿一条长 search_goal 搜；
             # 逐个艺人/曲风 seed 召回，再统一去重和重排，避免 long query 召回空或偏移。
             seeds = _recommendation_search_seeds(search_goal, goal, anchors, search_variants)
@@ -2761,34 +2992,44 @@ class AudioVisualAgent:
             all_candidates.extend(playlist_tracks)
 
             # 路由A（补位）：LLM 候选生成 → 网易云验证（歌单不够时补充）
-            from app.search.web_music_discovery import discover_from_llm
-            llm_tracks = discover_from_llm(
-                query=goal,
-                taste_summary=taste_summary,
-                exclusion_rules=memory.exclusion_rules,
-                library_artists=library_artists,
-                target_count=max(top_k * 2, 8),
-                llm=self.llm,
-            )
-            trace_lines.append(f"route=llm_candidates, generated={len(llm_tracks)}")
-            all_candidates.extend(llm_tracks)
+            # prefer_playlist（如每日推荐）跳过：LLM 生成 + 逐首网易云验证会放大调用量，
+            # 限流下单次 recommend 可超 2 分钟。每日已有富 taste，歌单搜索足够，不必走重发现。
+            if not prefer_playlist:
+                from app.search.web_music_discovery import discover_from_llm
+                llm_tracks = discover_from_llm(
+                    query=goal,
+                    taste_summary=taste_summary,
+                    exclusion_rules=memory.exclusion_rules,
+                    library_artists=library_artists,
+                    target_count=max(top_k * 2, 8),
+                    llm=self.llm,
+                )
+                trace_lines.append(f"route=llm_candidates, generated={len(llm_tracks)}")
+                all_candidates.extend(llm_tracks)
 
-            # 路由E：Last.fm 发现 → 网易云验证（需要配置 LASTFM_API_KEY）
-            from app.search.lastfm_discovery import discover_from_lastfm
-            taste_artists = [a for a, _ in (memory.taste_profile.top_artists if memory.taste_profile else [])]
-            taste_genre_names = [g for g, _ in (memory.taste_profile.top_genres if memory.taste_profile else [])]
-            lastfm_tracks = discover_from_lastfm(
-                top_artists=taste_artists or library_artists,
-                top_genres=taste_genre_names,
-                target_count=max(top_k * 2, 8),
-            )
-            if lastfm_tracks:
-                trace_lines.append(f"route=lastfm, verified={len(lastfm_tracks)}")
-                all_candidates.extend(lastfm_tracks)
+                # 路由E：Last.fm 发现 → 网易云验证（需要配置 LASTFM_API_KEY）
+                from app.search.lastfm_discovery import discover_from_lastfm
+                taste_artists = [a for a, _ in (memory.taste_profile.top_artists if memory.taste_profile else [])]
+                taste_genre_names = [g for g, _ in (memory.taste_profile.top_genres if memory.taste_profile else [])]
+                lastfm_tracks = discover_from_lastfm(
+                    top_artists=taste_artists or library_artists,
+                    top_genres=taste_genre_names,
+                    target_count=max(top_k * 2, 8),
+                )
+                if lastfm_tracks:
+                    trace_lines.append(f"route=lastfm, verified={len(lastfm_tracks)}")
+                    all_candidates.extend(lastfm_tracks)
 
             # 场景型请求可宽召回，但使用风格/情绪 seed，不再用“下午/放松”这类
             # 容易被功能音频标题劫持的原词补位。
-            for scene_query in scene_queries[1:]:
+            # 单次场景推荐已经同时走了“歌单 + LLM + Last.fm + 本地库”，继续把
+            # scene_queries 扇出到多次歌单搜索会明显放大延迟与限流概率。
+            # 仅在偏歌单模式（如每日推荐）且当前候选仍明显不足时再扩容。
+            if prefer_playlist and len(_dedupe_tracks(all_candidates)) < candidate_budget:
+                follow_up_scene_queries = scene_queries[1:]
+            else:
+                follow_up_scene_queries = []
+            for scene_query in follow_up_scene_queries:
                 if len(_dedupe_tracks(all_candidates)) >= max(top_k * 3, top_k):
                     break
                 batch = search_and_extract(
@@ -2845,7 +3086,9 @@ class AudioVisualAgent:
         # 可播放、不是幻觉。限流是间歇的，今天搜不到的昨天可能已入池。
         # 复用 _dense_library_fallback：它做 semantic→lexical 召回 + 转 ExternalTrack +
         # 按 existing 去重，类型与下游 rerank 兼容。
-        if anchors.explicit:
+        # prefer_playlist（每日）：歌单本身就是策划，不再用风格锚点严格过滤——否则会把
+        # 歌单 166 首砍到剩 1 首。锚点过滤留给 route C 的实体搜索。
+        if anchors.explicit and not prefer_playlist:
             before = len(verified)
             verified = [track for track in verified if _track_matches_recommendation_anchors(track, anchors)]
             dropped = before - len(verified)
@@ -2864,7 +3107,7 @@ class AudioVisualAgent:
                 )
                 and _is_playlist_context_compatible(goal, t)
             ]
-            if anchors.explicit:
+            if anchors.explicit and not prefer_playlist:
                 pool_hits = [t for t in pool_hits if _track_matches_recommendation_anchors(t, anchors)]
             if pool_hits:
                 trace_lines.append(f"route=resource_pool, recalled={len(pool_hits)}")
@@ -2882,7 +3125,7 @@ class AudioVisualAgent:
             ranked_pool = self._rerank_tracks(
                 user_id, rerank_query, _dedupe_tracks(verified), top_k=len(verified),
             )
-            ranked = self._balance_recommendation_sources(ranked_pool, top_k)
+            ranked = self._balance_recommendation_sources(ranked_pool, top_k, local_ratio=local_ratio)
             self.library.record_exposure([t for t, _ in ranked])
             self.library.decay_exposure_ts([t for t, _ in ranked])
             tracks: list[RecommendedTrack] = []
@@ -2970,6 +3213,10 @@ class AudioVisualAgent:
             return []
         local = [item for item in ranked if _is_local_recommendation_track(item[0])]
         online = [item for item in ranked if not _is_local_recommendation_track(item[0])]
+        # 用户明确「不要 local」（local_ratio=0）：完全跳过本地，只取线上；
+        # 线上不足就不足，不拿本地充数——否则「不要local」形同虚设。
+        if local_ratio <= 0:
+            return online[:top_k]
         if not online:
             return local[:top_k]
         if not local:
@@ -3122,6 +3369,8 @@ class AudioVisualAgent:
         lang_pref = language_distribution(self.list_assets())
         # 排除规则：用户明确表示不要的风格/类型
         exclusion_rules = memory.exclusion_rules or None
+        # 画像仪表盘艺人信号（core/rising 加分、avoid 减分）——与听歌频次 taste 互补。
+        profile_boost, profile_penalty = self._profile_rerank_signals(user_id)
         # P2-H：协同过滤第四锚——跨用户共现。冷启动（无共现/无近期收听）自动关闭，
         # 由 rerank 权重重分配让回三锚。
         cf_scores, cf_ok = self._collaborative_scores(user_id, tracks, memory)
@@ -3132,6 +3381,8 @@ class AudioVisualAgent:
             lang_pref=lang_pref, exclusion_rules=exclusion_rules,
             collaborative_scores=cf_scores, collaborative_ok=cf_ok,
             ts_scores=ts_scores,
+            profile_boost_artists=profile_boost or None,
+            profile_penalty_artists=profile_penalty or None,
         )
 
     def _collaborative_scores(self, user_id: str, tracks: list[Any], memory: Any) -> tuple[list[float] | None, bool]:
@@ -3547,6 +3798,30 @@ def _query_requests_variant_content(query: str) -> bool:
     ))
 
 
+def _local_ratio_from_query(query: str, default: float) -> float:
+    """用户是否在 query 里明确要求压制本地候选 → 返回覆盖后的 local_ratio。
+
+    - 「不要 local / 不要本地 / 全要线上 / 只推线上」→ 0.0（完全跳过本地）
+    - 「减少 local / 少点本地 / 少推本地」→ 0.15（大幅压低，但仍允许少量）
+    - 其余 → default（chat 0.4 / 每日 0.3）
+
+    默认仍按曲库混合推荐（本地参与是好事），只在用户明确表达时才让步。
+    """
+    q = (query or "").lower()
+    if any(k in q for k in (
+        "不要local", "不要本地", "不要曲库", "不要我库", "不要推本地", "不要本地歌",
+        "全要线上", "全是线上", "只推线上", "只要线上", "别推本地", "no local",
+        "no local tracks", "without local",
+    )):
+        return 0.0
+    if any(k in q for k in (
+        "减少local", "少点local", "少一点local", "少推本地", "少来点本地", "少点本地",
+        "少一些本地", "本地少一点", "reduce local", "less local", "fewer local",
+    )):
+        return 0.15
+    return default
+
+
 def _is_recommendation_quality_track(track: Any, *, allow_variants: bool = False) -> bool:
     """推荐候选质量门禁；显式搜索版本内容时由 allow_variants 放行。
 
@@ -3578,6 +3853,11 @@ def _is_recommendation_quality_track(track: Any, *, allow_variants: bool = False
     )):
         return False
     if "#" in title or title.startswith(("【free】", "[free]", "（free）", "(free)")):
+        return False
+    # 业余翻唱/蹭关键词后缀：「(R&B版)」「(说唱版)」「(翻唱)」「(cover)」——
+    # 网易云按风格关键词搜歌会召回这类业余上传。策划歌单路径基本没有，此为兜底。
+    # 仅匹配括号内含 版/翻唱/cover 的收尾后缀，正规英文 "(Remix)"/"(Radio Edit)" 不误伤。
+    if re.search(r"[（(].{0,8}(?:版|翻唱|cover).{0,4}[)）]\s*$", lowered_title):
         return False
 
     generic_names = {
@@ -4054,6 +4334,89 @@ def _artist_query_matches(query: str, artist: str, *, allow_fuzzy: bool = False)
         and len(query_key) >= 6
         and max((_string_similarity(query_key, alias) for alias in aliases), default=0.0) >= 88.0
     )
+
+
+def _looks_like_bare_artist_query(raw: str, normalized: str, tags: dict[str, list[str]] | None = None) -> bool:
+    """Heuristic for bare-name Discover queries that should open artist view."""
+    if not normalized:
+        return False
+    tags = tags or {}
+    if any(tags.get(key) for key in ("genre", "mood", "scenario")):
+        return False
+
+    lowered = normalized.lower().strip()
+    if not lowered:
+        return False
+
+    blocked_fragments = (
+        "歌词", "歌单", "专辑", "歌曲", "电台", "推荐", "播放", "找歌", "搜歌",
+        "album", "albums", "discography", "playlist", "lyrics", "radio", "mix", "remix",
+        "ost", "soundtrack", "live", "karaoke",
+    )
+    if any(fragment in lowered for fragment in blocked_fragments):
+        return False
+    if re.search(r"[0-9《》“”\"'()\[\]{}]", normalized):
+        return False
+
+    cjk = "".join(re.findall(r"[\u4e00-\u9fff]", normalized))
+    if cjk:
+        if 2 <= len(cjk) <= 8 and len(normalized.split()) <= 2:
+            blocked_cjk = {
+                "专注", "放松", "伤感", "治愈", "清晨", "深夜", "通勤", "派对",
+                "运动", "跑步", "学习", "睡前", "睡觉", "工作", "白噪音",
+            }
+            common_surnames = {
+                "赵", "钱", "孙", "李", "周", "吴", "郑", "王", "冯", "陈", "褚", "卫",
+                "蒋", "沈", "韩", "杨", "朱", "秦", "尤", "许", "何", "吕", "施", "张",
+                "孔", "曹", "严", "华", "金", "魏", "陶", "姜", "戚", "谢", "邹", "喻",
+                "柏", "水", "窦", "章", "云", "苏", "潘", "葛", "奚", "范", "彭", "郎",
+                "鲁", "韦", "昌", "马", "苗", "凤", "花", "方", "俞", "任", "袁", "柳",
+                "唐", "罗", "薛", "伍", "余", "米", "贝", "姚", "孟", "顾", "尹", "江",
+                "钟", "黎", "龚", "邓", "侯", "邱", "邵", "蔡", "田", "樊", "胡", "凌",
+                "霍", "虞", "万", "支", "柯", "昝", "管", "卢", "莫", "经", "房", "裘",
+                "缪", "干", "解", "应", "宗", "丁", "宣", "贲", "邵", "郁", "单", "杭",
+                "洪", "包", "诸", "左", "石", "崔", "吉", "钮", "程", "嵇", "邢", "滑",
+                "裴", "陆", "荣", "翁", "荀", "羊", "於", "惠", "甄", "麹", "家", "封",
+                "芮", "羿", "储", "靳", "汲", "邴", "糜", "松", "井", "段", "富", "巫",
+                "乌", "焦", "巴", "弓", "牧", "隗", "山", "谷", "车", "侯", "宓", "蓬",
+                "全", "郗", "班", "仰", "秋", "仲", "伊", "宫", "宁", "仇", "栾", "暴",
+                "甘", "钭", "厉", "戎", "祖", "武", "符", "刘", "景", "詹", "束", "龙",
+                "叶", "幸", "司", "韶", "郜", "黎", "蓟", "薄", "印", "宿", "白", "怀",
+                "蒲", "台", "从", "鄂", "索", "咸", "籍", "赖", "卓", "蔺", "屠", "蒙",
+                "池", "乔", "阴", "郁", "胥", "能", "苍", "双", "闻", "莘", "党", "翟",
+                "谭", "贡", "劳", "逄", "姬", "申", "扶", "堵", "冉", "宰", "郦", "雍",
+                "郤", "璩", "桑", "桂", "濮", "牛", "寿", "通", "边", "扈", "燕", "冀",
+                "郏", "浦", "尚", "农", "温", "别", "庄", "晏", "柴", "瞿", "阎", "充",
+                "慕", "连", "茹", "习", "宦", "艾", "鱼", "容", "向", "古", "易", "慎",
+                "戈", "廖", "庾", "终", "暨", "居", "衡", "步", "都", "耿", "满", "弘",
+                "匡", "国", "文", "寇", "广", "禄", "阙", "东", "欧", "殳", "沃", "利",
+                "蔚", "越", "夔", "隆", "师", "巩", "厍", "聂", "晁", "勾", "敖", "融",
+                "冷", "訾", "辛", "阚", "那", "简", "饶", "空", "曾", "毋", "沙", "乜",
+                "养", "鞠", "须", "丰", "巢", "关", "蒯", "相", "查", "後", "荆", "红",
+                "游", "竺", "权", "逯", "盖", "益", "桓", "公", "仉", "督", "岳", "帅",
+                "缑", "亢", "况", "后", "有", "琴", "归", "海", "晋", "楚", "闫", "法",
+                "汝", "鄢", "涂", "钦", "岳", "帅", "琴", "商",
+            }
+            if cjk in blocked_cjk:
+                return False
+            return 2 <= len(cjk) <= 4 and cjk[0] in common_surnames
+        return False
+
+    words = [part for part in re.split(r"\s+", normalized.strip()) if part]
+    if not words or len(words) > 4:
+        return False
+    if not all(re.fullmatch(r"[A-Za-z][A-Za-z'.-]*", part) for part in words):
+        return False
+
+    if len(words) == 1:
+        single = words[0].lower()
+        blocked_single = {
+            "focus", "study", "sleep", "party", "chill", "relax", "workout",
+            "running", "romance", "sad", "happy", "healing", "morning", "night",
+        }
+        return len(single) >= 5 and single not in blocked_single
+
+    return all(part[0].isupper() or part.isupper() for part in words)
 
 
 def _string_similarity(a: str, b: str) -> float:

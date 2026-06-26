@@ -35,7 +35,10 @@ KNOWLEDGE_TOOLS = {
     "sample_relation_search", "locate_sample_sources", "build_sample_dossier",
 }
 
-TIER_A_SOURCES = {"pitchfork", "allmusic", "theguardian", "guardian", "rollingstone", "nme", "bbc", "residentadvisor", "stereogum", "musicbrainz"}
+TIER_A_SOURCES = {
+    "pitchfork", "pitchforkmedia", "allmusic", "theguardian", "guardian", "rollingstone",
+    "nme", "bbc", "time", "ew", "chicagotribune", "residentadvisor", "stereogum", "musicbrainz",
+}
 TIER_B_SOURCES = {"wikipedia", "lastfm", "last", "albumoftheyear", "rateyourmusic", "musicboard", "discogs", "genius", "whosampled"}
 
 
@@ -117,6 +120,34 @@ def resolve_music_entities(query: str, intent: str, plan: dict[str, Any] | None 
     ][:2 if intent == "music_compare" else 1]
 
 
+# 实体名噪声剥离（卡片 + 自然语言共用）：去开口动词前缀 + 去引用短语尾巴，
+# 治「介绍X 这个专辑」「讲一下Y」被解析成 name='介绍X'/artist='这个专辑'。
+_ENTITY_NOISE_LEAD = re.compile(
+    r"^\s*(介绍一下|介绍下|介绍|讲一下|讲一讲|讲讲|聊聊看|聊聊|聊一聊|说说|谈谈|"
+    r"分析一下|分析|了解|科普|解读|为什么经典|为什么这么经典|为什么|评价如何|评价|"
+    r"乐评怎么说|请|帮我|搜索|查一下|查下)\s*",
+    re.I,
+)
+_ENTITY_NOISE_TAIL = re.compile(
+    r"\s*(这个专辑|这张专辑|这张唱片|这张|这个|这首歌|这首|专辑|唱片|大碟)\s*$",
+    re.I,
+)
+_ENTITY_NOISE_WHOLE = re.compile(
+    r"^\s*(这个专辑|这张专辑|这张唱片|这张|这个|这首歌|这首|专辑|唱片|大碟|album|release)\s*$",
+    re.I,
+)
+
+
+def _strip_entity_noise(text: str) -> str:
+    text = _ENTITY_NOISE_LEAD.sub("", text or "")
+    text = _ENTITY_NOISE_TAIL.sub("", text)
+    return text.strip(" ？?，,。.:：")
+
+
+def _is_noise_only(text: str) -> bool:
+    return bool(_ENTITY_NOISE_WHOLE.match((text or "").strip()))
+
+
 def _structured_entity_from_query(query: str, intent: str) -> MusicEntity | None:
     """Parse compact field-style UI input such as:
 
@@ -126,6 +157,8 @@ def _structured_entity_from_query(query: str, intent: str) -> MusicEntity | None
 
     The knowledge agent must preserve the provided artist for disambiguation;
     otherwise same-title albums can be canonicalized to a famous but wrong work.
+    会用 _strip_entity_noise 去掉开口动词（介绍/讲一下…）和引用短语（这个专辑/这张…），
+    否则 UI 拼出的卡片会把「介绍X 这个专辑」解析成 name='介绍X'、artist='这个专辑'。
     """
     lines = [
         re.sub(r"^[\s:：\-•]+|[\s:：]+$", "", line).strip()
@@ -144,9 +177,9 @@ def _structured_entity_from_query(query: str, intent: str) -> MusicEntity | None
     entity_type = kind_aliases.get(first)
     if entity_type is None and len(lines) == 2 and intent in {"album_deep_dive", "review_summary", "sample_lookup"}:
         inferred = "track" if intent == "sample_lookup" else "album"
-        name = re.sub(r"^(?:title|name|标题|名称)\s*[:：]\s*", "", lines[0], flags=re.I).strip()
-        artist = re.sub(r"^(?:artist|艺人|歌手|乐队)\s*[:：]\s*", "", lines[1], flags=re.I).strip()
-        if name and artist and name.lower() != artist.lower():
+        name = _strip_entity_noise(re.sub(r"^(?:title|name|标题|名称)\s*[:：]\s*", "", lines[0], flags=re.I).strip())
+        artist = _strip_entity_noise(re.sub(r"^(?:artist|艺人|歌手|乐队)\s*[:：]\s*", "", lines[1], flags=re.I).strip())
+        if name and artist and name.lower() != artist.lower() and not _is_noise_only(artist):
             return MusicEntity(
                 type=inferred,
                 name=_canonical_music_name(name),
@@ -156,13 +189,14 @@ def _structured_entity_from_query(query: str, intent: str) -> MusicEntity | None
     if entity_type is None:
         return None
 
-    name = _canonical_music_name(lines[1])
+    name = _canonical_music_name(_strip_entity_noise(lines[1]))
     artist = ""
     if entity_type in {"album", "track"} and len(lines) >= 3:
-        artist = lines[2].strip()
+        candidate = _strip_entity_noise(re.sub(r"^(?:artist|艺人|歌手|乐队)\s*[:：]\s*", "", lines[2], flags=re.I).strip())
+        if candidate and not _is_noise_only(candidate):
+            artist = candidate
     # If a UI includes field labels on following lines, strip the most common ones.
     name = re.sub(r"^(?:title|name|标题|名称)\s*[:：]\s*", "", name, flags=re.I).strip()
-    artist = re.sub(r"^(?:artist|艺人|歌手|乐队)\s*[:：]\s*", "", artist, flags=re.I).strip()
     if not name:
         return None
     return MusicEntity(type=entity_type, name=name, artist=artist, source="query")
@@ -173,7 +207,7 @@ def _explicit_artist_entity_from_query(query: str, entity_type: str, intent: str
         return None
     text = re.sub(r"[《》“”\"']", " ", query or "")
     text = re.sub(
-        r"(讲讲|解读|为什么经典|为什么|乐评怎么说|评价如何|评价|介绍|请|帮我|搜索|查一下|这张专辑|这首歌)",
+        r"(讲一下|讲一讲|讲讲|聊聊|聊一聊|说说|谈谈|介绍一下|介绍|分析一下|分析|了解|科普|解读|为什么经典|为什么|乐评怎么说|评价如何|评价|请|帮我|搜索|查一下|这张专辑|这首歌)",
         " ",
         text,
         flags=re.I,
@@ -222,7 +256,7 @@ def _canonicalize_release_entity(client: Any, entity: MusicEntity) -> None:
     此时无法可靠选择，标记 ambiguous，交由 build_dossier 返回消歧提示而非硬编一个。
     用户已给艺人、或只有一个精确同名作品时，正常 resolved。
     """
-    hits = client.search_release_group(entity.name, entity.artist, limit=5)
+    hits = client.search_release_group(entity.name, entity.artist, limit=10)
     if not hits:
         entity.ambiguity = "unresolved"
         return
@@ -266,8 +300,16 @@ def _canonicalize_release_entity(client: Any, entity: MusicEntity) -> None:
             entity.confidence = min(1.0, best.get("score", 0) / 100.0)
         return
 
-    # 仅模糊命中（标题不完全相同）：保守 unresolved，但仍回填最佳，保持旧行为不拒答。
-    best = max(hits, key=lambda h: h.get("score", 0))
+    # 仅模糊命中（标题不完全相同）：按「与查询标题的贴近度 + score」选最佳，避免裸标题
+    # 被带偏到更长的同名衍生作（裸查「Blonde」不该落到「Blonde on Blonde」）。保守 unresolved，
+    # 但仍回填最佳、不拒答。贴近度：精确同名 > 标题长度最接近 > score 最高。
+    def _closeness(h: dict) -> tuple:
+        norm = _match_norm(h.get("title", ""))
+        if norm == title_key:
+            return (0, 0, -int(h.get("score", 0)))
+        return (1, abs(len(norm) - len(title_key)), -int(h.get("score", 0)))
+
+    best = min(hits, key=_closeness)
     _apply_release_hit(entity, best)
     entity.ambiguity = "unresolved"
     entity.confidence = min(0.5, best.get("score", 0) / 100.0)
@@ -363,8 +405,9 @@ def citation_entity_score(citation: MusicCitation, entity: MusicEntity) -> float
             if artist_hit:
                 return 0.6
             if name_hit:
-                # 同名异艺人高风险：标题命中但完全不提目标艺人
-                return 0.2
+                # 标题足够特异（长/多词，如 My Beautiful Dark Twisted Fantasy）时，只命中标题
+                # 也是强归属——这类标题同名概率极低；短标题（Blonde）才保守给弱分防同名异作品。
+                return 0.6 if len(name_key) >= 12 else 0.2
             return 0.0
         return 0.6 if name_hit else 0.0
     # artist 类型实体：name 即艺人名，出现即归属
@@ -523,8 +566,12 @@ def lookup_metadata(agent: Any, entities: list[MusicEntity], deadline_at: float 
     # 取 source_timeout 与「剩余预算留给乐评的余量」中较大者，但不超过剩余预算。
     floor = settings.knowledge_source_timeout_seconds
     if remaining is not None:
-        # 给后续 review_search 留 review_timeout 余量，其余尽量给元数据波。
-        budget_for_meta = max(floor, remaining - settings.knowledge_review_timeout_seconds - 0.5)
+        # 给后续 review_search 留 review_timeout 余量；但元数据是 bonus 内容，封顶 metadata_timeout
+        # （旧实现会用 ~20s，难抓专辑时把 dossier/synth 挤没）。封顶略低于 review，不拖长 stage2。
+        budget_for_meta = min(
+            max(floor, remaining - settings.knowledge_review_timeout_seconds - 0.5),
+            settings.knowledge_metadata_timeout_seconds,
+        )
         timeout = min(budget_for_meta, remaining - 0.3)
     else:
         timeout = floor
@@ -785,11 +832,11 @@ def build_evidence_pack(
     ]
     source_quality = {c.source: _source_tier(c.source, c.url) for c in citations}
     critic_points = [
-        c.excerpt[:180] for c in sorted(citations, key=lambda c: c.confidence, reverse=True)
+        c.excerpt[:400] for c in sorted(citations, key=lambda c: c.confidence, reverse=True)
         if c.excerpt
-    ][:5]
+    ][:10]
     return KnowledgeEvidencePack(
-        facts=[t[:180] for t in texts if t][:4],
+        facts=[t[:300] for t in texts if t][:6],
         critic_points=critic_points,
         sound_descriptors=[term for term in sound_terms if term in joined],
         theme_descriptors=[term for term in theme_terms if term in joined],
@@ -849,25 +896,27 @@ def _synthesize_dossier_prose(
 
     evidence_lines: list[str] = []
     if meta_text:
-        evidence_lines.append(f"- 背景资料：{meta_text[:600]}")
-    for f in facts[:4]:
-        evidence_lines.append(f"- 事实：{f[:200]}")
-    for c in critic_points[:5]:
-        evidence_lines.append(f"- 乐评摘录：{c[:200]}")
-    for o in opinions[:4]:
+        evidence_lines.append(f"- 背景资料：{meta_text[:1000]}")
+    for f in facts[:6]:
+        evidence_lines.append(f"- 事实：{f[:300]}")
+    for c in critic_points[:10]:
+        evidence_lines.append(f"- 乐评摘录：{c[:400]}")
+    for o in opinions[:6]:
         if o.summary.strip():
-            evidence_lines.append(f"- 评价（{o.source}/{o.sentiment}）：{o.summary[:160]}")
+            evidence_lines.append(f"- 评价（{o.source}/{o.sentiment}）：{o.summary[:200]}")
     if style_tags:
         evidence_lines.append(f"- 风格标签：{'、'.join(style_tags[:8])}")
     has_reviews = bool(review_citations or critic_points)
     evidence_block = "\n".join(evidence_lines)
 
     system = (
-        "你是严谨的音乐资料编辑。只能依据【证据】改写、翻译、压缩成连贯中文，"
-        "严禁补充证据里没有的事实、评分、年份或人物。证据是英文就翻译成自然中文。"
+        "你是严谨而文笔专业的资深乐评编辑。只能依据【证据】改写、翻译、组织成流畅、详尽、专业的中文长评，"
+        "严禁补充证据里没有的事实、评分、年份或人物。证据是英文或德文就翻译成自然地道的中文，"
+        "不要保留外文残句、不要逐条罗列证据条目，要融会成连贯的分析。"
     )
     consensus_rule = (
-        "把多条乐评摘录归纳成 1-2 句中文共识，点明评价的侧重与分歧；不要逐条罗列、不要保留英文残句。"
+        "综合多条乐评，写 3-5 句中文共识：点明专辑在制作、词曲、概念、人声、影响力等维度的具体表现，"
+        "引用评论的关键观点或评价倾向，若有分歧也点明；行文专业、信息密度高、连贯成段。"
         if has_reviews
         else "证据里没有足够乐评，critical_consensus 必须为空字符串，不要编造专业评价。"
     )
@@ -875,12 +924,17 @@ def _synthesize_dossier_prose(
         f"实体：{entity.type} 《{entity.name}》" + (f"，艺人 {entity.artist}" if entity.artist else "") + "\n\n"
         f"【证据】\n{evidence_block}\n\n"
         "请输出严格 JSON（不要代码块、不要多余文字），字段：\n"
-        '  "summary": 2-3 句中文介绍这位艺人/这张专辑的核心信息（风格、定位、背景），只用证据里的内容。\n'
+        '  "summary": 4-6 句中文，专业、详尽地介绍这张专辑/这位艺人：背景与发行脉络、整体风格与声音特征、'
+        "在艺人作品序列或乐坛中的定位与意义；只用证据里的内容，行文流畅成段、信息密度高。\n"
         '  "critical_consensus": ' + consensus_rule + "\n"
         "示例：{\"summary\": \"...\", \"critical_consensus\": \"...\"}"
     )
     try:
-        raw = llm.generate(prompt, system=system, temperature=0.3)
+        # 仅此一处开思考模式：组织多源英文证据成专业中文长文，收益最大、且不拖慢其它链路。
+        raw = llm.generate(
+            prompt, system=system, temperature=0.3,
+            thinking=settings.knowledge_synth_thinking_enabled,
+        )
     except Exception:
         logger.debug("dossier 合成 LLM 调用失败，走机械兜底", exc_info=True)
         return None
@@ -891,7 +945,7 @@ def _synthesize_dossier_prose(
     consensus = str(data.get("critical_consensus") or "").strip()
     if not summary:
         return None
-    return {"summary": summary[:400], "critical_consensus": consensus[:400]}
+    return {"summary": summary[:1000], "critical_consensus": consensus[:1000]}
 
 
 def build_dossier(
@@ -962,7 +1016,7 @@ def build_dossier(
     elif not report.ok:
         # 证据归属不一致/全部偏题：抑制完整总结，回落机械兜底，防混拼错误实体。
         related = entities[1:]
-        summary = meta_text[:220] if meta_text else f"我整理了 {entity.name} 的可追溯音乐资料，但本轮证据归属不一致，无法给出可靠总结。"
+        summary = f"我整理了《{entity.name}》的可追溯音乐资料，但本轮证据归属不一致，未能合成可靠总结（原始资料多为英文，已避免直出以免误导）。"
         consensus = ""
         partial_reasons.append("证据归属不一致，已抑制完整总结以防混拼错误实体")
     else:
@@ -974,10 +1028,10 @@ def build_dossier(
             agent, entity, meta_text, style_tags, evidence_pack, synth_citations, opinions, deadline_at,
         )
         if synth:
-            summary = synth.get("summary") or (meta_text[:220] if meta_text else f"我整理了 {entity.name} 的可追溯音乐资料。")
+            summary = synth.get("summary") or f"我整理了《{entity.name}》的可追溯音乐资料。"
             consensus = synth.get("critical_consensus") or _critical_consensus(citations, opinions)
         else:
-            summary = meta_text[:220] if meta_text else f"我整理了 {entity.name} 的可追溯音乐资料。"
+            summary = f"我整理了《{entity.name}》的可追溯音乐资料，但本轮未能合成完整中文介绍（资料来源多为英文原文，已避免直出半句英文）。"
             consensus = _critical_consensus(citations, opinions)
     dossier = MusicDossier(
         entity=entity,
@@ -1088,7 +1142,15 @@ def _musicbrainz_metadata(entity: MusicEntity) -> dict[str, Any] | None:
 
         client = MusicBrainzClient()
         if entity.type == "artist":
-            hit = client.resolve_artist(entity.name)
+            hit = None
+            mbid = entity.external_ids.get("musicbrainz", "")
+            if mbid:
+                hit = client.lookup_artist(mbid)
+            if not hit:
+                hit = client.resolve_artist(entity.name)
+                if hit and hit.get("mbid"):
+                    # Search results are lightweight; follow with lookup to get URL relations.
+                    hit = client.lookup_artist(hit["mbid"]) or hit
             if not hit or not hit.get("name"):
                 return None
             summary_bits = [b for b in (hit.get("type"), f"来自 {hit['country']}" if hit.get("country") else "", hit.get("disambiguation", "")) if b]
@@ -1097,10 +1159,18 @@ def _musicbrainz_metadata(entity: MusicEntity) -> dict[str, Any] | None:
                 "canonical_name": hit.get("name", ""),
                 "mbid": hit.get("mbid", ""),
                 "tags": hit.get("tags") or [],
+                "relations": hit.get("relations") or [],
                 "summary": "，".join(summary_bits),
             }
         # album / track 都按专辑 release-group 查（track 粒度命中率低，先用专辑兜）。
-        hit = client.resolve_release_group(entity.name, entity.artist)
+        hit = None
+        mbid = entity.external_ids.get("musicbrainz", "")
+        if mbid:
+            hit = client.lookup_release_group(mbid)
+        if not hit:
+            hit = client.resolve_release_group(entity.name, entity.artist)
+            if hit and hit.get("mbid"):
+                hit = client.lookup_release_group(hit["mbid"]) or hit
         if not hit or not hit.get("title"):
             return None
         summary_bits = [b for b in (
@@ -1116,6 +1186,7 @@ def _musicbrainz_metadata(entity: MusicEntity) -> dict[str, Any] | None:
             "date": hit.get("date", ""),
             "type": hit.get("type", ""),
             "tags": hit.get("tags") or [],
+            "relations": hit.get("relations") or [],
             "summary": "，".join(summary_bits),
         }
     except Exception:
@@ -1265,6 +1336,19 @@ def _apply_structured_sources(
                 url=f"https://musicbrainz.org/{path}/{mbid}" if mbid else "",
                 kind="encyclopedia", excerpt=mb.get("summary", ""), confidence=_source_confidence("musicbrainz"),
             ))
+        relation_citations = _musicbrainz_relation_citations(entity, mb.get("relations") or [])
+        if relation_citations:
+            relation_labels = [
+                f"{c.source}: {c.title or c.url}"
+                for c in relation_citations[:5]
+            ]
+            metadata.append({
+                "entity": entity.model_dump(mode="json"),
+                "summary": "MusicBrainz 关联链接：" + "；".join(relation_labels),
+                "tags": [],
+                "relations": [c.model_dump(mode="json") for c in relation_citations],
+            })
+            citations.extend(relation_citations)
     if sp:
         if sp.get("external_id"):
             entity.external_ids["spotify"] = sp["external_id"]
@@ -1295,6 +1379,261 @@ def _apply_structured_sources(
                 url=f"https://www.discogs.com/{dc_path}/{dc_id}" if dc_id else "",
                 kind="encyclopedia", excerpt=dc.get("summary", ""), confidence=_source_confidence("discogs"),
             ))
+
+
+_MB_RELATION_ALLOW_TERMS = {
+    "review", "allmusic", "bbc music page", "discogs", "wikidata", "wikipedia",
+    "discography entry", "discography page", "other databases", "lyrics",
+    "secondhandsongs", "whosampled", "imdb", "official homepage",
+}
+_MB_RELATION_SKIP_TERMS = {
+    "social network", "youtube", "streaming", "download", "purchase for download",
+    "free streaming", "license", "setlistfm", "bandsintown", "songkick", "patronage",
+}
+
+
+def _musicbrainz_relation_citations(entity: MusicEntity, relations: list[dict[str, Any]]) -> list[MusicCitation]:
+    """Convert curated MusicBrainz URL relations into citable evidence links.
+
+    These links are often better targeted than a broad web search: MusicBrainz editors
+    attach release/artist-specific BBC reviews, AllMusic pages, Discogs masters,
+    RateYourMusic pages, Wikidata entries and archived reviews directly to the entity.
+    """
+    citations: list[MusicCitation] = []
+    for rel in relations:
+        if not isinstance(rel, dict):
+            continue
+        url = str(rel.get("url") or "").strip()
+        if not url:
+            continue
+        rel_type = str(rel.get("type") or "").strip()
+        rel_key = rel_type.lower()
+        source = _source_from_url(url) or rel_key or "musicbrainz"
+        source_key = _source_key(source)
+        is_allowed = any(term in rel_key for term in _MB_RELATION_ALLOW_TERMS)
+        is_valuable_source = source_key in (TIER_A_SOURCES | TIER_B_SOURCES | {"whosampled", "secondhandsongs", "imdb"})
+        if not is_allowed and not is_valuable_source:
+            continue
+        if any(term in rel_key for term in _MB_RELATION_SKIP_TERMS):
+            continue
+
+        kind: str = "encyclopedia"
+        if "review" in rel_key or (source_key in {"allmusic", "bbc", "pitchfork", "guardian", "rollingstone", "nme", "time", "ew", "chicagotribune"} and entity.type != "artist"):
+            kind = "review"
+        elif source_key in {"rateyourmusic", "albumoftheyear", "musicboard"}:
+            kind = "user_comment"
+        elif rel_key in {"lyrics"} or source_key in {"genius"}:
+            kind = "platform"
+
+        label = _relation_label(rel_type, source)
+        title_parts = []
+        if entity.artist and entity.type in {"album", "track"}:
+            title_parts.append(entity.artist)
+        title_parts.append(entity.name)
+        title = " - ".join(part for part in title_parts if part)
+        if label:
+            title = f"{title} ({label})"
+        confidence = max(_source_confidence(source, url), 0.58)
+        if kind == "review":
+            confidence = max(confidence, 0.72)
+        if rel.get("ended"):
+            confidence = max(0.45, confidence - 0.08)
+        citations.append(MusicCitation(
+            source=source_key or source,
+            title=title,
+            url=url,
+            kind=kind,  # type: ignore[arg-type]
+            excerpt="",
+            confidence=min(0.92, confidence),
+        ))
+    return sorted(
+        _dedupe_citations(citations),
+        key=lambda c: (c.confidence, _music_relation_source_priority(c.source), c.kind == "review"),
+        reverse=True,
+    )[:8]
+
+
+def _music_relation_source_priority(source: str) -> int:
+    key = _source_key(source)
+    priorities = {
+        "bbc": 6,
+        "allmusic": 6,
+        "pitchfork": 5,
+        "guardian": 5,
+        "rollingstone": 5,
+        "nme": 4,
+        "time": 4,
+        "ew": 4,
+        "chicagotribune": 4,
+        "rateyourmusic": 3,
+        "discogs": 3,
+        "wikidata": 2,
+        "wikipedia": 2,
+    }
+    return priorities.get(key, 1)
+
+
+def _relation_label(rel_type: str, source: str) -> str:
+    raw = (rel_type or source or "").strip()
+    key = raw.lower()
+    labels = {
+        "allmusic": "AllMusic",
+        "bbc music page": "BBC Music",
+        "review": "review",
+        "discogs": "Discogs",
+        "wikidata": "Wikidata",
+        "wikipedia": "Wikipedia",
+        "discography entry": "discography",
+        "discography page": "discography",
+        "other databases": source or "database",
+        "lyrics": "lyrics",
+    }
+    return labels.get(key, raw)
+
+
+_SYNTH_FLOOR_SECONDS = 5.0  # 合成 LLM(开思考) 必须保住的最小预算；正文抓取只能用它之外的部分。
+
+# Tavily Extract 实测取空的强反爬源——不浪费预算（它们的乐评靠 review_search 关键词摘要兜底）。
+_EXTRACT_BLOCKED_DOMAINS = {"allmusic.com", "rateyourmusic.com", "albumoftheyear.com"}
+# 正文最稳的来源（实测 Tavily Extract 能取到），抓取排序时优先。
+_RELIABLE_DOMAINS = {"last.fm", "discogs.com", "genius.com", "musik-sammler.de", "wikidata.org"}
+
+
+def _citation_domain(url: str) -> str:
+    m = re.search(r"https?://(?:www\.)?([^/]+)", url or "", flags=re.I)
+    return (m.group(1) or "").lower() if m else ""
+
+
+def _review_extract_rank(c: MusicCitation) -> tuple:
+    domain = _citation_domain(c.url)
+    reliable = 0 if any(domain == d or domain.endswith("." + d) for d in _RELIABLE_DOMAINS) else 1
+    kind_rank = 0 if c.kind == "review" else (1 if c.kind == "encyclopedia" else 2)
+    tier = _source_tier(c.source, c.url)
+    tier_rank = {"A": 0, "B": 1, "C": 2}.get(tier, 2)
+    return (reliable, kind_rank, tier_rank, -c.confidence)
+
+
+def _enrich_review_content(
+    citations: list[MusicCitation],
+    entity: MusicEntity,
+    deadline_at: float | None,
+) -> list[MusicCitation]:
+    """把 citation 的 URL 正文抓回来填进 excerpt（Tavily Extract + Discogs API）。
+
+    核心价值：MusicBrainz relations 里 last.fm/Discogs/Genius 等高质量来源只有 URL、excerpt
+    为空（_musicbrainz_relation_citations 在 excerpt="" 处产出），喂不进合成 LLM，所以专业
+    乐评写不出来。这里在**受保护预算**内并行抓 top-N 的真实正文，填回 excerpt，让
+    _synthesize_dossier_prose 拿到内容出专业中文乐评。
+
+    鲁棒兜底：当 MusicBrainz 超时没给到 relation URL 时（实测 MB 常在 3s 预算内被砍），
+    直接用实体 (artist, name) 构造 last.fm/Discogs 的稳定入口——不依赖 MB 成功，保证
+    last.fm（含 Metascore/乐评）和 Discogs（发行 notes）这两个最稳源仍能被抓回。
+
+    受保护预算：合成 LLM 至少保 _SYNTH_FLOOR_SECONDS；抓取只能用其余部分，且不超过配置上限。
+    预算太紧时整段放弃（不抓），保住合成，绝不为了抓正文而拖垮整条链路。
+    """
+    # 即使 citations 为空（MB/review 都没拿到），只要实体能构造 last.fm/Discogs 入口，仍要抓。
+    can_construct = entity.type in {"album", "track"} and bool(entity.artist) and bool(entity.name)
+    if not citations and not can_construct:
+        return citations
+    remaining = remaining_seconds(deadline_at)
+    extract_budget = settings.knowledge_review_extract_timeout_seconds
+    if remaining is not None:
+        extract_budget = max(0.0, min(extract_budget, remaining - _SYNTH_FLOOR_SECONDS))
+    if extract_budget < 1.5:
+        return citations  # 预算太紧，保合成、放弃抓正文。
+
+    api_key = settings.tavily_api_key
+    discogs_enabled = getattr(settings, "enable_discogs", True) and bool(getattr(settings, "discogs_token", ""))
+
+    # 构造兜底 citation：MB 没给 relation URL 时，用实体直接拼 last.fm/Discogs 入口。
+    pool = list(citations)
+    existing_domains = {_citation_domain(c.url) for c in citations}
+
+    def _has_domain(domain: str) -> bool:
+        return any(domain == d or d.endswith("." + domain) or d.endswith(domain) for d in existing_domains)
+
+    if entity.type in {"album", "track"} and entity.artist and entity.name:
+        if api_key and not _has_domain("last.fm"):
+            artist_slug = entity.artist.strip().replace(" ", "+")
+            name_slug = entity.name.strip().replace(" ", "+")
+            pool.append(MusicCitation(
+                source="lastfm", title=f"{entity.artist} - {entity.name}",
+                url=f"https://www.last.fm/music/{artist_slug}/{name_slug}",
+                kind="encyclopedia", excerpt="", confidence=0.7,
+            ))
+        if discogs_enabled and not _has_domain("discogs.com"):
+            # Discogs 走 API 按名搜索，URL 仅作占位/去重标识。
+            pool.append(MusicCitation(
+                source="discogs", title=f"{entity.artist} - {entity.name}",
+                url="https://www.discogs.com/", kind="encyclopedia", excerpt="", confidence=0.6,
+            ))
+
+    def _worth(c: MusicCitation) -> bool:
+        domain = _citation_domain(c.url)
+        if not domain:
+            return False
+        if len((c.excerpt or "").strip()) >= 120:
+            return False  # 已有正文（如 review_search 摘要）就不重复抓全文。
+        if any(domain == d or domain.endswith("." + d) for d in _EXTRACT_BLOCKED_DOMAINS):
+            return False  # 强反爬源，Tavily Extract 取空，省预算。
+        return True
+
+    candidates = sorted((c for c in pool if _worth(c)), key=_review_extract_rank)
+    candidates = candidates[: settings.knowledge_review_extract_max_sources]
+    if not candidates:
+        return citations
+
+    def _fetch(c: MusicCitation) -> str:
+        domain = _citation_domain(c.url)
+        if "discogs.com" in domain:
+            if entity.type not in {"album", "track"}:
+                return ""
+            try:
+                from app.sources.discogs_client import DiscogsClient
+                return DiscogsClient(getattr(settings, "discogs_token", "")).fetch_release_notes(entity.name, entity.artist)
+            except Exception:
+                logger.debug("Discogs notes fetch failed for %s", entity.name, exc_info=True)
+                return ""
+        if not api_key:
+            return ""
+        # 并行抓取，墙钟≈最慢单条；每条都给足 extract_budget。
+        return web_search_source.fetch_url_content(c.url, api_key=api_key, timeout=max(1.0, extract_budget))
+
+    tasks = [(f"extract:{_citation_domain(c.url)}", lambda c=c: _fetch(c)) for c in candidates]
+    batches = run_parallel(tasks, timeout=max(0.5, extract_budget), default="")
+    for c, text in zip(candidates, batches):
+        text = (text or "").strip()
+        if text:
+            c.excerpt = text[:1800]
+    # 把新构造（非原列表）、且抓到正文、URL 不重复的 citation 并回，供下游 build_evidence_pack 使用。
+    original_urls = {(c.url or "").strip().lower() for c in citations}
+    for c in candidates:
+        url = (c.url or "").strip().lower()
+        if c.excerpt and url and url not in original_urls:
+            citations.append(c)
+            original_urls.add(url)
+    return citations
+
+
+def _opinions_from_citations(citations: list[MusicCitation]) -> list[ReviewOpinion]:
+    """从有正文的 citation 生成 ReviewOpinion（复用 sentiment/aspect 规则）。
+
+    relation citation 抓回正文后，让它们也贡献 sentiment/aspect，充实乐评共识——
+    _critical_consensus 的正面/分歧统计与合成证据块都吃 opinions。
+    """
+    out: list[ReviewOpinion] = []
+    for c in citations:
+        text = (c.excerpt or "").strip()
+        if len(text) < 60:
+            continue
+        out.append(ReviewOpinion(
+            source=c.source,
+            sentiment=_sentiment_from_text(text),
+            aspects=_aspects_from_text(text),
+            summary=text[:180],
+        ))
+    return out
 
 
 def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None = None) -> dict[str, Any]:
@@ -1414,7 +1753,8 @@ def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None 
 
 def _guess_entity_name(query: str) -> str:
     text = re.sub(r"[《》“”\"']", " ", query or "")
-    text = re.sub(r"(讲讲|解读|为什么经典|为什么|乐评怎么说|评价如何|评价|区别在哪|有什么区别|区别|不同|介绍|系统|音乐路线|这张专辑|这首歌|这个艺人|这个歌手|专辑|歌手|艺人|是什么|怎么样|如何|请|帮我)", " ", text, flags=re.I)
+    text = _strip_entity_noise(text)
+    text = re.sub(r"(区别在哪|有什么区别|区别|不同|系统|音乐路线|是什么|怎么样|如何)", " ", text, flags=re.I)
     text = re.sub(r"的\s*$", "", text.strip())
     text = re.sub(r"\s+", " ", text).strip(" ？?，,。.")
     return _canonical_music_name(text or (query or "未知音乐实体").strip())
@@ -1500,14 +1840,32 @@ def _infer_artist(query: str, name: str, entity_type: str) -> str:
 
 
 def _source_from_url(url: str) -> str:
+    archive = re.search(r"web\.archive\.org/web/\d+/(?:https?://)?(?:www\.)?([^/]+)", url or "", flags=re.I)
+    if archive:
+        return _source_from_host(archive.group(1))
     m = re.search(r"https?://(?:www\.)?([^/]+)", url or "")
-    return m.group(1).split(".")[0] if m else ""
+    return _source_from_host(m.group(1)) if m else ""
+
+
+def _source_from_host(host: str) -> str:
+    host = (host or "").lower()
+    known_domains = [
+        "pitchforkmedia.com", "pitchfork.com", "chicagotribune.com", "time.com",
+        "theguardian.com", "rollingstone.com", "residentadvisor.net", "stereogum.com",
+        "allmusic.com", "bbc.co.uk", "bbc.com", "rateyourmusic.com", "discogs.com",
+        "wikidata.org", "wikipedia.org", "genius.com", "whosampled.com",
+    ]
+    for domain in known_domains:
+        if host == domain or host.endswith("." + domain):
+            return domain.split(".", 1)[0]
+    return host.split(".")[0] if host else ""
 
 
 def _source_key(value: str) -> str:
     raw = (value or "").lower()
     raw = raw.replace("theguardian", "guardian")
     raw = raw.replace("rateyourmusic", "rateyourmusic")
+    raw = raw.replace("pitchforkmedia", "pitchfork")
     return re.sub(r"[^a-z0-9]+", "", raw)
 
 
@@ -1717,15 +2075,15 @@ def _audience_reception(citations: list[MusicCitation]) -> str:
 
 
 def _listening_guide(entity: MusicEntity, tracks: list[TrackRef], tags: list[str]) -> list[str]:
-    if tracks:
-        first = tracks[0].title
-        guide = [f"先听《{first}》，用它建立对 {entity.name} 声音核心的第一印象。"]
-        if len(tracks) > 1:
-            guide.append("再按专辑/热门曲顺序听 2-4 首，观察制作、旋律和情绪是否持续吸引你。")
-    else:
-        guide = [f"先从 {entity.name} 的代表作品或最高频被讨论作品开始，不要一次性补完整目录。"]
-    if tags:
-        guide.append("听的时候重点留意：" + "、".join(tags[:3]))
+    # 没抓到具体曲目时返回空——不输出「先从代表作开始…」这种每次都错、无信息量的占位行
+    # （专辑解读时 key_tracks 常因 netease 未收录而空，旧逻辑每次都落在这句兜底上）。
+    # 风格标签已在「风格标签」段展示，这里不再重复。
+    if not tracks:
+        return []
+    first = tracks[0].title
+    guide = [f"先听《{first}》，用它建立对 {entity.name} 声音核心的第一印象。"]
+    if len(tracks) > 1:
+        guide.append("再按专辑/热门曲顺序听 2-4 首，观察制作、旋律和情绪是否持续吸引你。")
     return guide
 
 

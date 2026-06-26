@@ -24,6 +24,31 @@ function savedToCard(t) {
   };
 }
 
+// 本地曲库 asset → 播放卡片。source_url 同时映射到 playback_url，
+// 让后端 get_audio_url 走 ID 直链（网易云/B站）或按 标题+歌手 搜流。
+function assetToCard(a) {
+  return {
+    title: a.title || "未命名", artist: a.artist || "",
+    source: a.source || "local", source_id: a.external_id || "",
+    source_url: a.source_url || "", playback_url: a.source_url || "",
+    cover_url: a.cover_url || "", asset_id: a.asset_id || "",
+  };
+}
+
+// 从第 idx 首开始播放整库（建队列，next/prev 可在库内连放）。
+function playFrom(idx) {
+  if (!assets.value.length) return;
+  store.queue = assets.value.map(assetToCard);
+  store.playQueueIndex(idx);
+  msg.value = `▶ ${assets.value[idx]?.title || "播放"}`;
+}
+
+function playAllAssets() {
+  if (!assets.value.length) return;
+  store.playAll(assets.value.map(assetToCard));
+  msg.value = `播放全部：${assets.value.length} 首`;
+}
+
 async function loadSavedAlbums() {
   savedLoading.value = true;
   try {
@@ -155,7 +180,15 @@ onMounted(() => {
 
     <div v-if="!loading && !assets.length" class="empty-hint">库还是空的，先添加点音乐吧。</div>
 
+    <button v-if="assets.length" class="play-all-btn" @click="playAllAssets">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      播放全部（{{ assets.length }} 首）
+    </button>
+
     <div v-for="(a, idx) in assets" :key="a.asset_id" class="lib-row stagger-item" :style="{ animationDelay: `${idx * 40}ms` }">
+      <button class="play-btn" title="播放" @click="playFrom(idx)">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+      </button>
       <div class="info">
         <div class="title">{{ a.title || "未命名" }}</div>
         <div class="artist">
@@ -203,6 +236,18 @@ onMounted(() => {
   font-weight: 600; font-size: 0.93rem;
 }
 .artist { color: var(--text-sub); font-size: 0.82rem; margin-top: 3px; }
+
+.play-btn {
+  width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-dim); color: var(--accent);
+  border: 1px solid var(--border-light);
+  transition: all var(--transition);
+}
+.play-btn:hover {
+  background: var(--accent); color: #fff;
+  border-color: var(--accent); transform: scale(1.08);
+}
 .tag {
   display: inline-block; margin-left: 6px; padding: 2px 8px;
   background: var(--bg-elevated); border-radius: var(--radius-pill);

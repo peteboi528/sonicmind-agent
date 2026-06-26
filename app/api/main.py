@@ -34,8 +34,10 @@ from app.models import (
     IngestRequest,
     JourneyRequest,
     ListenRequest,
+    LyricsRequest,
     MemoryUpdateRequest,
     PlaylistRequest,
+    ProfileInsightFeedbackRequest,
     RatingRequest,
     SaveAlbumRequest,
     SearchRequest,
@@ -110,6 +112,11 @@ async def _enforce_api_key(request, call_next):
 
 agent = AudioVisualAgent()
 
+# 用户画像服务（计划 §16.4）：复用 agent 的 store/memory，无独立状态。
+from app.profile.service import UserProfileService
+
+profile_service = UserProfileService(agent.store, agent.memory)
+
 
 def _effective_user_id(request: Request, provided_user_id: str | None) -> str:
     auth_user_id = getattr(request.state, "auth_user_id", None)
@@ -139,6 +146,126 @@ def _last_smoke_status() -> dict[str, Any]:
     total = len(items)
     passed = sum(1 for item in items if item.get("ok"))
     return {"available": True, "passed": passed, "total": total}
+
+
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _clean_artist_bio_text(text: str) -> str:
+    cleaned = re.sub(r"<[^>]+>", "", text or "")
+    cleaned = re.sub(r"Read more on Last\.fm.*$", "", cleaned, flags=re.I)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \n\t-")
+    return cleaned
+
+
+def _bio_needs_supplement(text: str) -> bool:
+    cleaned = _clean_artist_bio_text(text)
+    return not cleaned or len(cleaned) < 260 or "read more on last.fm" in (text or "").lower()
+
+
+def _bio_needs_localization(text: str) -> bool:
+    cleaned = _clean_artist_bio_text(text)
+    if not cleaned:
+        return False
+    cjk_count = len(_CJK_RE.findall(cleaned))
+    ascii_letters = len(re.findall(r"[A-Za-z]", cleaned))
+    return ascii_letters >= max(30, cjk_count * 2)
+
+
+def _bio_is_cjk_rich(text: str) -> bool:
+    cleaned = _clean_artist_bio_text(text)
+    if not cleaned:
+        return False
+    cjk_count = len(_CJK_RE.findall(cleaned))
+    ascii_letters = len(re.findall(r"[A-Za-z]", cleaned))
+    return cjk_count >= max(24, ascii_letters)
+
+
+def _llm_provider_available(provider: Any) -> bool:
+    if not hasattr(provider, "agenerate"):
+        return False
+    # 测试/热更新场景里，全局 agent 可能在无 key 时以 MockLLM 启动，随后再补上
+    # settings.llm_api_key 并对 provider 打桩。此时按“类名是否 Mock”判不可用，会把
+    # 本可工作的本地化链路直接短路成空白 bio。
+    return provider.__class__.__name__ != "MockLLM" or bool(settings.llm_api_key)
+
+
+def _prefer_bio(primary: str, fallback: str) -> str:
+    primary_clean = _clean_artist_bio_text(primary)
+    fallback_clean = _clean_artist_bio_text(fallback)
+    if not fallback_clean:
+        return primary_clean
+    if not primary_clean:
+        return fallback_clean
+    if _bio_needs_localization(primary_clean) and len(fallback_clean) >= 120:
+        return fallback_clean
+    if _bio_needs_supplement(primary_clean) and len(fallback_clean) > len(primary_clean):
+        return fallback_clean
+    return primary_clean
+
+
+def _merge_bio_context(primary: str, fallback: str) -> str:
+    primary_clean = _clean_artist_bio_text(primary)
+    fallback_clean = _clean_artist_bio_text(fallback)
+    if not primary_clean:
+        return fallback_clean[:2600]
+    if not fallback_clean or fallback_clean in primary_clean:
+        return primary_clean[:2600]
+    if primary_clean in fallback_clean:
+        return fallback_clean[:2600]
+    return f"{primary_clean}\n\n补充资料：{fallback_clean}"[:2600]
+
+
+def _best_bio_fallback(primary: str, fallback: str) -> str:
+    primary_clean = _clean_artist_bio_text(primary)
+    fallback_clean = _clean_artist_bio_text(fallback)
+    if _bio_is_cjk_rich(fallback_clean):
+        return fallback_clean[:1600]
+    if _bio_is_cjk_rich(primary_clean):
+        return primary_clean[:1600]
+    return ""
+
+
+async def _localize_artist_bio(artist: str, bio: str, tags: list[str], fallback_bio: str = "") -> str:
+    cleaned = _clean_artist_bio_text(bio)
+    if not cleaned:
+        return _clean_artist_bio_text(fallback_bio)[:1600]
+    if not _bio_needs_localization(cleaned):
+        return cleaned[:1600]
+    if not _llm_provider_available(agent.llm_fast):
+        return _best_bio_fallback(cleaned, fallback_bio)
+
+    tag_text = "、".join(tags[:5])
+    system = (
+        "你是严谨的音乐资料编辑。只基于给定资料改写，不补充额外事实。"
+        "把英文资料整理成自然、完整的中文歌手介绍。"
+    )
+    async def _rewrite(source: str, timeout: float) -> str:
+        prompt = (
+            f"歌手：{artist}\n"
+            f"标签：{tag_text or '无'}\n\n"
+            f"资料：{source}\n\n"
+            "请输出 320-700 字中文简介，优先交代身份背景、创作/制作特点、风格线索、代表阶段或影响力。"
+            "若资料涉及多个阶段，尽量覆盖从早期出道到后续代表阶段的变化。"
+            "行文要像资料卡，不要只写两三句概述；重点艺人可适当写得更完整。"
+            "不要出现“Read more on Last.fm”，不要保留英文残句，也不要编造未出现的信息。"
+        )
+        rewritten = await asyncio.wait_for(
+            agent.llm_fast.agenerate(prompt, system=system, temperature=0.2),
+            timeout=timeout,
+        )
+        normalized = _clean_artist_bio_text(rewritten)
+        return normalized[:1600] if normalized and not _bio_needs_localization(normalized) else ""
+
+    for source, timeout in ((cleaned[:1800], 12.0), (cleaned[:1100], 8.0)):
+        try:
+            rewritten = await _rewrite(source, timeout)
+        except Exception:
+            logger.debug("Artist bio localization failed for %s", artist, exc_info=True)
+            continue
+        if rewritten:
+            return rewritten
+    return _best_bio_fallback(cleaned, fallback_bio)
 
 # ---- 挂载 Web 前端 & Bot 路由 ----
 from app.api.web_routes import router as _web_router
@@ -288,7 +415,10 @@ def get_ratings(user_id: str, request: Request):
 
 @app.post("/recommend/daily")
 def daily_recommend(payload: DailyRequest, request: Request):
-    return agent.daily_recommend(_effective_user_id(request, payload.user_id), payload.time_of_day)
+    return agent.daily_recommend(
+        _effective_user_id(request, payload.user_id), payload.time_of_day,
+        no_local=payload.no_local,
+    )
 
 
 @app.get("/recommend/daily/{user_id}")
@@ -308,6 +438,13 @@ def similar_assets(asset_id: str, top_k: int = 5):
 @app.post("/search")
 def search(payload: SearchRequest, request: Request):
     return agent.search(_effective_user_id(request, payload.user_id), payload.query, payload.include_external, payload.top_k)
+
+
+@app.post("/lyrics")
+def get_lyrics(payload: LyricsRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    agent._apply_netease_cookie(uid)  # 带登录 cookie，避免歌词接口匿名限流
+    return agent.get_lyrics(payload.title, payload.artist, payload.source_id)
 
 
 @app.post("/listen")
@@ -687,7 +824,7 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
         if not lfm:
             return []
         try:
-            return await asyncio.to_thread(lfm.get_artist_top_albums, request.artist, 6)
+            return await asyncio.to_thread(lfm.get_artist_top_albums, request.artist, 12)
         except Exception:
             logger.debug("Last.fm top albums failed", exc_info=True)
             return []
@@ -697,15 +834,16 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
         # 点进去还得按名字二次猜匹配（容易猜错）。网易云优先，Last.fm 仅补位。
         try:
             from app.sources.netease import search_netease_artist_albums
-            return await asyncio.to_thread(search_netease_artist_albums, request.artist, 6)
+            return await asyncio.to_thread(search_netease_artist_albums, request.artist, 12)
         except Exception:
             logger.debug("NetEase artist albums failed", exc_info=True)
             return []
 
     async def _hot_tracks():
         try:
-            raw_tracks = await asyncio.to_thread(
-                agent.search_web_music, request.artist, 12, request.artist,
+            raw_tracks = await asyncio.wait_for(
+                asyncio.to_thread(agent.search_web_music, request.artist, 12, request.artist),
+                timeout=5.5,
             )
             return [
                 ExternalTrack(
@@ -718,6 +856,9 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
                 if agent.artist_name_matches(request.artist, t.artist or "")
                 and t.title.strip().lower() not in {"热门歌曲", "热门单曲", "top songs", "popular songs"}
             ][:6]
+        except TimeoutError:
+            logger.debug("Artist hot tracks search timed out for %s", request.artist)
+            return []
         except Exception:
             logger.debug("Artist hot tracks search failed", exc_info=True)
             return []
@@ -731,16 +872,90 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
             logger.debug("NetEase artist image failed", exc_info=True)
             return None
 
+    async def _web_bio(artist: str, prefer_cjk: bool = False) -> str:
+        """Tavily 兜底简介——中文歌手 Last.fm 常缺/错(autocorrect 把 Asen 纠到挪威朋克 Aasen)。
+        当 Last.fm 误识或无 bio 时，用搜索引擎抓一段背景简介，避免张冠李戴或空白。"""
+        queries = (
+            [f"{artist} 歌手 简介 生涯 风格 代表作", f"{artist} singer rapper biography career style"]
+            if prefer_cjk else
+            [f"{artist} singer rapper 歌手 简介 背景"]
+        )
+        items: list[dict[str, str]] = []
+        try:
+            from app.sources.web_search import search_web_info
+            for query in queries:
+                items = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        search_web_info, query, 4, settings.tavily_api_key, 8,
+                    ),
+                    timeout=4.0,
+                )
+                if items:
+                    break
+        except Exception:
+            return ""
+        candidates: list[tuple[int, str]] = []
+        for it in (items or []):
+            content = _clean_artist_bio_text(it.get("content", ""))
+            if len(content) < 40:
+                continue
+            cjk_count = len(_CJK_RE.findall(content))
+            score = (cjk_count * 4 if prefer_cjk else cjk_count) + min(len(content), 600)
+            candidates.append((score, content[:800]))
+        if not candidates:
+            return ""
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        merged: list[str] = []
+        for _, content in candidates:
+            if any(content in existing or existing in content for existing in merged):
+                continue
+            merged.append(content)
+            if len(merged) >= 2:
+                break
+        return "\n\n".join(merged)[:1800]
+
     artist_data, lfm_albums, ext, netease_img, netease_albums_raw = await asyncio.gather(
         _artist_data(), _albums(), _hot_tracks(), _netease_image(), _netease_albums()
     )
 
-    if artist_data:
+    # 交叉校验 Last.fm autocorrect：它可能把 "Asen" 纠正成同名异艺人(挪威朋克 Aasen)，
+    # 导致 bio/tags 张冠李戴。网易云专辑的 artist 是可靠真相——不一致则弃用 Last.fm 文字资料。
+    def _norm_name(s: str) -> str:
+        return re.sub(r"[^a-z0-9一-鿿]+", "", (s or "").lower())
+
+    netease_artist = next((a.get("artist") for a in (netease_albums_raw or []) if a.get("artist")), "")
+    lfm_mismatch = bool(
+        artist_data and netease_artist
+        and _norm_name(artist_data.get("name", "")) != _norm_name(netease_artist)
+    )
+    if artist_data and not lfm_mismatch:
         info["name"] = artist_data.get("name") or request.artist
-        info["bio"] = artist_data.get("bio", "")
+        info["bio"] = _clean_artist_bio_text(artist_data.get("bio", ""))
         info["tags"] = artist_data.get("tags", [])
-    # 头像优先网易云（可靠），Last.fm image 字段兜底
-    info["image"] = netease_img or (artist_data.get("image", "") if artist_data else "")
+    else:
+        # Last.fm 误识或无 bio：回落 Tavily 搜索简介，避免错认成异艺人或留白。
+        info["name"] = request.artist
+        web_bio = await _web_bio(netease_artist or request.artist, prefer_cjk=True)
+        if web_bio:
+            info["bio"] = _clean_artist_bio_text(web_bio)
+    # 头像优先网易云（可靠），Last.fm image 字段兜底（误识时不用 Last.fm 图）
+    info["image"] = netease_img or (artist_data.get("image", "") if (artist_data and not lfm_mismatch) else "")
+
+    # Last.fm bio 常偏短，中文艺人还可能留空；此时再用搜索补位。
+    # 若只是英文但内容已经够完整，直接中文化改写即可，避免额外再跑一轮 web 搜索拖慢艺人卡。
+    supplemental_bio = ""
+    if _bio_needs_supplement(info["bio"]) or _bio_needs_localization(info["bio"]):
+        supplemental_bio = await _web_bio(
+            netease_artist or info["name"] or request.artist,
+            prefer_cjk=_bio_needs_localization(info["bio"]),
+        )
+    bio_context = _merge_bio_context(info["bio"], supplemental_bio)
+    info["bio"] = await _localize_artist_bio(
+        info["name"],
+        _prefer_bio(bio_context, supplemental_bio),
+        info["tags"],
+        fallback_bio=supplemental_bio,
+    )
 
     # 代表专辑：网易云优先（带真实 album_id，点击直达专辑详情），Last.fm 补位。
     # 按归一化名称去重，避免两源同名专辑重复展示。
@@ -773,9 +988,9 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
             "id": "", "name": name, "image": a.get("image", ""),
             "artist": info["name"], "track_count": None,
         })
-        if len(top_albums) >= 6:
+        if len(top_albums) >= 12:
             break
-    info["top_albums"] = top_albums[:6]
+    info["top_albums"] = top_albums[:12]
     info["top_tracks"] = ext
 
     resolved_names = {info["name"]} if artist_data else set()
@@ -844,6 +1059,7 @@ def save_album(payload: SaveAlbumRequest, request: Request):
     album = SavedAlbum(
         album_id=payload.album_id, user_id=uid, name=payload.name,
         artist=payload.artist, image=payload.image, track_count=payload.track_count,
+        tags=payload.tags,
         tracks=payload.tracks,
     )
     saved = agent.save_album(uid, album)
@@ -869,6 +1085,41 @@ def delete_saved_album(user_id: str, album_id: str, request: Request):
 @app.get("/taste/{user_id}")
 def taste_profile(user_id: str, request: Request):
     return agent.get_taste_profile(_effective_user_id(request, user_id))
+
+
+# ── 用户画像（可解释品味仪表盘）──
+
+@app.get("/profile/{user_id}")
+def get_profile(user_id: str, request: Request):
+    """完整用户画像（计划 §13.1）：品味摘要 / 声音指纹 / 情绪地图 / 场景偏好 /
+    艺术家关系 / 探索倾向 / 带置信度的可纠错洞察。数据不足时返回空状态引导。"""
+    return profile_service.get_profile(_effective_user_id(request, user_id))
+
+
+@app.post("/profile/insights/{insight_id}/feedback")
+def profile_insight_feedback(insight_id: str, payload: ProfileInsightFeedbackRequest, request: Request):
+    """用户纠错某条画像判断（计划 §13.2）：confirm/reject/temporary/disable_for_recommendation。"""
+    uid = _effective_user_id(request, payload.user_id)
+    try:
+        return profile_service.update_insight_feedback(uid, insight_id, payload.action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/profile/insights/{user_id}/{insight_id}")
+def delete_profile_insight(user_id: str, insight_id: str, request: Request):
+    """删除某条 insight 的反馈，恢复默认（计划 §24）。"""
+    uid = _effective_user_id(request, user_id)
+    deleted = profile_service.delete_insight(uid, insight_id)
+    return {"deleted": deleted, "insight_id": insight_id}
+
+
+@app.delete("/profile/{user_id}")
+def clear_profile(user_id: str, request: Request):
+    """清除画像反馈数据（计划 §24，隐私可控性）。不删除底层偏好记忆。"""
+    uid = _effective_user_id(request, user_id)
+    cleared = profile_service.clear_profile_feedback(uid)
+    return {"cleared": cleared, "user_id": uid}
 
 
 @app.post("/taste/experiment/generate")

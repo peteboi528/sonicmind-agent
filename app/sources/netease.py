@@ -45,6 +45,42 @@ _SEARCH_BACKOFF = 0.1
 _SEARCH_TIMEOUT = 2.0
 _SEARCH_DEADLINE = 4.5  # 单次 _fetch_netease_songs 总墙钟上限（含所有尝试+退避）
 
+# ── 登录态 cookie + 全局节流（治「网易云搜索限流」的病因）──
+# 搜索默认匿名，网易云按 IP 限得很狠（HTTP 200 但 result.songs=[]）。绑定登录后把
+# MUSIC_U 注入搜索请求，额度远高于匿名。set_default_cookie 由 agent 入口按当前 user 注入。
+_default_cookie: str = ""
+# 一次推荐会突发打几十个网易云请求，无节流会瞬间打爆匿名/登录额度。这里在请求之间
+# 强制最小间隔。令牌式占位（锁内预约下一槽、锁外 sleep），并发调用被错峰而非串行阻塞。
+_THROTTLE_INTERVAL = 0.25
+_throttle_lock = threading.Lock()
+_throttle_next_at = 0.0
+
+
+def set_default_cookie(cookie: str) -> None:
+    """注入登录态 cookie（MUSIC_U），后续搜索请求带上；空串=退回匿名。"""
+    global _default_cookie
+    _default_cookie = _cookie_header(cookie) if cookie else ""
+
+
+def _search_headers() -> dict[str, str]:
+    """带登录 cookie 的搜索请求头；未注入则匿名（兼容旧行为）。"""
+    h = dict(_HEADERS)
+    if _default_cookie:
+        h["Cookie"] = _default_cookie
+    return h
+
+
+def _throttle() -> None:
+    """全局节流：网易云请求之间强制最小间隔，压住突发打爆限流。"""
+    global _throttle_next_at
+    with _throttle_lock:
+        now = time.monotonic()
+        wait = max(0.0, _throttle_next_at - now)
+        _throttle_next_at = now + wait + _THROTTLE_INTERVAL
+    if wait:
+        time.sleep(wait)
+
+
 # 专辑详情进程内缓存：按 album_id 缓存完整曲目，重复点击同一专辑不再重复打网易云。
 # FIFO + 上限，避免长跑实例无限增长；FIFO 而非 LRU 是因为专辑曲目稳定、不需要按热度复用。
 _ALBUM_DETAIL_CACHE: OrderedDict[str, dict[str, Any]] = OrderedDict()
@@ -70,7 +106,8 @@ def _fetch_netease_songs(query: str, limit: int, offset: int = 0) -> list[dict[s
     跳过已经给用户看过的那批最热结果，拿更深位次的新歌——否则同一查询永远返回
     同一批 top-N，去重后很快就无新歌可给。
     """
-    headers = dict(_HEADERS)
+    headers = _search_headers()
+    _throttle()  # 全局节流：压住一次推荐里多个查询的突发，避免打爆网易云限流
     encoded = urllib.parse.quote(query)
     offset = max(0, int(offset or 0))
 
@@ -120,11 +157,27 @@ def search_netease(query: str) -> str | None:
     return None
 
 
-@lru_cache(maxsize=128)
-def fetch_netease_lyrics(song_id: str) -> list[str]:
-    """Fetch verified NetEase lyrics and strip timestamp metadata.
+_LRC_TS_RE = re.compile(r"\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
+# LRC 元数据 ID 标签：整行就是一个 [字母:内容] 标签（[ti:标题]/[ar:艺人]/[al:专辑]/
+# [by:上传者]/[offset:偏移]…）。真实 API 常带，且 [ti:] 里的字母不是数字、不会命中
+# _LRC_TS_RE，留着会把 "[ti:恋爱]" 这类当歌词正文显示。这里整行匹配（须以 \] 收尾）才丢，
+# 含正文后缀的行（[ti:x]正文）不误伤。
+_LRC_META_RE = re.compile(r"^\s*\[[a-zA-Z]{1,12}\s*:.*\]\s*$")
+# 署名/制作人员行（网易云常把这些当带时间戳的歌词行塞在开头，time=3~8s 间奏处）：
+# 作词/作曲/…/录音/母带/发行/出品 等。真实歌词几乎不会以「角色：」开头，按角色前缀整行匹配才丢。
+_LRC_CREDIT_RE = re.compile(
+    r"^(作词|作曲|编曲|制作人|混音|录音|母带|发行管理|发行|出品|出品人|和声|配唱|缩混|"
+    r"监制|策划|统筹|封面|设计|视觉|后期|母带处理)\s*[:：]"
+)
 
-    Empty/failed responses return ``[]``.  The function never synthesizes text.
+
+@lru_cache(maxsize=128)
+def fetch_netease_lyrics_timed(song_id: str) -> list[dict]:
+    """带时间戳的歌词：[{time: 秒(float), text}]。time=None 表示该行无时间戳。空/失败返 []。
+
+    保留 LRC 的 [mm:ss.xxx] 时间戳供前端做字幕同步；署名行（作词/作曲…）与整行 LRC 元数据
+    标签（[ti:]/[ar:]/[al:]…）丢弃；一行多时间戳（如 [01:00][02:00]词）展开成多条；
+    按 time 升序（无时间戳行沉底）。
     """
     song_id = str(song_id or "").strip()
     if not song_id.isdigit():
@@ -140,12 +193,25 @@ def fetch_netease_lyrics(song_id: str) -> list[str]:
     lyric = ((data.get("lrc") or {}).get("lyric") or "").strip()
     if not lyric:
         return []
-    lines: list[str] = []
+    timed: list[dict] = []
     for raw_line in lyric.splitlines():
-        text = re.sub(r"^(?:\[[^\]]+\])+", "", raw_line).strip()
-        if text and not re.match(r"^(作词|作曲|编曲|制作人|混音)[:：]", text):
-            lines.append(text)
-    return lines[:500]
+        stamps = _LRC_TS_RE.findall(raw_line)
+        text = _LRC_TS_RE.sub("", raw_line).strip()
+        if not text or _LRC_META_RE.match(raw_line) or _LRC_CREDIT_RE.match(text):
+            continue
+        if stamps:
+            for m, s, ms in stamps:
+                t = int(m) * 60 + int(s) + (int(ms.ljust(3, "0")) / 1000 if ms else 0.0)
+                timed.append({"time": round(t, 3), "text": text})
+        else:
+            timed.append({"time": None, "text": text})
+    timed.sort(key=lambda x: (x["time"] is None, x["time"] or 0.0))
+    return timed[:500]
+
+
+def fetch_netease_lyrics(song_id: str) -> list[str]:
+    """Plain lyrics lines (timestamps stripped). Derived from the timed version（缓存也在那边）。"""
+    return [item["text"] for item in fetch_netease_lyrics_timed(song_id)]
 
 
 def search_netease_artist_image(artist: str) -> str | None:
@@ -308,7 +374,7 @@ async def asearch_netease_artist_albums(artist: str, limit: int = 6) -> list[dic
     async def fetch(endpoint: str) -> list[dict[str, Any]]:
         try:
             response = await source_transport.request(
-                "netease", "GET", endpoint, params=params, headers=_HEADERS,
+                "netease", "GET", endpoint, params=params, headers=_search_headers(),
                 retries=1, concurrency=4,
             )
             return response.json().get("result", {}).get("albums", []) or []
@@ -362,7 +428,8 @@ def _normalize_artist_albums(
 
 
 def _fetch_netease_albums(query: str, limit: int = 8) -> list[dict[str, Any]]:
-    headers = dict(_HEADERS)
+    headers = _search_headers()
+    _throttle()
     encoded = urllib.parse.quote(query)
     for base in _ALBUM_SEARCH_ENDPOINTS:
         try:
@@ -398,7 +465,7 @@ async def asearch_netease_many(query: str, limit: int = 20, offset: int = 0) -> 
     async def fetch(endpoint: str) -> list[dict[str, Any]]:
         try:
             response = await source_transport.request(
-                "netease", "GET", endpoint, params=params, headers=_HEADERS,
+                "netease", "GET", endpoint, params=params, headers=_search_headers(),
                 retries=_SEARCH_RETRIES, concurrency=4,
             )
             payload = response.json()

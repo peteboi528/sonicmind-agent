@@ -75,3 +75,22 @@ def test_openness_default_without_signal():
     assets = [_asset("p1", ["流行"])]
     taste = compute_taste_profile(assets, [])
     assert taste.discovery_openness == 0.3
+
+
+def test_collaborating_artists_split_into_individuals():
+    """合作艺人（、/feat./& 拼接）必须拆开各自计数，不能合成一条。"""
+    a1 = Asset(
+        asset_id="c1", source_url="x", title="t1", duration_seconds=200,
+        status=AssetStatus.ANALYZED, artist="kanye west、ye",
+    )
+    a2 = Asset(
+        asset_id="c2", source_url="x", title="t2", duration_seconds=200,
+        status=AssetStatus.ANALYZED, artist="a feat. b",
+    )
+    taste = compute_taste_profile([a1, a2], [])
+    names = {a for a, _ in taste.top_artists}
+    assert "kanye west" in names
+    assert "ye" in names
+    assert "a" in names and "b" in names
+    assert "kanye west、ye" not in names   # 合并串不该出现
+    assert "a feat. b" not in names

@@ -41,6 +41,7 @@ const searchIntent = ref(null); // { kind: category|artist|track, label, tags, .
 
 const forYou = ref([]);
 const forYouLoading = ref(false);
+const forYouOnlineOnly = ref(false); // 「仅线上」开关：不推本地曲库
 
 const trending = ref([]);    // [{ name, icon, tracks: [...] }]
 const trendingLoading = ref(false);
@@ -96,7 +97,7 @@ function toCard(t) {
 async function loadForYou() {
   forYouLoading.value = true;
   try {
-    const data = await api.dailyRecommend(store.userId);
+    const data = await api.dailyRecommend(store.userId, undefined, forYouOnlineOnly.value);
     const tracks = data.tracks || [];
     forYou.value = tracks.slice(0, 8).map(t => {
       const a = t.asset;
@@ -198,7 +199,7 @@ async function search() {
     // 匹配成歌手），所以试探是安全的，匹配上才显示，恢复"输歌手名即出歌手卡"的体验。
     if (classification.kind === "artist" || classification.kind === "track") {
       if (classification.kind === "artist") artistLoading.value = true;
-      withTimeout(api.artistInfo(classification.normalized_query || q), 10000, "artist").then((info) => {
+      withTimeout(api.artistInfo(classification.normalized_query || q), 35000, "artist").then((info) => {
         if (seq !== searchSeq.value) return;
         if (info?.matched && info.name && (info.bio || info.top_tracks?.length || info.top_albums?.length)) {
           artistInfo.value = info;
@@ -326,6 +327,7 @@ async function toggleSaveAlbum() {
         artist: album.artist || artistInfo.value?.name || "",
         image: album.image || "",
         track_count: album.track_count ?? tracks.length,
+        tags: artistInfo.value?.tags || [],
         tracks: tracks.map(c => ({
           external_id: c.source_id, title: c.title, artist: c.artist,
           source: c.source, cover_url: c.cover_url, playback_url: c.playback_url,
@@ -466,7 +468,7 @@ onMounted(() => {
         <div class="artist-section-label">代表专辑 · 按专辑页曲序播放</div>
         <div class="album-grid">
           <div
-            v-for="album in artistInfo.top_albums.slice(0, 6)"
+            v-for="album in artistInfo.top_albums.slice(0, 12)"
             :key="albumKey(album)"
             class="album-item"
             :class="{ active: albumDetail?.key === albumKey(album) }"
@@ -628,6 +630,10 @@ onMounted(() => {
           <span class="section-icon">🎯</span>
           <span class="section-label">为你推荐</span>
           <span class="section-badge">个性化</span>
+          <label class="online-toggle" title="开启后只推线上候选，不混入本地曲库">
+            <input type="checkbox" v-model="forYouOnlineOnly" @change="loadForYou" />
+            <span>仅线上</span>
+          </label>
         </div>
 
         <div v-if="forYouLoading" class="card-skeleton-grid">
@@ -1064,6 +1070,13 @@ onMounted(() => {
   font-size: 0.7rem; font-weight: 700;
   letter-spacing: 0.02em;
 }
+.online-toggle {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 5px;
+  color: var(--text-muted); font-size: 0.74rem; cursor: pointer;
+  user-select: none; transition: color var(--transition);
+}
+.online-toggle input { accent-color: var(--accent); width: 13px; height: 13px; cursor: pointer; }
+.online-toggle:hover { color: var(--text); }
 .section-empty {
   color: var(--text-muted); font-size: 0.88rem;
   padding: 20px 0; text-align: center;

@@ -686,6 +686,26 @@ class ExternalTrack(BaseModel):
 TrackOrigin = Literal["local", "netease", "bilibili", "youtube", "mock", "llm_guess"]
 
 
+class ResultHygieneReport(BaseModel):
+    """结果治理报告：记录候选从「原始」到「清洗后」各阶段被剔的数量。
+
+    用于 trace/SSE/评测快速定位：是「没搜到」(raw_count 低) 还是「搜到但被清洗掉」
+    (raw_count 高、cleaned_count 低)。区分三类剔除：非歌曲实体 / 排除项 / 语言过滤。
+    """
+    requested_count: int = 0
+    raw_count: int = 0
+    cleaned_count: int = 0
+    removed_invalid_tracks: int = 0
+    removed_by_exclusion: int = 0
+    removed_by_language_filter: int = 0
+    # 质量闸门明细：被拒类型分布 + 举例，供 trace/文案解释「为什么变少」。
+    rejected_examples: list[str] = Field(default_factory=list)
+    reasons: dict[str, int] = Field(default_factory=dict)
+
+    def removed_total(self) -> int:
+        return self.raw_count - self.cleaned_count
+
+
 class TrackEntity(BaseModel):
     """候选池契约：只有进入候选池的 TrackEntity 才允许出现在最终答案里。
 
@@ -766,6 +786,14 @@ class SearchResponse(BaseModel):
     agent_trace: list[str] = Field(default_factory=list)
 
 
+class LyricsRequest(BaseModel):
+    user_id: str = "demo-user"
+    title: str = ""
+    artist: str = ""
+    # 网易云在线曲的 song_id（数字）；本地曲留空，后端按标题+艺人搜命中后取词。
+    source_id: str = ""
+
+
 class ChatMessage(BaseModel):
     role: str  # "user" | "assistant" | "system"
     content: str
@@ -788,6 +816,17 @@ class AgentResumeRequest(BaseModel):
 class DailyRequest(BaseModel):
     user_id: str = "demo-user"
     time_of_day: str | None = None
+    no_local: bool = False  # 每日 tab「仅线上」开关：True → local_ratio=0，完全不推本地
+
+
+class ProfileInsightFeedbackRequest(BaseModel):
+    """用户对一条画像 insight 的反馈（计划 §13.2）。
+
+    action 取值：confirm（准确）| reject / disable_for_recommendation（不准确/不用于推荐）
+    | temporary（只是最近喜欢）| reset（恢复默认）。service 层做归一化校验。
+    """
+    user_id: str = "demo-user"
+    action: str
 
 
 class Playlist(BaseModel):
@@ -884,6 +923,7 @@ class SavedAlbum(BaseModel):
     artist: str = ""
     image: str = ""
     track_count: int | None = None
+    tags: list[str] = Field(default_factory=list)
     tracks: list[ExternalTrack] = Field(default_factory=list)
     saved_at: str = Field(default_factory=utc_now_iso)
 
@@ -895,6 +935,7 @@ class SaveAlbumRequest(BaseModel):
     artist: str = ""
     image: str = ""
     track_count: int | None = None
+    tags: list[str] = Field(default_factory=list)
     tracks: list[ExternalTrack] = Field(default_factory=list)
 
 

@@ -13,11 +13,16 @@ from typing import Any
 
 import requests
 
+from app.graph.tag_rules import extract_tags
 from app.models import ExternalTrack
+from app.sources.mock_source import MockSource
+from app.sources.netease import _search_headers, _throttle
 
 logger = logging.getLogger(__name__)
 
-_NETEASE_SEARCH_URL = "https://music.163.com/api/search/get/web"
+# 歌单搜索端点：旧的 /api/search/get/web 已失效（返非 JSON 串→解析空→歌单路径长期 0 命中，
+# 每日推荐在线曲为空的真因）。cloudsearch/pc 对 type=1000 仍稳定返回 result.playlists。
+_NETEASE_SEARCH_URL = "https://music.163.com/api/cloudsearch/pc"
 _NETEASE_PLAYLIST_URL = "https://music.163.com/api/v6/playlist/detail"
 _HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
 
@@ -35,9 +40,10 @@ def _get_with_retry(url: str, params: dict[str, Any], desc: str) -> dict[str, An
     升到 WARNING 让限流可见（旧代码全 debug，限流和"真没结果"无法区分）。
     """
     attempts = _RETRIES + 1
+    _throttle()  # 全局节流：复用 netese source 的最小间隔，压住突发打爆限流
     for attempt in range(attempts):
         try:
-            resp = requests.get(url, params=params, headers=_HEADERS, timeout=_TIMEOUT)
+            resp = requests.get(url, params=params, headers=_search_headers(), timeout=_TIMEOUT)
             status = getattr(resp, "status_code", 200)
             if status == 429 or status >= 500:
                 # 限流/服务端错误：可重试。
@@ -134,11 +140,26 @@ def get_playlist_tracks(playlist_id: int, limit: int = 30) -> list[ExternalTrack
     return detail["tracks"] if detail else []
 
 
+def _offline_playlist_fallback(query: str, limit: int) -> list[ExternalTrack]:
+    """离线/弱网兜底：用内置曲库给出保守候选，避免歌单链路整段返空。"""
+    source = MockSource()
+    tracks = source.search(query, limit=limit)
+    if not tracks:
+        tags = extract_tags(query)
+        tracks = source.get_recommendations(tags["genre"], tags["mood"], limit=limit)
+    return [
+        track.model_copy(update={"source": "local"})
+        for track in tracks[:limit]
+    ]
+
+
 def search_and_extract(query: str, max_playlists: int = 3, tracks_per_playlist: int = 15) -> list[ExternalTrack]:
     """一步到位：搜歌单 + 从热门歌单提取歌曲。去重后返回。"""
     # 搜索顺序容易被标题 SEO 操纵。官方编辑歌单优先，其次认证账号和真实播放量，
     # 避免先抽到“跑步/BPM/Type Beat”关键词堆砌歌单。
     playlists = search_netease_playlists(query, limit=max(max_playlists * 3, 8))
+    if not playlists:
+        return _offline_playlist_fallback(query, max_playlists * tracks_per_playlist)
 
     def trust_score(playlist: dict[str, Any]) -> tuple[int, int, float]:
         creator = playlist.get("creator_name", "").lower()
@@ -159,4 +180,4 @@ def search_and_extract(query: str, max_playlists: int = 3, tracks_per_playlist: 
                 seen.add(key)
                 all_tracks.append(t)
 
-    return all_tracks
+    return all_tracks or _offline_playlist_fallback(query, max_playlists * tracks_per_playlist)

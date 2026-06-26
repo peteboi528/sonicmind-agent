@@ -160,6 +160,45 @@ def _apply_exclusion_filter(tracks: list[Any], rules: list[str]) -> list[Any]:
     return filtered
 
 
+def _artist_matches(track: Any, names: set[str]) -> bool:
+    """候选 artist 是否命中画像艺人集合（子串匹配，候选 artist 形如「A、B」）。"""
+    if not names:
+        return False
+    artist = (getattr(track, "artist", "") or "").lower()
+    if not artist:
+        return False
+    return any(n in artist for n in names)
+
+
+def apply_profile_artist_adjust(
+    scored: list[tuple[Any, RankingBreakdown]],
+    boost: set[str] | None,
+    penalty: set[str] | None,
+) -> list[tuple[Any, RankingBreakdown]]:
+    """画像艺人关系（core/rising 加分，avoid 减分）作为三锚之外的小幅调整。
+
+    就地改 breakdown.score 后按分数重排。量级（+0.06/-0.12）远小于真实相关性差异，
+    只起「同分段时倾向画像偏好艺人、避开画像 dislike 艺人」的微调，不盖过语义/口味锚。
+    MMR 读 bd.score，故调整自然影响最终排序。boost/penalty 为空时原样返回（保持旧行为）。
+    """
+    boost_n = {b.lower() for b in (boost or [])}
+    penalty_n = {p.lower() for p in (penalty or [])}
+    if not boost_n and not penalty_n:
+        return scored
+    for _track, bd in scored:
+        delta = 0.0
+        label = ""
+        if _artist_matches(_track, penalty_n):
+            delta, label = -0.12, "profile_avoid_artist"
+        elif _artist_matches(_track, boost_n):
+            delta, label = 0.06, "profile_core_artist"
+        if delta:
+            bd.score = round(max(0.0, bd.score + delta), 4)
+            bd.components[label] = round(delta, 3)
+    scored.sort(key=lambda x: x[1].score, reverse=True)
+    return scored
+
+
 def _track_tags(track: Any) -> dict[str, set[str]]:
     genre = {g.lower() for g in (getattr(track, "genre", []) or [])}
     mood = {m.lower() for m in (getattr(track, "mood", []) or [])}
@@ -496,12 +535,16 @@ def rerank_candidates(
     collaborative_scores: list[float] | None = None,
     collaborative_ok: bool = False,
     ts_scores: dict[str, float] | None = None,
+    profile_boost_artists: set[str] | None = None,
+    profile_penalty_artists: set[str] | None = None,
 ) -> list[tuple[Any, RankingBreakdown]]:
-    """精排管线入口：排除过滤 → 四锚精排 → MMR 多样性重排 → 取 top_k。
+    """精排管线入口：排除过滤 → 四锚精排 → 画像艺人微调 → MMR 多样性重排 → 取 top_k。
 
     exclusion_rules：用户排除规则（如"抖音热歌"），候选匹配则丢弃。
     lang_pref：曲库语言分布，传入时按分布对候选做温和语言加权。
     collaborative_scores/collaborative_ok：可选 CF 第四锚（须与过滤后 tracks 对齐）。
+    profile_boost_artists/penalty_artists：画像仪表盘艺人关系（core/rising 加分、avoid 减分），
+        与 memory.taste_profile（频次）互补。空集时不调整，行为与旧版一致。
     ts_scores：可选 TS 探索锚，开启 ENABLE_EXPLORE 时用于留出探索槽。
     """
     # 排除过滤：先于精排，命中排除规则的候选直接丢弃
@@ -518,6 +561,8 @@ def rerank_candidates(
         collaborative_scores=collaborative_scores, collaborative_ok=collaborative_ok,
         ts_scores=ts_scores,
     )
+    # 画像艺人微调（core/rising 加分、avoid 减分）：小幅、可选，空集时原样返回。
+    scored = apply_profile_artist_adjust(scored, profile_boost_artists, profile_penalty_artists)
     if apply_mmr:
         if settings.enable_explore and ts_scores:
             return bandit_select(scored, top_k=top_k)

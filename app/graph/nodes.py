@@ -123,11 +123,17 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
 
 async def plan_intent_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     context = state.get("context") or {}
+    profile_text = (
+        agent.profile_context_text(state["user_id"])
+        if state.get("user_id") and hasattr(agent, "profile_context_text")
+        else ""
+    )
     plan, prompt_versions, runtime_metrics = await plan_with_llm_with_meta_async(
         agent,
         state["query"],
         context.get("history_text", ""),
         context.get("memory_query", ""),
+        profile_text=profile_text,
     )
     return _finish_plan_intent(agent, state, plan, prompt_versions, runtime_metrics)
 
@@ -540,15 +546,48 @@ def _continuation_search_query(
     if prior_query and not llm_query and not any(str(item).strip() for item in inherited):
         parts.append(prior_query)
     deduped: list[str] = []
-    seen: set[str] = set()
+    seen_keys: list[str] = []
     for part in parts:
-        part = part.strip()
+        part = _normalize_query_fragment(part)
         key = _constraint_key(part)
-        if not part or not key or key in seen:
+        if not part or not key:
             continue
-        seen.add(key)
+        replaced = False
+        for idx, existing_key in enumerate(seen_keys):
+            if key == existing_key or key in existing_key:
+                replaced = True
+                break
+            if existing_key in key:
+                deduped[idx] = part
+                seen_keys[idx] = key
+                replaced = True
+                break
+        if replaced:
+            continue
         deduped.append(part)
+        seen_keys.append(key)
     return " ".join(deduped).strip() or "音乐"
+
+
+def _normalize_query_fragment(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    tokens = text.split()
+    if len(tokens) >= 2 and len(tokens) % 2 == 0:
+        half = len(tokens) // 2
+        if [token.lower() for token in tokens[:half]] == [token.lower() for token in tokens[half:]]:
+            tokens = tokens[:half]
+    compact: list[str] = []
+    for token in tokens:
+        if (
+            compact
+            and compact[-1].lower() == token.lower()
+            and re.fullmatch(r"[一-龥]{1,8}", token)
+        ):
+            continue
+        compact.append(token)
+    return " ".join(compact).strip()
 
 
 def _continuation_search_variants(variants: list[str], constraints: list[str]) -> list[str]:
@@ -701,6 +740,8 @@ def _record_runtime_result(
         ))
     else:
         trace.append(f"[{handler}] {summary}")
+        if handler == "import_netease_playlist":
+            trace.append(f"[import] {summary}")
     trace.append(
         f"[tool_status] tool={handler} status={runtime_result.status.value} "
         f"candidates={len(runtime_result.cards)}"
@@ -726,8 +767,33 @@ def _record_runtime_result(
             content=runtime_result.data.get("answer", "已生成音乐档案。"),
             payload={"dossier": runtime_result.data.get("dossier")},
         ))
+        dossier = runtime_result.data.get("dossier") or {}
+        entity = dossier.get("entity") or {}
+        # 专辑解读：把这张专辑本身作为卡片下发（封面/曲目/风格），出现在乐评下方。
+        if entity.get("type") == "album":
+            ext = entity.get("external_ids") or {}
+            key_tracks = dossier.get("key_tracks") or []
+            main_album = {
+                "id": ext.get("netease_album") or ext.get("musicbrainz") or ext.get("spotify") or "",
+                "name": entity.get("name", ""),
+                "artist": entity.get("artist", ""),
+                "image": entity.get("image", ""),
+                "track_count": len(key_tracks) or None,
+                "tracks": [
+                    {
+                        "title": t.get("title", ""),
+                        "artist": t.get("artist") or entity.get("artist", ""),
+                        "source": t.get("source", "local"),
+                        "source_id": t.get("source_id", ""),
+                    }
+                    for t in key_tracks
+                ],
+                "genres": dossier.get("style_tags") or [],
+            }
+            if main_album["name"]:
+                events.append(StreamEvent(type="album_card", content=main_album["name"], payload={"album": main_album}))
         # 聆听路线的真实专辑作为可播放/可收藏卡片下发（复用前端 album_card 渲染）。
-        for album in (runtime_result.data.get("dossier") or {}).get("related_albums", []):
+        for album in dossier.get("related_albums", []):
             events.append(StreamEvent(type="album_card", content=album.get("name", ""), payload={"album": album}))
     if handler == "build_sample_dossier" and runtime_result.data.get("sample_dossier"):
         events.append(StreamEvent(
@@ -1746,8 +1812,9 @@ async def plan_with_llm_async(
     query: str,
     history_text: str = "",
     memory_text: str = "",
+    profile_text: str = "",
 ) -> AgentPlan | None:
-    plan, _, _ = await plan_with_llm_with_meta_async(agent, query, history_text, memory_text)
+    plan, _, _ = await plan_with_llm_with_meta_async(agent, query, history_text, memory_text, profile_text)
     return plan
 
 
@@ -1756,6 +1823,7 @@ async def plan_with_llm_with_meta_async(
     query: str,
     history_text: str = "",
     memory_text: str = "",
+    profile_text: str = "",
 ) -> tuple[AgentPlan | None, dict[str, str], dict[str, float | int]]:
     try:
         sections: list[str] = []
@@ -1765,6 +1833,13 @@ async def plan_with_llm_with_meta_async(
             sections.append(
                 "【长期音乐偏好（仅作软参考，不得覆盖本轮明确要求）】\n"
                 f"{memory_text[:500]}"
+            )
+        # 画像仪表盘（app/profile/）：与听歌历史互补，带场景偏好/探索风格/画像级排除，
+        # 让 LLM 规划 search_query/entities 时参考「专辑品位」。同样软参考、不覆盖本轮明确要求。
+        if profile_text.strip() and not settings.mock_mode:
+            sections.append(
+                "【用户画像·品味仪表盘（软参考，不得覆盖本轮明确要求）】\n"
+                f"{profile_text[:400]}"
             )
         sections.append(f"【本轮输入】\n{query}" if sections else query)
         llm = select_llm(agent, "fast")
@@ -2254,11 +2329,24 @@ def _intro_prompt(
         if (getattr(t, "artist", "") or "").strip()
     ))
     mem_hint = f"用户偏好：{memory_query[:150]}" if memory_query else "暂无明确偏好记录"
+    # 数量口径铁律：开场白如提数量，必须用「真实通过过滤的数量」len(tracks)，不得用目标 target_count。
+    if plan.target_count and len(tracks) < plan.target_count:
+        count_rule = (
+            f"数量口径（必须遵守）：本轮真实通过过滤、可展示的候选只有 {len(tracks)} 首"
+            f"（你要求 {plan.target_count} 首，已剔除不够像歌曲的教程/合集/歌单等内容）。"
+            f"开场白如提及数量，只能说 {len(tracks)} 首，并诚实说明剩余未补齐；"
+            f"绝不能说 {plan.target_count} 首，也不能说'已补齐/已生成N首'。"
+        )
+    elif plan.target_count:
+        count_rule = f"数量口径：开场白如提及数量，必须说 {len(tracks)} 首（与底部列表一致）。"
+    else:
+        count_rule = ""
     prompt = (
         f"用户请求：{query}\n"
         f"我已找到 {len(tracks)} 首真实候选，前几首：{titles_preview}\n"
         f"候选中实际出现的艺人：{artists_preview or '无明确艺人'}\n"
-        f"{mem_hint}\n\n"
+        f"{mem_hint}\n"
+        f"{count_rule}\n\n"
         "请写一句自然、有温度的推荐开场白（80字内），只能围绕用户本轮请求和实际候选。"
         "不要提最近对话、上一轮话题、旧歌手或旧专辑；本轮任务是独立的。"
         "记忆只作为弱背景，当前任务约束优先。除非用户本轮明确点名某艺人，且该艺人确实出现在候选中，"

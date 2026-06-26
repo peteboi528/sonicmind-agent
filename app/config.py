@@ -118,7 +118,7 @@ class Settings:
         )
         # Music knowledge agent latency budget. 这些链路会并行查资料/乐评，
         # 必须有全链路墙钟上限，避免单个请求因为搜索链条过长而崩掉。
-        self.knowledge_turn_budget_seconds: float = float(os.getenv("KNOWLEDGE_TURN_BUDGET_SECONDS", "16"))
+        self.knowledge_turn_budget_seconds: float = float(os.getenv("KNOWLEDGE_TURN_BUDGET_SECONDS", "36"))
         self.knowledge_quick_budget_seconds: float = float(os.getenv("KNOWLEDGE_QUICK_BUDGET_SECONDS", "6"))
         self.knowledge_source_timeout_seconds: float = float(os.getenv("KNOWLEDGE_SOURCE_TIMEOUT_SECONDS", "3"))
         self.knowledge_review_timeout_seconds: float = float(os.getenv("KNOWLEDGE_REVIEW_TIMEOUT_SECONDS", "8"))
@@ -127,6 +127,18 @@ class Settings:
         self.knowledge_max_search_queries: int = max(1, int(os.getenv("KNOWLEDGE_MAX_SEARCH_QUERIES", "3")))
         self.knowledge_max_citations: int = max(1, int(os.getenv("KNOWLEDGE_MAX_CITATIONS", "8")))
         self.knowledge_deep_review_enabled: bool = os.getenv("KNOWLEDGE_DEEP_REVIEW_ENABLED", "false").lower() == "true"
+        # 乐评正文抓取（Tavily Extract / Discogs API）预算：把 MB relations 里那批
+        # 高价值来源（last.fm/Discogs/Genius/AllMusic…）的真实正文读回来填进 citation.excerpt，
+        # 喂给合成 LLM 出专业中文乐评。受保护预算——不让 MB 把它饿死。
+        self.knowledge_review_extract_timeout_seconds: float = float(os.getenv("KNOWLEDGE_REVIEW_EXTRACT_TIMEOUT_SECONDS", "10"))
+        self.knowledge_review_extract_max_sources: int = max(1, int(os.getenv("KNOWLEDGE_REVIEW_EXTRACT_MAX_SOURCES", "4")))
+        # dossier 工具外层超时：要装得下「抓 N 个正文 + 1 次合成 LLM（开思考模式）」，给难抓的专辑留余地。
+        self.knowledge_dossier_timeout_seconds: float = float(os.getenv("KNOWLEDGE_DOSSIER_TIMEOUT_SECONDS", "24"))
+        # 元数据波(MB/Spotify/Discogs/web) 内部预算封顶——它是 bonus 内容，不能让它吃光整轮预算饿死合成。
+        # 旧实现会用到 ~20s，难抓专辑时把 dossier/synth 挤没。封 7s（略低于 review 8s，不拖长 stage2）。
+        self.knowledge_metadata_timeout_seconds: float = float(os.getenv("KNOWLEDGE_METADATA_TIMEOUT_SECONDS", "7"))
+        # 知识合成这一处开 LLM 思考模式（只此一处，不全局开以免拖慢规划/对话/反思）。
+        self.knowledge_synth_thinking_enabled: bool = os.getenv("KNOWLEDGE_SYNTH_THINKING_ENABLED", "true").lower() == "true"
         # MusicBrainz 结构化知识层（免费、无 key）：实体消歧 + 权威元数据。
         # 评测/离线测试可关，保证确定性。
         self.enable_musicbrainz: bool = os.getenv("ENABLE_MUSICBRAINZ", "true").lower() == "true"

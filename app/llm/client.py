@@ -502,14 +502,18 @@ def _estimate_cost_usd(prompt_tokens: int, completion_tokens: int) -> float:
 
 
 def build_llm(tier: str | None = None) -> LLMProvider:
-    if settings.mock_mode:
-        return MockLLM()
-    if _local_endpoint_unavailable(settings.llm_base_url):
+    parsed = urllib.parse.urlparse(settings.llm_base_url)
+    host = parsed.hostname or ""
+    local_host = host in {"localhost", "127.0.0.1", "::1"}
+    local_endpoint_available = local_host and not _local_endpoint_unavailable(settings.llm_base_url)
+    # 无 API key 时只允许直连可达的本地推理服务；远端地址在离线/测试环境里
+    # 必须降级到 MockLLM，否则结构化规划会静默走网络并返回 None。
+    if settings.mock_mode and not local_endpoint_available:
         return MockLLM()
     resolved_tier = tier or "default"
     return OpenAICompatibleLLM(
         base_url=settings.llm_base_url,
-        api_key=settings.llm_api_key,
+        api_key=settings.llm_api_key or "local",
         model=_model_for_tier(resolved_tier),
         tier=resolved_tier,
         thinking=settings.llm_thinking,

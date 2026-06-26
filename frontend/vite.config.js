@@ -21,6 +21,7 @@ export default defineConfig({
       "/assets": "http://localhost:8000",
       "/rate": "http://localhost:8000",
       "/listen": "http://localhost:8000",
+      "/lyrics": "http://localhost:8000",
       "/memory": "http://localhost:8000",
       "/taste": "http://localhost:8000",
       "/feedback": "http://localhost:8000",

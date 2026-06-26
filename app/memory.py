@@ -11,12 +11,14 @@ from app.llm.structured import extract_json_dict
 from app.models import (
     AgentGoal,
     Asset,
+    AssetStatus,
     DialogueState,
     EpisodicMemory,
     ListeningEvent,
     MemoryEntry,
     MemoryUpdateRequest,
     RatingEntry,
+    SavedAlbum,
     Segment,
     TasteProfile,  # noqa: F401  —— 对外 re-export（测试/外部按 from app.memory import TasteProfile 使用）
     UserMemory,
@@ -325,14 +327,63 @@ class MemoryManager:
     def refresh_taste_profile(self, user_id: str, library: list[Asset]) -> UserMemory:
         with self.store.lock("memory", user_id):
             memory = self.get_memory(user_id)
+            old_taste = memory.taste_profile
             listened_ids = {ev.asset_id for ev in memory.listening_history}
             listened_assets = [a for a in library if a.asset_id in listened_ids]
             if not listened_assets:
                 listened_assets = library
-            memory.taste_profile = compute_taste_profile(listened_assets, memory.listening_history, memory.ratings)
+            taste_assets = [*listened_assets, *self._saved_album_seed_assets(user_id)]
+            memory.taste_profile = compute_taste_profile(taste_assets, memory.listening_history, memory.ratings)
+            # 止血：曲库曲目无 genre/mood 标签时，全量重算会把已积累的曲风/情绪清空
+            # （"每次更新库 genre/mood 都消失"）。新算结果空、旧的有 → 保留旧的；
+            # 新算有数据则正常更新。artist 始终重算（可从 artist 字段派生）。
+            new_taste = memory.taste_profile
+            if old_taste:
+                if not new_taste.top_genres and old_taste.top_genres:
+                    new_taste.top_genres = list(old_taste.top_genres)
+                if not new_taste.top_moods and old_taste.top_moods:
+                    new_taste.top_moods = list(old_taste.top_moods)
             memory.updated_at = utc_now_iso()
             self.store.write_model("memory", user_id, memory)
             return memory
+
+    def _saved_album_seed_assets(self, user_id: str) -> list[Asset]:
+        """Fold saved albums into taste estimation as bounded seed assets."""
+        albums: list[SavedAlbum] = []
+        for key in self.store.list_keys("saved_albums"):
+            if not key.startswith(f"{user_id}_"):
+                continue
+            try:
+                album = self.store.read_model("saved_albums", key, SavedAlbum)
+            except Exception:
+                logger.warning("Skipping unreadable saved album %s (stale schema?)", key, exc_info=True)
+                continue
+            if album:
+                albums.append(album)
+
+        seeds: list[Asset] = []
+        for album in albums:
+            album_tags = _dedupe_preserve([str(tag) for tag in (album.tags or [])])[:4]
+            sample_tracks = album.tracks[: min(len(album.tracks), 4)] or [None]
+            for idx, track in enumerate(sample_tracks):
+                track_genres = _dedupe_preserve([str(tag) for tag in getattr(track, "genre", []) or []])[:3]
+                track_moods = _dedupe_preserve([str(tag) for tag in getattr(track, "mood", []) or []])[:3]
+                genres = _dedupe_preserve([*album_tags, *track_genres])[:4]
+                seeds.append(Asset(
+                    asset_id=f"saved-album::{album.album_id}::{idx}",
+                    source_url=f"saved-album://{album.album_id}/{idx}",
+                    title=(getattr(track, "title", "") or album.name or f"Saved Album {album.album_id}").strip(),
+                    duration_seconds=180,
+                    status=AssetStatus.ANALYZED,
+                    genre=genres,
+                    mood=track_moods,
+                    artist=((getattr(track, "artist", "") or album.artist or "").strip() or None),
+                    album=album.name,
+                    cover_url=album.image or None,
+                    source="external",
+                    external_id=f"{album.album_id}:{idx}",
+                ))
+        return seeds
 
     def weighted_query(self, memory: UserMemory, *, include_artists: bool = True) -> str:
         scored = score_entries(memory.structured_preferences)
@@ -725,6 +776,18 @@ def score_entries(entries: list[MemoryEntry]) -> list[tuple[MemoryEntry, float]]
         scored.append((entry, weight))
     scored.sort(key=lambda x: x[1], reverse=True)
     return scored
+
+
+def _dedupe_preserve(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        key = text.lower()
+        if text and key not in seen:
+            seen.add(key)
+            out.append(text)
+    return out
 
 
 def infer_preferences_from_results(query: str, results: list[dict[str, Any]]) -> list[str]:

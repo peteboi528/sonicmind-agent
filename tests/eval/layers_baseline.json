@@ -1,0 +1,9 @@
+{
+  "hygiene_pass_rate": 1.0,
+  "scene_vibe_discrimination_rate": null,
+  "scene_vibe_avg_margin": null,
+  "scene_vibe_weak_count": null,
+  "scene_vibe_skipped": true,
+  "local_ratio_accuracy": 1.0,
+  "content_negation_accuracy": 1.0
+}

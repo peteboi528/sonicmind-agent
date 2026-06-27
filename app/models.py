@@ -237,6 +237,10 @@ class DialogueState(BaseModel):
     """每轮已展示给用户的歌曲摘要 [{"title":..., "artist":..., "source":..., "source_id":...}]。
     延续指令（多来几首/换一批）时用于去重，避免重复推荐同一首歌。
     """
+    shown_artists: list[dict[str, str]] = Field(default_factory=list)
+    """每轮已展示给用户的歌手摘要 [{"name":..., "source":...}]。
+    延续指令（再来一点/同类型歌手）时用于去重，避免重复返回同一批歌手。
+    """
     updated_at: str = Field(default_factory=utc_now_iso)
 
 
@@ -305,6 +309,7 @@ class AgentPlan(BaseModel):
     reasoning_summary: str = ""
     retrieval_plan: RetrievalPlan = Field(default_factory=RetrievalPlan)
     _excluded_tracks: list[dict[str, str]] = PrivateAttr(default_factory=list)
+    _excluded_artists: list[dict[str, str]] = PrivateAttr(default_factory=list)
 
     @field_validator("intent", mode="before")
     @classmethod

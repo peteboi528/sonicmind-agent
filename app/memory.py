@@ -643,6 +643,7 @@ class MemoryManager:
         mood_tags: list[str] | None = None,
         scenario_tags: list[str] | None = None,
         shown_tracks: list[dict[str, str]] | None = None,
+        shown_artists: list[dict[str, str]] | None = None,
     ) -> DialogueState:
         prev = self.get_dialogue_state(user_id)
         state = DialogueState(
@@ -655,6 +656,7 @@ class MemoryManager:
             scenario_tags=list(scenario_tags or []),
             turn_count=prev.turn_count + 1,
             shown_tracks=list(shown_tracks) if shown_tracks else [],
+            shown_artists=list(shown_artists) if shown_artists else [],
             updated_at=utc_now_iso(),
         )
         self.store.write_model("dialogue", user_id, state)

@@ -39,15 +39,20 @@ _MIX_ALLOW_TERMS = ("dj", "串烧", "慢摇", "车载", "mix", "remix set", "clu
 # query 里表示「要 track-level 歌曲」的词（决定是否强校验）。
 _TRACK_LEVEL_TERMS = ("歌", "歌曲", "单曲", "歌单", "跑步", "学习", "推荐", "playlist", "song", "track", "深夜", "安静")
 
-# 网易云用户上传的「氛围/翻唱/助眠」假歌签名：标题形如「曲名 - <氛围|男声|女声|助眠…>」。
-# 这种描述后缀（"雨爱 - R&B氛围男声"）是用户上传 mood 合辑/翻唱的固定写法，艺人栏往往是
-# 网名（小仓鼠要早睡）。官方曲目几乎不用这种后缀（官方 remix/live 不在此列），故高精度硬拒。
-# 必须在破折号之后的描述段里命中，避免误伤标题本身就含「氛围/深夜」的真歌。
+# 网易云用户上传的「氛围/翻唱/助眠/功能音乐」假歌签名。两种写法都拦：
+#   ① 标题「曲名 - <描述>」或「曲名(描述)」：描述段含 氛围/男声/钢琴版/慵懒/轻音乐…。
+#      官方曲目几乎不用这种后缀（官方 remix/live 不在此列）；须在破折号或括号之后的
+#      描述段命中，避免误伤标题本身就含「氛围/深夜」的真歌。
+#   ② 见下方 _FUNCTIONAL_ARTIST_RE：艺人栏本身就是功能音乐描述（轻音乐钢琴曲）。
 _MOOD_DESCRIPTOR_RE = re.compile(
-    r"\s[-－—]\s*\S{0,12}?(氛围|男声|女声|助眠|催眠|睡眠|八音盒|吉他版|钢琴版|加长版|"
-    r"治愈系|降噪版|纯人声|slowed|sped\s*up|\b8d\b|reverb\b|piano\s*cover|guitar\s*cover)",
+    r"(?:\s[-－—]\s*|[\(（\[]\s*)\S{0,12}?(氛围|男声|女声|助眠|催眠|睡眠|八音盒|"
+    r"吉他版|吉他曲|吉他指弹|指弹|钢琴版|钢琴曲|加长版|治愈系|降噪版|纯人声|纯音乐|"
+    r"轻音乐|慵懒|伴奏|原唱|翻唱|slowed|sped\s*up|\b8d\b|reverb\b|piano\s*cover|guitar\s*cover)",
     re.IGNORECASE,
 )
+# 艺人栏 = 功能音乐描述（非真实艺人）：「轻音乐钢琴曲」「纯音乐」「咖啡厅音乐」「助眠白噪音」。
+# 真实艺人不会拿这些词当名字，高精度。挡掉深夜/下午推荐里混进的功能/氛围音频。
+_FUNCTIONAL_ARTIST_RE = re.compile(r"(轻音乐|纯音乐|钢琴曲|八音盒|白噪音|助眠|催眠|氛围音乐|治愈音乐|咖啡厅|纯钢琴)")
 
 # ── 语义原型：embedding 不可用时整段跳过，确定可降级 ──
 QUALITY_PROTOTYPES: dict[str, list[str]] = {
@@ -192,6 +197,10 @@ def classify_candidate(track: Any, query: str = "") -> CandidateQuality:
     #     挡在 source 兜底（netease+artist=accept）之前，否则这类脏候选会被无条件放行。
     if _MOOD_DESCRIPTOR_RE.search(title):
         return CandidateQuality(status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=["mood_descriptor_title"])
+    # 2c. 艺人栏本身就是功能音乐描述（轻音乐钢琴曲/纯音乐/咖啡厅音乐…）= 功能音频，非真实艺人。
+    #     信号在艺人栏（不在标题），2b 扫不到；这里补。
+    if _FUNCTIONAL_ARTIST_RE.search(artist):
+        return CandidateQuality(status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=["functional_artist"])
     # bilibili 句子标题（含逗号的长句 vlog/新闻）。
     if source == "bilibili" and ("，" in title or "！" in title):
         return CandidateQuality(status="reject", entity_type="program", junk_score=0.95, confidence=0.85, reasons=["bilibili_sentence_title"])

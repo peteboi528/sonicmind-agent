@@ -307,3 +307,36 @@ def test_rerank_candidates_accepts_profile_signals_without_crash():
         profile_boost_artists={"Core Artist"}, profile_penalty_artists=None,
     )
     assert len(out) == 2
+
+
+# ---- 场景 vibe 微调（深夜 query 压低下午向候选等）----
+
+def test_scene_vibe_adjust_penalizes_off_vibe_in_scene_query(monkeypatch):
+    """深夜 query 下，vibe 偏离场景的候选（对比值低于阈值）被降分、排到后面。"""
+    from app.recommend import rerank as rerank_mod
+    a = _track_artist("Night Track", "Night Artist")
+    b = _track_artist("Sunny Afternoon", "Day Artist")
+    # mock scene_vibe_penalty：(fits, threshold)；a=0.8（高）、b=0.2（低，<0.5 阈值 → 降分）
+    monkeypatch.setattr(rerank_mod, "scene_vibe_penalty",
+                        lambda texts, scene: ([0.8, 0.2], 0.5) if scene == "深夜" else (None, 0.0))
+    out = rerank_mod.apply_scene_vibe_adjust([(a, _bd(0.5)), (b, _bd(0.5))], "推荐几首适合深夜的歌")
+    assert out[0][0].title == "Night Track"
+    assert out[1][0].title == "Sunny Afternoon"
+    assert out[1][1].components.get("scene_vibe_penalty") == -0.08
+
+
+def test_scene_vibe_adjust_noop_without_scene(monkeypatch):
+    """非场景 query 不启用 vibe 判别，分数不变。"""
+    from app.recommend import rerank as rerank_mod
+    t = _track_artist("X", "Y")
+    out = rerank_mod.apply_scene_vibe_adjust([(t, _bd(0.5))], "推荐几首歌")
+    assert out[0][1].score == 0.5
+
+
+def test_scene_vibe_adjust_noop_when_embeddings_unavailable(monkeypatch):
+    """embedding 不可用时安全降级，不改分（生产里模型没装也不影响推荐）。"""
+    from app.recommend import rerank as rerank_mod
+    monkeypatch.setattr(rerank_mod, "scene_vibe_penalty", lambda texts, scene: (None, 0.0))
+    t = _track_artist("X", "Y")
+    out = rerank_mod.apply_scene_vibe_adjust([(t, _bd(0.5))], "推荐几首适合深夜的歌")
+    assert out[0][1].score == 0.5

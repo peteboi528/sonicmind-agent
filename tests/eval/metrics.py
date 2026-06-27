@@ -30,11 +30,27 @@ def anti_halluc_pass(case: EvalCase, answer: AgentAnswer) -> bool:
     return all(kw not in answer.answer for kw in case.must_not_mention)
 
 
+def junk_rate(case: EvalCase, answer: AgentAnswer) -> float:
+    """禁词/脏结果泄漏率。0=完全干净，1=禁词全命中。"""
+    if not case.must_not_mention:
+        return 0.0
+    leaked = sum(1 for kw in case.must_not_mention if kw in answer.answer)
+    return leaked / len(case.must_not_mention)
+
+
 def must_mention_hit(case: EvalCase, answer: AgentAnswer) -> float:
     if not case.must_mention:
         return 1.0
     hit = sum(1 for kw in case.must_mention if kw in answer.answer)
     return hit / len(case.must_mention)
+
+
+def local_ratio(answer: AgentAnswer) -> float | None:
+    tracks = answer.recommended_tracks or []
+    if not tracks:
+        return None
+    local_n = sum(1 for track in tracks if str(getattr(track, "source", "") or "").startswith("local"))
+    return local_n / len(tracks)
 
 
 def compute_metrics(
@@ -44,13 +60,17 @@ def compute_metrics(
     diversity = None
     if answer.recommended_tracks:
         diversity = intra_list_diversity(answer.recommended_tracks)
+    ratio = local_ratio(answer)
     prompt_signature = ", ".join(
         f"{key}={value}" for key, value in sorted(answer.prompt_versions.items())
     )
     return {
         "intent_hit": intent_hit(case, answer),
         "anti_halluc_pass": anti_halluc_pass(case, answer),
+        "junk_rate": round(junk_rate(case, answer), 3),
         "must_mention_hit": round(must_mention_hit(case, answer), 3),
+        "local_ratio": round(ratio, 3) if ratio is not None else None,
+        "local_ratio_ok": (ratio <= case.max_local_ratio) if ratio is not None and case.max_local_ratio is not None else None,
         "answer_len": len(answer.answer),
         "trace_steps": len(answer.agent_trace),
         "recommended_tracks": len(answer.recommended_tracks),
@@ -75,8 +95,21 @@ def aggregate(per_case: dict[str, dict[str, Any]]) -> dict[str, Any]:
             if intent_checked else None
         ),
         "anti_halluc_rate": sum(1 for c in cases if c["anti_halluc_pass"]) / len(cases) if cases else None,
+        "avg_junk_rate": (
+            sum(c.get("junk_rate", 0.0) for c in cases) / len(cases) if cases else None
+        ),
         "avg_must_mention_hit": (
             sum(c["must_mention_hit"] for c in cases) / len(cases) if cases else None
+        ),
+        "avg_local_ratio": (
+            sum(c["local_ratio"] for c in cases if c["local_ratio"] is not None) /
+            len([c for c in cases if c["local_ratio"] is not None])
+            if any(c["local_ratio"] is not None for c in cases) else None
+        ),
+        "local_ratio_pass_rate": (
+            sum(1 for c in cases if c["local_ratio_ok"]) /
+            len([c for c in cases if c["local_ratio_ok"] is not None])
+            if any(c["local_ratio_ok"] is not None for c in cases) else None
         ),
         "avg_diversity": (
             sum(c["diversity"] for c in cases if c["diversity"] is not None) /

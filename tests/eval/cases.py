@@ -27,6 +27,8 @@ class EvalCase:
     must_not_mention: list[str] = field(default_factory=list)
     # 预期路由意图（intent_hit 回归指标用，确定性，不依赖 LLM judge）。None = 不检查。
     expected_intent: str | None = None
+    # 若设置，则要求最终推荐里 local 来源占比不得超过该值。
+    max_local_ratio: float | None = None
 
 
 EVAL_CASES: list[EvalCase] = [
@@ -154,6 +156,53 @@ EVAL_CASES: list[EvalCase] = [
             "回复是否反映了对导入/推荐步骤的处理或进度",
         ],
     ),
+    EvalCase(
+        case_id="similar_artists_continue_more",
+        description="同类歌手推荐的延续页应排除上一轮已展示歌手",
+        user_id="eval_similar_artist_user",
+        query="类似歌手再来一点",
+        setup_actions=[
+            {"type": "seed_similar_library"},
+            {"type": "chat", "query": "推荐和 Drake、Future、Molly Santana 类似的歌手"},
+        ],
+        criteria=[
+            "是否理解这是上一轮 similar_artists 的延续请求",
+            "第二轮是否给出新的相似歌手，而不是重复上一轮前排结果",
+            "推荐依据是否来自曲库标签而非凭空列名单",
+        ],
+        must_not_mention=["A$AP Rocky", "BROCKHAMPTON", "Don Toliver", "Fetty Wap"],
+    ),
+    EvalCase(
+        case_id="recommend_no_local_preference",
+        description="用户明确不要本地库时，推荐应保留约束而不是在 query rewrite 后失效",
+        user_id="eval_no_local_user",
+        query="推荐几首适合放松的歌，不要本地库里的",
+        setup_actions=[
+            {"type": "seed_local_library"},
+        ],
+        criteria=[
+            "是否保留了'不要本地库'这一约束，而不是只保留场景词",
+            "最终推荐是否主要来自线上结果而非本地库",
+            "若线上不足，是否诚实变少而不是拿本地补齐",
+        ],
+        must_not_mention=["Local Seed 1", "Local Seed 2", "Local Seed 3"],
+        max_local_ratio=0.0,
+    ),
+    EvalCase(
+        case_id="recommend_english_no_chinese",
+        description="用户要求英文歌且明确不要中文时，推荐不应漏出本地中文曲目",
+        user_id="eval_en_no_zh_user",
+        query="推荐几首适合放松的英文歌，不要中文",
+        setup_actions=[
+            {"type": "seed_mixed_language_local_library"},
+        ],
+        criteria=[
+            "是否保留了英文歌/不要中文这一语言约束",
+            "最终推荐是否没有中文歌曲漏出，尤其是不应从本地库带出中文歌",
+            "即便候选变少，也应优先诚实满足语言约束",
+        ],
+        must_not_mention=["七里香", "晴天"],
+    ),
 ]
 
 
@@ -170,6 +219,9 @@ _CASE_EXPECTED_INTENT = {
     "scenario_diversity": "recommend",
     "journey_multi_phase": "journey",
     "multi_intent_goal": "import",
+    "similar_artists_continue_more": "similar_artists",
+    "recommend_no_local_preference": "recommend",
+    "recommend_english_no_chinese": "recommend",
 }
 for _c in EVAL_CASES:
     _c.expected_intent = _CASE_EXPECTED_INTENT.get(_c.case_id)

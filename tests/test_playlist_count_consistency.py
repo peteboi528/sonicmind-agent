@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+from app.graph.nodes import _compose_deterministic_answer, _planned_arguments
+from app.models import AgentPlan
 from app.models import ExternalTrack, Playlist
 from app.tools.contracts import ToolContext
 from app.tools.handlers import _playlist
@@ -74,3 +76,33 @@ def test_playlist_hygiene_report_counts_filtering_cost():
     assert h["cleaned_count"] == 3
     assert h["removed_invalid_tracks"] == 2  # 2 条脏数据被 hygiene 剔
     assert h["raw_count"] - h["cleaned_count"] == 2
+
+
+def test_playlist_planned_arguments_omit_none_target_count():
+    """未指定数量时不要传 target_count=None，否则工具参数校验会把歌单链路打成 error。"""
+    plan = AgentPlan(intent="playlist", tools_needed=["playlist"], target_count=None)
+
+    args = _planned_arguments("playlist", "帮我做一个跑步歌单", plan, top_k=5)
+
+    assert args == {"instruction": "帮我做一个跑步歌单"}
+
+
+def test_journey_answer_mentions_phases():
+    """音乐旅程的确定性文案必须显式分阶段，避免退化成普通曲目列表。"""
+    plan = AgentPlan(intent="journey", tools_needed=["journey"])
+    text = _compose_deterministic_answer(
+        [{
+            "type": "journey",
+            "journey": {
+                "instruction": "从热身到冲刺",
+                "phases": [
+                    {"name": "热身", "goal": "轻快进入状态", "tracks": [{"title": "Warm Up"}]},
+                    {"name": "冲刺", "goal": "高能量峰值", "tracks": [{"title": "Sprint"}]},
+                ],
+            },
+        }],
+        plan,
+    )
+
+    assert "阶段 1" in text
+    assert "阶段 2" in text

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import tempfile
 
-import app.profile.service as profile_service
+import app.services.profile as profile_service
 from app.agent import AudioVisualAgent
 from app.profile.models import (
     ArtistRelation,

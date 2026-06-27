@@ -22,7 +22,7 @@ from app.profile.builder import (
     confidence_band,
 )
 from app.profile.evidence import collect_profile_evidence, detect_language
-from app.profile.service import UserProfileService, _normalize_status
+from app.services.profile import UserProfileService, _normalize_status
 from app.storage import JsonStore
 
 

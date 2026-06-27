@@ -326,6 +326,7 @@ def test_runtime_degrades_knowledge_timeout_without_error(monkeypatch):
     assert result.data["timed_out_tools"] == ["review_search"]
 
 
+@pytest.mark.network
 def test_sample_source_ranking_and_relation_extraction():
     from app.knowledge import search_sample_relations, locate_sample_sources
     from app.models import MusicEntity, SampleEvidence, TrackRef
@@ -348,6 +349,7 @@ def test_sample_source_ranking_and_relation_extraction():
     assert "Ponderosa" in rel["source_track"]["artist"]
 
 
+@pytest.mark.network
 def test_sample_stream_returns_dossier_and_source_cards(agent, monkeypatch):
     from app.models import ExternalTrack
 

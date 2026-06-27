@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from app.models import ExternalTrack
 from app.tools.contracts import ToolCall, ToolContext
-from app.tools.service import tool_runtime
+from app.services.tools import tool_runtime
 
 
 class _Library:
@@ -44,8 +44,23 @@ class _FakeAgent:
     async def search_web_music_async(self, query, top_k=5, relevance_query="", include_video_sources=False, offset=0, variants=None):
         return self.search_web_music(query, top_k, relevance_query, include_video_sources, offset, variants)
 
-    def recommend_for_query(self, user_id, goal, top_k=5, *, excluded_tracks=None, search_variants=None, seed_tracks=None):
-        self.last_rec = dict(goal=goal, excluded_tracks=excluded_tracks, search_variants=search_variants)
+    def recommend_for_query(
+        self,
+        user_id,
+        goal,
+        top_k=5,
+        *,
+        excluded_tracks=None,
+        search_variants=None,
+        seed_tracks=None,
+        search_query_override=None,
+    ):
+        self.last_rec = dict(
+            goal=goal,
+            excluded_tracks=excluded_tracks,
+            search_variants=search_variants,
+            search_query_override=search_query_override,
+        )
         return SimpleNamespace(tracks=[])
 
     def search(self, user_id, query, include_external=True, top_k=12, offset=0):
@@ -122,10 +137,11 @@ def test_web_search_applies_language_filter():
 
 def test_recommend_passes_excluded_and_variants():
     agent = _FakeAgent()
-    ctx = _ctx(agent, _plan(excluded=[{"title": "X", "source_id": "9"}], variants=["synonym"]))
+    ctx = _ctx(agent, _plan(excluded=[{"title": "X", "source_id": "9"}], variants=["synonym"], search_query="chill r&b"))
     result = _exec("recommend", {"query": "music", "top_k": 5}, ctx)
     assert agent.last_rec["excluded_tracks"] == [{"title": "X", "source_id": "9"}]
     assert agent.last_rec["search_variants"] == ["synonym"]
+    assert agent.last_rec["search_query_override"] == "chill r&b"
     assert result.status.value == "empty"
 
 

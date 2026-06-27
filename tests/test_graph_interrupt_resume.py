@@ -17,7 +17,7 @@ from app.storage import JsonStore
 from app.tools.checkpoints import ActionCheckpointStore
 from app.tools.contracts import ToolCall, ToolResult, ToolStatus
 from app.tools.registry import TOOL_REGISTRY
-from app.tools.service import checkpoint_store
+from app.services.tools import checkpoint_store
 
 
 @pytest.mark.parametrize("approved,expected_status,expected_calls", [(True, "ok", 1), (False, "cancelled", 0)])

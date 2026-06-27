@@ -21,6 +21,7 @@ from typing import Any
 
 from app.config import settings
 from app.models import Asset, RankingBreakdown, TasteProfile
+from app.recommend.scene_vibe import detect_scene_vibe, scene_vibe_penalty
 
 # 4 维个性化 Jaccard 权重（对齐 SoulTuner Graph Affinity 四维）。
 DIM_WEIGHTS = {"genre": 0.30, "mood": 0.30, "scenario": 0.25, "theme": 0.15}
@@ -195,6 +196,37 @@ def apply_profile_artist_adjust(
         if delta:
             bd.score = round(max(0.0, bd.score + delta), 4)
             bd.components[label] = round(delta, 3)
+    scored.sort(key=lambda x: x[1].score, reverse=True)
+    return scored
+
+
+# 场景 vibe 降权的阈值/幅度——集中在此，便于 P1 eval 调参。
+# 阈值由 scene_vibe_penalty 按场景给出（对比式≈0.0，正向≈0.45），这里只定幅度。
+_SCENE_VIBE_PENALTY = -0.08  # 降分幅度（小，不盖过语义/口味锚）
+
+
+def apply_scene_vibe_adjust(
+    scored: list[tuple[Any, RankingBreakdown]], query: str,
+) -> list[tuple[Any, RankingBreakdown]]:
+    """场景 vibe 调整：场景 query（深夜/下午/早晨…）下，vibe 偏离场景的候选降分。
+
+    时段场景用对比式打分（fit_scene − fit_anti_scene）：深夜 query 里偏下午向的候选（如
+    *Sunny Afternoon*）对比值为负 → 降分。正向 fit 对短歌名都挤在 0.6~0.9 高位、绝对阈值
+    分不开，对比式才真正能把「跑偏 vibe」推过阈值（P1 eval 验证）。
+    无场景识别 / embedding 不可用 → 原样返回（行为不变）。
+    """
+    scene = detect_scene_vibe(query)
+    if not scene:
+        return scored
+    texts = [_track_text(t) for t, _ in scored]
+    fits, threshold = scene_vibe_penalty(texts, scene)
+    if fits is None or len(fits) != len(scored):
+        return scored  # embedding 不可用或失配 → 不动，安全降级
+    for (_track, bd), fit in zip(scored, fits, strict=False):
+        if fit < threshold:
+            bd.score = round(max(0.0, bd.score + _SCENE_VIBE_PENALTY), 4)
+            bd.components["scene_vibe_fit"] = round(fit, 3)
+            bd.components["scene_vibe_penalty"] = _SCENE_VIBE_PENALTY
     scored.sort(key=lambda x: x[1].score, reverse=True)
     return scored
 
@@ -563,6 +595,8 @@ def rerank_candidates(
     )
     # 画像艺人微调（core/rising 加分、avoid 减分）：小幅、可选，空集时原样返回。
     scored = apply_profile_artist_adjust(scored, profile_boost_artists, profile_penalty_artists)
+    # 场景 vibe 微调（深夜 query 压低下午向候选等）：小幅、可选，无场景/embedding 不可用时原样返回。
+    scored = apply_scene_vibe_adjust(scored, query)
     if apply_mmr:
         if settings.enable_explore and ts_scores:
             return bandit_select(scored, top_k=top_k)

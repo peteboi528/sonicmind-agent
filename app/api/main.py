@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
-    from app.tools.service import checkpoint_store, trace_store
+    from app.services.tools import checkpoint_store, trace_store
 
     checkpoint_store.cleanup()
     trace_store.cleanup()
@@ -65,7 +65,7 @@ async def _lifespan(_app: FastAPI):
     finally:
         from app.llm.client import close_shared_async_client
         from app.sources.http_transport import source_transport
-        from app.tools.service import tool_runtime
+        from app.services.tools import tool_runtime
 
         if agent.graph is not None:
             await agent.graph.close()
@@ -113,7 +113,7 @@ async def _enforce_api_key(request, call_next):
 agent = AudioVisualAgent()
 
 # 用户画像服务（计划 §16.4）：复用 agent 的 store/memory，无独立状态。
-from app.profile.service import UserProfileService
+from app.services.profile import UserProfileService
 
 profile_service = UserProfileService(agent.store, agent.memory)
 
@@ -484,7 +484,7 @@ async def agent_stream(payload: ChatRequest, request: Request):
     history = [{"role": m.role, "content": m.content} for m in payload.history]
 
     async def events():
-        from app.tools.service import checkpoint_store, trace_store
+        from app.services.tools import checkpoint_store, trace_store
 
         run_id = hashlib.sha256(f"{thread_id}:{time.time_ns()}".encode()).hexdigest()[:24]
         started = time.monotonic()
@@ -516,7 +516,7 @@ async def agent_stream(payload: ChatRequest, request: Request):
 @app.post("/agent/resume")
 async def agent_resume(payload: AgentResumeRequest, request: Request):
     from app.tools.contracts import ToolCall, ToolContext
-    from app.tools.service import checkpoint_store, tool_runtime
+    from app.services.tools import checkpoint_store, tool_runtime
 
     uid = _effective_user_id(request, payload.user_id)
     resolved = checkpoint_store.resolve(payload.action_id, payload.thread_id, uid, payload.approved)

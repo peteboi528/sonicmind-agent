@@ -82,6 +82,31 @@ class TestShownTracksAccumulation:
         assert any(s.get("title") == "Old A" for s in saved)
         assert any(s.get("title") == "Old B" for s in saved)
 
+    def test_similar_artists_accumulate_shown_artists_on_continuation(self, tmp_path):
+        from app.agent import AudioVisualAgent
+        from app.graph.nodes import _persist_dialogue_state
+        from app.storage import JsonStore
+
+        agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+        prev_shown_artists = [{"name": "SZA", "source": "local_library"}]
+        plan = AgentPlan(intent="similar_artists", tools_needed=["similar_artists"])
+        state = {
+            "user_id": "u",
+            "query": "再来一点",
+            "plan": plan,
+            "results": [{
+                "type": "similar_artists",
+                "artists": [{"name": "Frank Ocean", "source": "local_library"}],
+            }],
+            "trace": [],
+            "events": [],
+            "context": {"dialogue_state": {"shown_artists": prev_shown_artists, "entities": ["The Weeknd"]}},
+        }
+        _persist_dialogue_state(agent, state)
+        saved = agent.memory.get_dialogue_state("u").shown_artists
+        assert any(item.get("name") == "SZA" for item in saved)
+        assert any(item.get("name") == "Frank Ocean" for item in saved)
+
     def test_reset_on_topic_switch(self, tmp_path):
         from app.agent import AudioVisualAgent
         from app.graph.nodes import _persist_dialogue_state

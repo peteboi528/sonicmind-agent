@@ -81,6 +81,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="根据用户的品味档案和当前需求推荐音乐。适用于：用户想要新歌推荐、根据心情/时段推荐、每日推荐。默认应先调用 web_music_search 获取真实线上候选，再用本工具排序和解释。",
         args_schema={
             "query": {"type": "string", "description": "用户的推荐请求原文，例如 '推荐适合工作时听的歌'"},
+            "search_query": {"type": "string", "description": "供搜索/召回使用的改写查询，例如从原文中提炼出的场景、实体或正向检索词"},
             "top_k": {"type": "integer", "description": "返回数量，默认 5", "default": 5},
         },
         required=("query",),

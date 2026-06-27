@@ -77,6 +77,32 @@ def test_legit_dashed_titles_not_false_positive():
         assert q.status != "reject", f"误杀真歌: {title} (got {q.status} {q.reasons})"
 
 
+def test_real_junk_from_deep_night_recommend_rejected():
+    """真实线上漏网案例（深夜推荐里混进的功能/氛围音频）：
+    ① 艺人栏本身就是功能描述「轻音乐钢琴曲」→ functional_artist（信号在艺人栏，2b 扫不到）。
+    ② 标题括号里是 mood 描述「(慵懒午后)」→ mood_descriptor_title（括号形式）。
+    旁边真正的 R&B（Alina Baraz / Yo Trane 等）不应被误杀。
+    """
+    # ① 功能艺人
+    q1 = classify_candidate(_t("慵懒的午后", "轻音乐钢琴曲"), "推荐几首适合深夜的歌")
+    assert q1.status == "reject"
+    assert "functional_artist" in q1.reasons
+
+    # ② 标题括号 mood 描述
+    q2 = classify_candidate(_t("Sunny Afternoon(慵懒午后)", "瑶啊瑶、极音阁"), "推荐几首适合深夜的歌")
+    assert q2.status == "reject"
+    assert "mood_descriptor_title" in q2.reasons
+
+    # 旁边的真 R&B 不被误伤
+    for title, artist in [
+        ("If You Let Me", "Alina Baraz"),
+        ("Sober", "Yo Trane"),
+        ("Only You", "Jesse Gold"),
+    ]:
+        q = classify_candidate(_t(title, artist), "推荐几首适合深夜的歌")
+        assert q.status == "accept", f"误杀真歌: {title} (got {q.status} {q.reasons})"
+
+
 def test_sentence_news_title_rejected():
     """句子/新闻型标题（。！？【）一律拒——车祸新闻、vlog。"""
     for title in ["女子深夜开车撞羊！【1901期】", "没想到深夜的抖音酒吧区这么炸裂，三男一女"]:

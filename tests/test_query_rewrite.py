@@ -45,6 +45,7 @@ def test_negative_constraint_rewritten_to_positive_query():
     assert "英文" in rp.search_query or "欧美" in rp.search_query
     assert "深夜" in rp.search_query
     assert rp.language_filter == "en"
+    assert rp.excluded_terms == ["中文"]
     # 历史确实进了 prompt
     assert "深夜" in stub.last_prompt
 

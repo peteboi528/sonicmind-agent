@@ -164,11 +164,21 @@ def test_stream_endpoint_emits_sse_events():
     assert '"type": "final"' in body
 
 
-def test_library_and_dislike_api():
+def test_library_and_dislike_api(monkeypatch):
+    from app.api import main as main_module
+
+    seeded = ExternalTrack(
+        external_id="api-lib-seed",
+        title="API Library Track",
+        artist="API Artist",
+        source="netease",
+        playback_url="https://music.163.com/song?id=1",
+    )
     client = TestClient(app)
 
-    chat = client.post("/agent/run", json={"user_id": "api-lib", "message": "推荐三首chill歌"})
+    chat = client.post("/agent/run", json={"user_id": "api-lib", "message": "推荐Drake的歌"})
     assert chat.status_code == 200
+    main_module.agent.library.upsert_external(seeded)
 
     library = client.get("/library/tracks?limit=5")
     assert library.status_code == 200

@@ -9,7 +9,7 @@
 - evidence.py  从 UserMemory / listening_history / ratings / taste_profile 收集证据。
 - builder.py   把证据组装成结构化画像。
 - insights.py  把结构化数据转成用户可读、带置信度的洞察。
-- service.py   API 层调用 + insight 反馈落地（reject/temporary/confirm）。
+- service      已迁至 app/services/profile.py：API 层调用 + insight 反馈落地。
 """
 
 from app.profile.models import (
@@ -23,7 +23,6 @@ from app.profile.models import (
     TasteSummary,
     UserProfileResponse,
 )
-from app.profile.service import UserProfileService
 
 __all__ = [
     "ArtistRelation",
@@ -35,5 +34,4 @@ __all__ = [
     "SoundFingerprint",
     "TasteSummary",
     "UserProfileResponse",
-    "UserProfileService",
 ]

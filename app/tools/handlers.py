@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.answer import song_card
-from app.intents import expand_content_negation, normalize_content_negation
+from app.intents import expand_content_negation, extract_content_negations, normalize_content_negation
 from app.models import ExternalTrack, ResultHygieneReport
 from app.recommend.hygiene import filter_music_tracks
 from app.tools.actions import AUX_TOOL_NAMES, execute_aux_tool
@@ -286,15 +286,21 @@ def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return _result("recommend", {"type": "recommend", "answer": answer}, f"生成 {len(answer.recommended_segments)} 个片段推荐。")
     plan = ctx.plan or {}
     retrieval = plan.get("retrieval_plan") or {}
+    search_query_override = args.get("search_query") or retrieval.get("search_query") or None
     recommendation = ctx.agent.recommend_for_query(
         ctx.user_id, args["query"], top_k=args.get("top_k", 5),
+        search_query_override=search_query_override,
         seed_tracks=_collect_tracks(ctx.prior_results),
         excluded_tracks=plan.get("_excluded_tracks") or None,
         search_variants=retrieval.get("search_variants") or None,
     )
     tracks = [item.asset for item in recommendation.tracks]
     raw = len(tracks)
-    kept = _filter_content_exclusions(tracks, retrieval.get("excluded_terms") or [])
+    hard_exclusions = list(dict.fromkeys([
+        *(retrieval.get("excluded_terms") or []),
+        *extract_content_negations(ctx.query or args["query"]),
+    ]))
+    kept = _filter_content_exclusions(tracks, hard_exclusions)
     if len(kept) != len(tracks):
         allowed = {
             (getattr(track, "external_id", "") or getattr(track, "asset_id", ""), track.title.lower())
@@ -309,6 +315,22 @@ def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         ]
         tracks = kept
     after_excl = len(tracks)
+    language_filter = (retrieval.get("language_filter") or "").strip().lower()
+    kept = _apply_language_filter(tracks, language_filter, int(args.get("top_k") or 5))
+    if len(kept) != len(tracks):
+        allowed = {
+            (getattr(track, "external_id", "") or getattr(track, "asset_id", ""), track.title.lower())
+            for track in kept
+        }
+        recommendation.tracks = [
+            item for item in recommendation.tracks
+            if (
+                getattr(item.asset, "external_id", "") or getattr(item.asset, "asset_id", ""),
+                item.asset.title.lower(),
+            ) in allowed
+        ]
+        tracks = kept
+    after_lang = len(tracks)
     # 候选质量闸门：把教程/合集/DJ串烧/节目等非歌曲实体剔出推荐结果。
     clean, gate = filter_music_tracks(tracks, ctx.query, allow_maybe=False, target_count=args.get("top_k"))
     if len(clean) != len(tracks):
@@ -328,6 +350,7 @@ def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         requested_count=int(args.get("top_k") or 0),
         raw_count=raw, cleaned_count=len(tracks),
         removed_by_exclusion=raw - after_excl,
+        removed_by_language_filter=after_excl - after_lang,
         removed_invalid_tracks=gate.rejected_count,
         rejected_examples=gate.rejected_examples, reasons=gate.reasons,
     )
@@ -766,9 +789,18 @@ def _similar_artists(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         from app.graph.tag_rules import extract_genre_from_artist
         seed_genres.update(extract_genre_from_artist(seed))
 
+    plan = ctx.plan or {}
+    excluded_names = {
+        str(item.get("name") or "").strip().lower()
+        for item in (plan.get("_excluded_artists") or [])
+        if str(item.get("name") or "").strip()
+    }
+
     ranked: list[tuple[float, str, dict[str, Any]]] = []
     for artist, profile in profiles.items():
         if ctx.agent.artist_name_matches(seed, artist):
+            continue
+        if artist.strip().lower() in excluded_names:
             continue
         # 只比较候选艺人的主导标签，避免一条误标 R&B 让 Beatles 这类宽标签艺人冲到首位。
         genres = {name for name, _ in profile["genres"].most_common(2)}

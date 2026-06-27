@@ -6,7 +6,7 @@ from app.graph.nodes import _apply_dialogue_continuation, _planned_arguments, bu
 from app.intents import match_intent_by_keywords
 from app.models import AgentPlan, ResourceTrack, RetrievalPlan
 from app.tools.contracts import ToolCall, ToolContext, ToolStatus
-from app.tools.service import tool_runtime
+from app.services.tools import tool_runtime
 
 
 class _Agent:
@@ -36,6 +36,7 @@ def test_similar_artist_continuation_inherits_previous_artist():
     previous = {
         "entities": ["The Weeknd"], "last_intent": "search",
         "last_query": "找 The Weeknd 的歌", "genre_tags": [], "mood_tags": [], "scenario_tags": [],
+        "shown_artists": [{"name": "SZA", "source": "local_library"}],
     }
     plan = AgentPlan(
         intent="similar_artists", tools_needed=["similar_artists"], online_required=False,
@@ -46,6 +47,7 @@ def test_similar_artist_continuation_inherits_previous_artist():
     assert inherited.intent == "similar_artists"
     assert inherited.retrieval_plan.entities == ["The Weeknd"]
     assert _planned_arguments("similar_artists", "推荐同类型的歌手", inherited, 5)["artist"] == "The Weeknd"
+    assert inherited._excluded_artists[0]["name"] == "SZA"
 
 
 def test_similar_artist_runtime_returns_traceable_local_artists():
@@ -58,3 +60,20 @@ def test_similar_artist_runtime_returns_traceable_local_artists():
     assert "The Weeknd" not in names
     assert names[:2] == ["Frank Ocean", "SZA"]
     assert all(artist["source"] == "local_library" for artist in result.data["artists"])
+
+
+def test_similar_artist_runtime_excludes_previously_shown_artists():
+    result = asyncio.run(tool_runtime.execute(
+        ToolCall(name="similar_artists", arguments={"artist": "The Weeknd", "top_k": 4}),
+        ToolContext(
+            thread_id="t",
+            user_id="u",
+            query="再来一点",
+            agent=_Agent(),
+            plan={"_excluded_artists": [{"name": "Frank Ocean", "source": "local_library"}]},
+        ),
+    ))
+    assert result.status == ToolStatus.OK
+    names = [artist["name"] for artist in result.data["artists"]]
+    assert "Frank Ocean" not in names
+    assert names[0] == "SZA"

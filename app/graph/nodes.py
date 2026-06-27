@@ -358,13 +358,16 @@ def _planned_arguments(name: str, query: str, plan: AgentPlan, top_k: int) -> di
     count = plan.target_count or top_k
     entity_query = _query_with_entities(query, plan)
     if handler == "recommend":
-        return {"query": entity_query, "top_k": count}
+        return {"query": query, "search_query": entity_query, "top_k": count}
     if handler == "search":
         return {"query": entity_query, "include_external": True}
     if handler == "web_music_search":
         return {"query": entity_query, "top_k": count}
     if handler == "playlist":
-        return {"instruction": entity_query, "target_count": plan.target_count}
+        args: dict[str, Any] = {"instruction": entity_query}
+        if plan.target_count is not None:
+            args["target_count"] = plan.target_count
+        return args
     if handler == "taste_experiment":
         return {"prompt": query, "total": plan.target_count or 12}
     if handler in {
@@ -446,6 +449,9 @@ def _apply_dialogue_continuation(
         prev_shown = dialogue_state.get("shown_tracks") or []
         if prev_shown:
             p._excluded_tracks = prev_shown  # type: ignore[attr-defined]
+        prev_artists = dialogue_state.get("shown_artists") or []
+        if prev_artists:
+            p._excluded_artists = prev_artists  # type: ignore[attr-defined]
         return p
 
     rp = plan.retrieval_plan
@@ -950,12 +956,13 @@ async def _run_tool_async(
         raise ValueError(f"Unknown tool: {call.name}")
     spec = get_tool_spec(handler)
     from app.tools.contracts import ToolContext
-    from app.tools.service import checkpoint_store, tool_runtime
+    from app.services.tools import checkpoint_store, tool_runtime
 
     arguments = call.arguments or _planned_arguments(handler, query, plan, top_k)
     call = call.model_copy(update={"name": handler, "arguments": arguments})
     plan_payload = plan.model_dump(mode="json")
     plan_payload["_excluded_tracks"] = getattr(plan, "_excluded_tracks", None) or []
+    plan_payload["_excluded_artists"] = getattr(plan, "_excluded_artists", None) or []
     events.append(StreamEvent(type="tool_start", content=f"调用 {handler}", payload={"tool": handler}))
     confirmation: dict[str, Any] | None = None
     runtime_result: ToolResult | None = None
@@ -1473,6 +1480,22 @@ def _merge_excluded_tracks(existing: list[dict[str, str]], new_items: list[dict[
     return merged
 
 
+def _merge_excluded_artists(existing: list[dict[str, str]], new_items: list[dict[str, str]]) -> list[dict[str, str]]:
+    merged: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in [*existing, *new_items]:
+        name = item.get("name", "").lower().strip()
+        source = item.get("source", "").strip()
+        if not name:
+            continue
+        key = (name, source)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(item)
+    return merged
+
+
 async def _llm_reflect_tracks_async(
     agent: AudioVisualAgent,
     tracks: list[Any],
@@ -1788,6 +1811,14 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         }
         for t in listed
     ]
+    shown_artists = [
+        {
+            "name": str(artist.get("name") or ""),
+            "source": str(artist.get("source") or "local_library"),
+        }
+        for artist in _similar_artists_payload(state.get("results", []))
+        if str(artist.get("name") or "").strip()
+    ]
     # 跨轮累积：延续指令时并入前轮记录（继承实体也算同一话题），否则视为新话题重置。
     prev_shown = prior_dialogue.get("shown_tracks") or []
     if is_continuation(state["query"]):
@@ -1795,6 +1826,12 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
     else:
         merged_shown = shown
     merged_shown = merged_shown[:80]  # 封顶，避免长期会话排除集无限增长
+    prev_shown_artists = prior_dialogue.get("shown_artists") or []
+    if is_continuation(state["query"]):
+        merged_shown_artists = _merge_excluded_artists(prev_shown_artists, shown_artists)
+    else:
+        merged_shown_artists = shown_artists
+    merged_shown_artists = merged_shown_artists[:80]
     agent.memory.save_dialogue_state(
         user_id,
         intent=plan.intent,
@@ -1804,6 +1841,7 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         mood_tags=mood_tags,
         scenario_tags=scenario_tags,
         shown_tracks=merged_shown,
+        shown_artists=merged_shown_artists,
     )
 
 
@@ -1860,6 +1898,7 @@ def _plan_from_query_payload(payload: QueryPlanPayload, query: str) -> AgentPlan
     intent = payload.intent
     spec = get_intent(intent)
     tags = extract_tags(query)
+    exclusions = extract_content_negations(query)
     search_query = payload.search_query.strip()
     retrieval = RetrievalPlan(
         use_local=payload.use_local,
@@ -1872,6 +1911,7 @@ def _plan_from_query_payload(payload: QueryPlanPayload, query: str) -> AgentPlan
         search_query=search_query,
         search_variants=_cap_search_variants(payload.search_variants, search_query),
         language_filter=payload.language.strip().lower(),
+        excluded_terms=exclusions,
     )
     return AgentPlan(
         intent=intent,
@@ -2218,10 +2258,10 @@ def _compose_deterministic_answer(results: list[dict[str, Any]], plan: AgentPlan
         journey = next((r["journey"] for r in results if r.get("type") == "journey"), None)
         if not journey:
             return "这轮没有生成可追溯的音乐旅程。"
-        lines = [f"音乐旅程：{journey['instruction']}"]
-        for phase in journey["phases"]:
+        lines = [f"分阶段音乐旅程：{journey['instruction']}"]
+        for idx, phase in enumerate(journey["phases"], start=1):
             titles = "、".join(f"《{t['title']}》" for t in phase["tracks"])
-            lines.append(f"- {phase['name']}：{phase['goal']}。{titles or '暂无候选'}")
+            lines.append(f"- 阶段 {idx}｜{phase['name']}：{phase['goal']}。{titles or '暂无候选'}")
         return "\n".join(lines)
     return "这轮没有拿到可交付的结构化结果。"
 

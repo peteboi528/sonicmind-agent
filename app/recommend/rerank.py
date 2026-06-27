@@ -190,9 +190,9 @@ def apply_profile_artist_adjust(
         delta = 0.0
         label = ""
         if _artist_matches(_track, penalty_n):
-            delta, label = -0.12, "profile_avoid_artist"
+            delta, label = settings.rerank_profile_avoid_delta, "profile_avoid_artist"
         elif _artist_matches(_track, boost_n):
-            delta, label = 0.06, "profile_core_artist"
+            delta, label = settings.rerank_profile_core_delta, "profile_core_artist"
         if delta:
             bd.score = round(max(0.0, bd.score + delta), 4)
             bd.components[label] = round(delta, 3)
@@ -201,8 +201,8 @@ def apply_profile_artist_adjust(
 
 
 # 场景 vibe 降权的阈值/幅度——集中在此，便于 P1 eval 调参。
-# 阈值由 scene_vibe_penalty 按场景给出（对比式≈0.0，正向≈0.45），这里只定幅度。
-_SCENE_VIBE_PENALTY = -0.08  # 降分幅度（小，不盖过语义/口味锚）
+# 阈值由 scene_vibe_penalty 按场景给出（对比式≈0.0，正向≈0.45）；幅度走
+# settings.rerank_scene_vibe_penalty（函数内读取，便于 ablation 热覆盖）。
 
 
 def apply_scene_vibe_adjust(
@@ -224,9 +224,10 @@ def apply_scene_vibe_adjust(
         return scored  # embedding 不可用或失配 → 不动，安全降级
     for (_track, bd), fit in zip(scored, fits, strict=False):
         if fit < threshold:
-            bd.score = round(max(0.0, bd.score + _SCENE_VIBE_PENALTY), 4)
+            penalty = settings.rerank_scene_vibe_penalty
+            bd.score = round(max(0.0, bd.score + penalty), 4)
             bd.components["scene_vibe_fit"] = round(fit, 3)
-            bd.components["scene_vibe_penalty"] = _SCENE_VIBE_PENALTY
+            bd.components["scene_vibe_penalty"] = penalty
     scored.sort(key=lambda x: x[1].score, reverse=True)
     return scored
 
@@ -361,7 +362,7 @@ def _language_multiplier(track: Any, lang_pref: dict[str, float] | None) -> floa
     if not lang_pref:
         return 1.0
     share = lang_pref.get(detect_language(track), 0.5)
-    return 0.85 + 0.30 * share
+    return settings.rerank_language_weight_base + settings.rerank_language_weight_span * share
 
 
 def tri_anchor_rerank(

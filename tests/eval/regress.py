@@ -205,6 +205,8 @@ def main() -> None:
                         help="允许真实外部源/embedding（默认关闭，保证离线确定）")
     parser.add_argument("--with-llm-judge", action="store_true",
                         help="有 LLM key 时启用 judge 相关性评分（默认关闭）")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VAL",
+                        help="覆盖 settings 参数做 ablation，如 --set RERANK_PROFILE_CORE_DELTA=0.08（可多次；KEY 用 env 名或属性名）")
     args = parser.parse_args()
 
     if not args.online:
@@ -212,6 +214,24 @@ def main() -> None:
     seed_random()
 
     from app.config import settings
+
+    if args.set:
+        print("ablation 参数覆盖：")
+        for spec in args.set:
+            if "=" not in spec:
+                continue
+            env_key, val = spec.split("=", 1)
+            attr = env_key.strip().lower()
+            try:
+                val_parsed: float | str = float(val)
+            except ValueError:
+                val_parsed = val
+            if not hasattr(settings, attr):
+                print(f"  ⚠️  未知 settings 属性 {attr}（跳过）")
+                continue
+            setattr(settings, attr, val_parsed)
+            print(f"  {attr} = {val_parsed}")
+        print()
 
     patches = nullcontext() if args.online else start_offline_patches()
     judge_mode = "LLM judge" if args.with_llm_judge and not settings.mock_mode else "确定性指标"

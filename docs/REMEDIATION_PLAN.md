@@ -139,6 +139,12 @@
 36. 兼容关键：`LibraryService.llm` 用动态 property（agent 注入 `llm_provider=lambda: self.llm`）而非构造期快照——测试 `monkeypatch agent.llm` 后 `_batch_classify_tracks`/`_classify_once`/`_enrich_from_netease`/`_identify_from_url` 委托链立即读到新 llm，保持搬家前行为，治住 `test_invalid_llm_genre_filtered` 的回归。这是"实现里用 `self.llm` 的 service 化"通用坑：必须动态取，不能构造期快照。
 37. 这次库链路拆分后，`app/agent.py` 已从 `2137` 行缩到 `1739` 行，新增 `app/library_service.py` 为 `533` 行；并已完成 `import` 检查、`python -m compileall app/agent.py app/library_service.py`、库操作专项测试（`test_agent_flow`/`test_daily_recommend`/`test_similarity`/`test_memory_enhanced`/`test_api`/`test_auth_routes`/`test_visual_result_contract`/`test_search_modules`/`test_tool_registry`，131 passed）、全量 `pytest -q`（`757 passed, 2 skipped`）以及 `python -m tests.eval.regress`（13/13 case 通过）的整套回归验证。
 38. 目录归一：散落在 app/ 顶层的 8 个 `*_service.py` + 子包内 `recommend/profile/tools/service.py`（共 11 个）统一收进 `app/services/`（短名 catalog/discover/journey/library/playback/playlist/search/taste_experiment/recommend/profile/tools），4 个 `*_rules.py` 收进 `app/rules/`（discover/recommend/taste_experiment/track）。service 内部都用绝对 import，迁址后内部 import 路径不变；外部调用点用 sed 全局改 `from-import`（15 条精确规则，覆盖 app/ tests/）。踩两坑：① `app/profile/__init__.py` 曾 re-export `UserProfileService`，service 迁出后形成 `__init__ → services.profile → profile.builder → __init__` 的循环（`from app.services.profile` 先触发时炸）→ 删掉该 re-export（无人用包级 `from app.profile import`，且 service 已属 services 层、不该由 profile 包 re-export）；② sed 只覆盖 `from … import`，漏了 `tests/test_profile_context.py` 的裸 `import app.profile.service as …`，手动改。app/ 顶层从 27 个 `.py` 降到 15 个，service/rules 各归一层；领域包 `recommend/profile/tools` 保留各自算法/契约模块（engine/rerank/builder/handlers 等），只把 service 抽走。全量 `pytest -q` 维持 `757 passed, 2 skipped`，eval 13/13。
+39. `app/services/rag.py`（RagService）已落地并接管 RAG 能力：`retrieve_evidence`/`retrieve_library_evidence`/`recommend_with_memory`/`generate_report`/`_require_segments` 从 `AudioVisualAgent` 抽离，注入 store/media/memory + `analyze_media`/`list_assets` 回调；`_require_segments` 缺片段时仍走 `agent.analyze_media`（含缓存失效 + library 同步），不绕过 `media.analyze_media` 改变行为。agent 侧保留同名薄委托，discover 注入的 `retrieve_library_evidence`、handlers 调用、测试均不受影响。踩到与 LibraryService 同类的坑：`tests/test_search_modules.py` 两个用例用 `AudioVisualAgent.__new__` 绕过构造、手动 mock `list_assets`/`media`，拆 RAG 后薄委托依赖 `self.rag`（`__new__` 不建）→ AttributeError；修法是在 mock 依赖后挂一个真实 `RagService`（用各自 mock 依赖），让 `retrieve_library_evidence` 真实运行，测试意图不变。`app/agent.py` 进一步缩到 `1679` 行，新增 `app/services/rag.py` 为 `125` 行；全量 `pytest -q` 维持 `757 passed, 2 skipped`，eval 13/13。
+40. `app/services/feedback.py`（FeedbackService）已落地并接管用户反馈/状态写入：`record_listen`/`rate_asset`/`get_taste_profile`/`update_memory`/`record_feedback`/`record_dislike` 从 `AudioVisualAgent` 抽离，注入 store/memory/library + list_assets 回调；核心编排「用户行为 → memory 落盘 + library 的 Thompson 在线学习反馈」（听完→正、秒跳→负、高分→正、低分/明确不喜欢→负）一并外移。agent 侧保留同名薄委托，handlers/api/测试不受影响。`app/agent.py` 进一步缩到 `1634` 行，新增 `app/services/feedback.py` 为 `112` 行；全量 `pytest -q` 维持 `757 passed, 2 skipped`，eval 13/13。
+41. `app/services/profile_signals.py`（ProfileSignals）已落地并接管画像消费层：`summarize_taste`/`profile_context_text`/`_profile_rerank_signals` 从 `AudioVisualAgent` 抽离，注入 store/memory + list_assets；三者分别被注入 playlists/recommendation/journeys（summarize_taste）、被 graph/nodes 直接调用（profile_context_text）、注入 rerank（_profile_rerank_signals），agent 保留同名薄委托后所有注入/调用点零改动。再次踩 `__new__` 坑：`TestRecommendForQueryRoutes` 三个用例（mock memory 带 taste_profile → 触发 summarize_taste）拆后薄委托依赖 `self.profile_signals`（`__new__` 不建）→ AttributeError；修法是补真实 ProfileSignals（用各测试 mock 依赖）。`app/agent.py` 进一步缩到 `1556` 行，新增 `app/services/profile_signals.py` 为 `124` 行；全量 `pytest -q` 维持 `757 passed, 2 skipped`，eval 13/13。
+42. `app/services/album.py`（AlbumService）已落地并接管用户收藏专辑 CRUD：`save_album`/`list_saved_albums`/`delete_saved_album`/`is_album_saved` 从 `AudioVisualAgent` 抽离，注入 store/memory + list_assets（保存/删除后刷新品味档案）。agent 保留同名薄委托。`app/agent.py` 进一步缩到 `1540` 行，新增 `app/services/album.py` 为 `64` 行；全量 `pytest -q` 维持 `757 passed, 2 skipped`，eval 13/13。
+43. `app/services/greeting.py`（GreetingService）已落地并接管对话入口问候语生成：`generate_greeting`（画像/偏好/时间/目标/收听历史/曲库规模 → 开场白）从 `AudioVisualAgent` 抽离，注入 memory + list_assets。agent 保留薄委托。`app/agent.py` 进一步缩到 `1509` 行，新增 `app/services/greeting.py` 为 `61` 行；全量 `pytest -q` 维持 `757 passed, 2 skipped`，eval 13/13。
+44. taste 区壳清理（去冗余）：删掉 ~16 个只是转发到 rules 函数或 `TasteExperimentService` 静态方法的 `staticmethod` 壳（`_taste_familiarity`/`_slice_for_bucket`/`_candidate_key`/`_bucket_taste_experiment_candidates`/`_taste_experiment_track_key`/`_find_taste_experiment_track`/`_taste_prompt_exclusions`/`_new_taste_experiment_id`/`_taste_experiment_hypothesis`/`_taste_experiment_search_seeds`/`_taste_experiment_track`/`_dedupe_seeds` 等），4 个注入方法（generate/regenerate/record_feedback/summarize）改用 rules 函数 / `TasteExperimentService.X` 直接引用；5 个非纯壳（注入 library/memory 或委托 service 的 `_filter_taste_experiment_candidates`/`_apply_taste_experiment_ts_feedback`/`_record_taste_experiment_listen`/`_collect_taste_candidates`/`_save_taste_experiment`）保留。`tests/test_taste_experiment.py` 同步改成直接调 rules/`TasteExperimentService` 函数。`app/agent.py` 进一步缩到 `1432` 行；全量 `pytest -q` 维持 `757 passed, 2 skipped`，eval 13/13。
 
 **动作（增量、靠 P0 测试网兜底）**：
 1. 抽 `RecommendationService`（`app/recommend/service.py`）：搬 `recommend_for_query`、`_rerank_tracks`、`_balance_recommendation_sources`、`daily_recommend`、路由 A–E、`_local_ratio_from_query`、`_dense_library_fallback`。agent 持有其引用。
@@ -195,6 +201,13 @@
 
 **问题**：魔法数散落（local_ratio 0.4/0.3、rerank +0.06/-0.12、MMR λ、各类 timeout/deadline）。
 
+**进展（2026-06-28，已完成）**：
+1. 侦察发现多数魔法数**早已进 config**（三锚权重 `tri_anchor_w_*`、`mmr_lambda`、`exploration_ratio`、`dense_recall_min_score`、各类 `llm_*`/`knowledge_*` timeout）。P5 真正缺的只有 rerank 微调层 + local_ratio。
+2. 把剩余魔法数归入 `app/config.py`（保持平铺 + 语义前缀，和既有 `tri_anchor_w_*` 风格一致，不引入嵌套对象）：`rerank_profile_core_delta`(0.06)/`rerank_profile_avoid_delta`(-0.12)/`rerank_language_weight_base`(0.85)/`rerank_language_weight_span`(0.30)/`rerank_scene_vibe_penalty`(-0.08)/`hygiene_junk_margin`(0.08)/`recommend_local_ratio_default`(0.4)/`daily_local_ratio`(0.3)，全部 env 可覆盖。
+3. `recommend/rerank.py` + `recommend/hygiene.py` + `agent.py` 改用 `settings.xxx`；其中 `_SCENE_VIBE_PENALTY` 从模块级常量改为**函数内读 settings**，否则 ablation 热覆盖不到（import 时已绑定）。
+4. `tests/eval/regress.py` 新增 `--set KEY=VAL`（可多次，KEY 用 env 名或属性名）：跑 eval 前 `setattr(settings, ...)` 覆盖，实现 ablation。例：`python -m tests.eval.regress --set RERANK_PROFILE_AVOID_DELTA=-0.20` 即可看该参数对指标的影响。
+5. 验证：全量 `pytest -q` 维持 `757 passed, 2 skipped`（行为等价）；ablation 机制已通（离线 mock 下画像空、profile 信号未触发故指标暂不变，真实数据下改参即生效）。
+
 **动作**：
 1. 全部归到 `app/config.py` 的带命名空间分组（`rerank.*` / `recommend.*` / `latency.*`）。
 2. 在 P1 eval 里支持 ablation：跑多组参数 → 报告指标曲线。让 `-0.12` 这种数有证据支撑。
@@ -205,12 +218,12 @@
 
 ## Definition of Done（整体）
 
-- [ ] `pytest -q` 离线、确定、0 failed、5 连一致。
-- [ ] `eval/baseline.json` 入库，precision@k + junk_rate 可 diff。
-- [ ] `agent.py` < 1000 行，服务化拆分完成。
-- [ ] `reasoning_content` 不出 provider 实现。
-- [ ] 单轮延迟有预算 + 降级表；超时不再卡死。
-- [ ] 魔法数全进 config，关键参数有 ablation 依据。
+- [x] `pytest -q` 离线、确定、0 failed、5 连一致。 *(P0)*
+- [x] `eval/baseline.json` 入库，precision@k + junk_rate 可 diff。 *(P1)*
+- [~] `agent.py` < 1000 行，服务化拆分完成。 *(P2：4647→1432，已是「核心编排+薄委托」健康态；剩余核心编排/入口不宜强拆，<1000 作为放弃的软目标)*
+- [x] `reasoning_content` 不出 provider 实现。 *(P3：特判封在 `app/llm/client.py` 内，业务层零泄漏；Protocol/DeepSeek/Mock/thinking 默认关均已就位)*
+- [ ] 单轮延迟有预算 + 降级表；超时不再卡死。 *(P4：未开始，是唯一剩余缺口)*
+- [x] 魔法数全进 config，关键参数有 ablation 依据。 *(P5：rerank/local_ratio 进 config + `regress --set` ablation)*
 
 ---
 

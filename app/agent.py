@@ -11,7 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from app.config import settings
+from app.services.album import AlbumService
+from app.services.greeting import GreetingService
 from app.services.catalog import CatalogService
+from app.services.feedback import FeedbackService
+from app.services.profile_signals import ProfileSignals
 from app.rules.discover import (
     _QUERY_NOISE,
     _artist_alias_keys,
@@ -90,6 +94,7 @@ from app.rules.recommend import (
     get_time_bucket_name,
 )
 from app.services.recommend import RecommendationService
+from app.services.rag import RagService
 from app.recommend.source_balance import balance_recommendation_sources
 from app.retrieval.vector_store import HybridRetriever
 from app.services.search import SearchService
@@ -189,6 +194,30 @@ class AudioVisualAgent:
             library=self.library,
             llm_provider=lambda: self.llm,
         )
+        self.rag = RagService(
+            self.store,
+            self.media,
+            self.memory,
+            analyze_media=self.analyze_media,
+            list_assets=self.list_assets,
+        )
+        self.feedback = FeedbackService(
+            self.store,
+            self.memory,
+            self.library,
+            list_assets=self.list_assets,
+        )
+        self.profile_signals = ProfileSignals(
+            self.store,
+            self.memory,
+            list_assets=self.list_assets,
+        )
+        self.albums = AlbumService(
+            self.store,
+            self.memory,
+            list_assets=self.list_assets,
+        )
+        self.greeting = GreetingService(self.memory, list_assets=self.list_assets)
         self.source: ExternalSource = _build_source()
         self.engine = RecommendEngine()
         self.daily = DailyRecommender(self.engine, self.source, self.llm)
@@ -427,7 +456,7 @@ class AudioVisualAgent:
         # 每日是纯「时间+风格+情绪」氛围推荐、无实体 → 走 route B（策划歌单 + LLM/Last.fm
         # 发现），而非 route C（歌曲关键词搜索，会把风格词搜成业余「(R&B版)」翻唱）。
         # local_ratio：默认 0.3（略压本地、让位线上发现）；每日 tab「仅线上」开关 → 0.0。
-        local_ratio = 0.0 if no_local else 0.3
+        local_ratio = 0.0 if no_local else settings.daily_local_ratio
         return self.recommend_for_query(
             user_id, goal, top_k=count, prefer_playlist=True, local_ratio=local_ratio,
         )
@@ -565,46 +594,16 @@ class AudioVisualAgent:
             logger.debug("LLM search failed; returning no unverified candidates", exc_info=True)
             return []
 
-    # --- 收听记录 ---
+    # --- 用户反馈/状态（薄委托到 FeedbackService）---
 
     def record_listen(self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None) -> UserMemory:
-        memory = self.memory.record_listen(user_id, asset_id, duration, completed, context)
-        # Thompson 在线学习反馈环：听完 → 正反馈(α+1)，秒跳 → 负反馈(β+0.5)。
-        asset = self.store.read_model("assets", asset_id, Asset)
-        if asset is not None:
-            if completed:
-                self.library.update_ts_feedback(asset, positive=True, weight=1.0)
-            elif duration and asset.duration_seconds and duration < asset.duration_seconds * 0.3:
-                self.library.update_ts_feedback(asset, positive=False, weight=0.5)
-        return memory
-
-    # --- 品味档案 ---
-
-    # --- 评分 ---
+        return self.feedback.record_listen(user_id, asset_id, duration, completed, context)
 
     def rate_asset(self, user_id: str, asset_id: str, score: float) -> UserMemory:
-        asset = self.store.read_model("assets", asset_id, Asset)
-        if asset is None:
-            raise ValueError(f"Unknown asset_id: {asset_id}")
-        memory = self.memory.record_rating(user_id, asset, score)
-        # 高分 → Thompson 正反馈，低分 → 负反馈。
-        if score >= 7.0:
-            self.library.update_ts_feedback(asset, positive=True, weight=(score - 6.0) / 4.0)
-        elif score <= 3.0:
-            self.library.update_ts_feedback(asset, positive=False, weight=(4.0 - score) / 4.0)
-        # 评分后立即刷新品味档案
-        library = [a for a in self.list_assets() if a.status == "analyzed"]
-        memory = self.memory.refresh_taste_profile(user_id, library)
-        return memory
-
-    # --- 品味档案 ---
+        return self.feedback.rate_asset(user_id, asset_id, score)
 
     def get_taste_profile(self, user_id: str) -> TasteProfile:
-        memory = self.memory.get_memory(user_id)
-        if not memory.taste_profile:
-            library = [a for a in self.list_assets() if a.status == "analyzed"]
-            memory = self.memory.refresh_taste_profile(user_id, library)
-        return memory.taste_profile or TasteProfile()
+        return self.feedback.get_taste_profile(user_id)
 
     # --- 对话 ---
 
@@ -676,73 +675,18 @@ class AudioVisualAgent:
         yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))
 
     def generate_greeting(self, user_id: str) -> str:
-        memory = self.memory.get_memory(user_id)
-        assets = self.list_assets()
-        goal = self.memory.get_active_goal(user_id)
-        parts = ["嘿，我先看了一眼你的音乐状态。"]
+        return self.greeting.generate_greeting(user_id)
 
-        if memory.taste_profile and memory.taste_profile.top_genres:
-            top_genre = memory.taste_profile.top_genres[0][0]
-            parts.append(f"你最近的品味更偏 {top_genre}。")
-        elif memory.preferences:
-            parts.append(f"我记得你提过：{memory.preferences[-1]}。")
-
-        hour = datetime.now().hour
-        if 6 <= hour < 11:
-            parts.append("现在适合先找一些轻快但不吵的真实曲目。")
-        elif 22 <= hour or hour < 2:
-            parts.append("夜深了，我会优先找更松弛、耐听的版本。")
-
-        if goal:
-            parts.append(f"上次的目标还在：{goal.goal}")
-
-        if memory.listening_history:
-            recent = memory.listening_history[-3:]
-            completed = sum(1 for item in recent if item.completed)
-            if completed >= 2:
-                parts.append("最近你完整听完的歌比较多，我会延续这个方向。")
-            elif len(recent) >= 2 and completed == 0:
-                parts.append("最近跳过比较多，我会少依赖本地库，多去线上找新候选。")
-
-        if len(assets) < 3:
-            parts.append("曲库还不多，我可以先联网找真实候选，或者导入网易云歌单再推荐。")
-        else:
-            parts.append("我会把真实线上候选放前面，本地库只当作你的口味参考。")
-
-        return " ".join(parts)
-
-    # --- 记忆 ---
+    # --- 记忆/反馈（薄委托到 FeedbackService）---
 
     def update_memory(self, request: MemoryUpdateRequest) -> tuple[UserMemory, bool]:
-        return self.memory.update_memory(request)
+        return self.feedback.update_memory(request)
 
     def record_feedback(self, request: FeedbackRequest) -> UserMemory:
-        segments = []
-        for key in self.store.list_keys("segments"):
-            segments.extend(self.store.read_models("segments", key, Segment))
-        target = next((s for s in segments if s.segment_id == request.segment_id), None)
-        if target is None:
-            raise ValueError(f"Unknown segment_id: {request.segment_id}")
-        return self.memory.record_feedback(request.user_id, target, request.accepted)
+        return self.feedback.record_feedback(request)
 
     def record_dislike(self, request: DislikeRequest) -> UserMemory:
-        self.library.add_dislike(request)
-        # 负反馈也推给 Thompson：明确不喜欢 → ts_beta 大幅上调，后续探索几乎不再选中。
-        from types import SimpleNamespace
-        self.library.update_ts_feedback(
-            SimpleNamespace(
-                title=request.title, artist=request.artist,
-                source=request.source, external_id=request.source_id, asset_id=request.source_id,
-            ),
-            positive=False, weight=3.0,
-        )
-        memory = self.memory.get_memory(request.user_id)
-        key = " - ".join(part for part in [request.title, request.artist] if part) or request.source_id or request.source
-        if key and key not in memory.dislikes:
-            memory.dislikes.append(key)
-            memory.updated_at = utc_now_iso()
-            self.store.write_model("memory", request.user_id, memory)
-        return memory
+        return self.feedback.record_dislike(request)
 
     def list_resource_tracks(self, limit: int = 100):
         return self.library_svc.list_resource_tracks(limit)
@@ -860,38 +804,16 @@ class AudioVisualAgent:
     # ── 收藏专辑（与歌单同构：collection=saved_albums，key=f"{user_id}_{album_id}"） ──
 
     def save_album(self, user_id: str, album: SavedAlbum) -> SavedAlbum:
-        self.store.write_model("saved_albums", f"{user_id}_{album.album_id}", album)
-        try:
-            self.memory.refresh_taste_profile(user_id, self.list_assets())
-        except Exception:
-            logger.debug("refresh_taste_profile failed after save_album(%s)", album.album_id, exc_info=True)
-        return album
+        return self.albums.save_album(user_id, album)
 
     def list_saved_albums(self, user_id: str) -> list[SavedAlbum]:
-        albums: list[SavedAlbum] = []
-        for key in self.store.list_keys("saved_albums"):
-            if not key.startswith(f"{user_id}_"):
-                continue
-            try:
-                a = self.store.read_model("saved_albums", key, SavedAlbum)
-            except Exception:
-                logger.warning("Skipping unreadable saved album %s (stale schema?)", key, exc_info=True)
-                continue
-            if a:
-                albums.append(a)
-        return albums
+        return self.albums.list_saved_albums(user_id)
 
     def delete_saved_album(self, user_id: str, album_id: str) -> bool:
-        deleted = self.store.delete_key("saved_albums", f"{user_id}_{album_id}")
-        if deleted:
-            try:
-                self.memory.refresh_taste_profile(user_id, self.list_assets())
-            except Exception:
-                logger.debug("refresh_taste_profile failed after delete_saved_album(%s)", album_id, exc_info=True)
-        return deleted
+        return self.albums.delete_saved_album(user_id, album_id)
 
     def is_album_saved(self, user_id: str, album_id: str) -> bool:
-        return self.store.read_model("saved_albums", f"{user_id}_{album_id}", SavedAlbum) is not None
+        return self.albums.is_album_saved(user_id, album_id)
 
     def _playlist_candidates(
         self,
@@ -940,177 +862,28 @@ class AudioVisualAgent:
     def _fallback_auto_playlists(self, user_id: str, library: list[Asset]) -> list[Playlist]:
         return self._playlist_service().fallback_auto_playlists(user_id, library)
 
-    # --- RAG（保留兼容） ---
+    # --- RAG（薄委托到 RagService）---
 
     def retrieve_evidence(self, asset_id: str, query: str, top_k: int = 5) -> list[RagEvidence]:
-        segments = self._require_segments(asset_id)
-        evidences = HybridRetriever(segments).search(query=query, top_k=top_k)
-        asset = self.store.read_model("assets", asset_id, Asset)
-        title = asset.title if asset else asset_id
-        for evidence in evidences:
-            evidence.metadata["asset_id"] = asset_id
-            evidence.metadata["asset_title"] = title
-        return evidences
+        return self.rag.retrieve_evidence(asset_id, query, top_k=top_k)
 
     def retrieve_library_evidence(self, query: str, top_k: int = 5) -> list[RagEvidence]:
-        ranked: list[RagEvidence] = []
-        for asset in self.list_assets():
-            if asset.status != "analyzed":
-                continue
-            # 全库搜索必须是只读操作。过去这里调用 retrieve_evidence，后者会在
-            # segments 缺失时自动 analyze_media，导致一次普通歌曲/歌手搜索悄悄
-            # 改写曲库指纹和 updated_at。未分析片段只是不参与 RAG，不应在查询时补写。
-            segments = self.media.get_segments(asset.asset_id)
-            if not segments:
-                continue
-            evidences = HybridRetriever(segments).search(query=query, top_k=min(3, top_k))
-            for evidence in evidences:
-                evidence.metadata["asset_id"] = asset.asset_id
-                evidence.metadata["asset_title"] = asset.title
-            ranked.extend(evidences)
-        ranked.sort(key=lambda evidence: evidence.similarity, reverse=True)
-        return ranked[:top_k]
+        return self.rag.retrieve_library_evidence(query, top_k=top_k)
 
     def recommend_with_memory(self, asset_id: str, user_id: str, goal: str, top_k: int = 3) -> AgentAnswer:
-        memory = self.memory.get_memory(user_id)
-        memory_query = self.memory.weighted_query(memory, include_artists=False)
-        evidences = self.retrieve_evidence(asset_id, f"{goal} {memory_query}".strip(), top_k=max(top_k * 2, top_k))
-        segment_map = {segment.segment_id: segment for segment in self._require_segments(asset_id)}
-        segments: list[Segment] = []
-        seen: set[str] = set()
-        for evidence in evidences:
-            if evidence.segment_id in seen:
-                continue
-            segment = segment_map.get(evidence.segment_id)
-            if segment is not None:
-                seen.add(evidence.segment_id)
-                segments.append(segment)
-        lines = [
-            f"{index}. {segment.timestamp} - {segment.scene_summary}"
-            for index, segment in enumerate(segments[:top_k], start=1)
-        ]
-        answer = "基于你的记忆和当前素材，我优先推荐这些片段：\n" + "\n".join(lines) if lines else "当前素材里没有足够明显的高匹配片段。"
-        return AgentAnswer(
-            answer=answer,
-            evidences=evidences[:top_k],
-            recommended_segments=segments[:top_k],
-            agent_trace=[
-                f"goal={goal}",
-                f"memory_query={memory_query or 'none'}",
-                f"evidence_chunks={len(evidences)}",
-            ],
-        )
+        return self.rag.recommend_with_memory(asset_id, user_id, goal, top_k=top_k)
 
     def generate_report(self, asset_id: str) -> dict[str, Any]:
-        asset = self.store.read_model("assets", asset_id, Asset)
-        if asset is None:
-            raise ValueError(f"Unknown asset_id: {asset_id}")
-        segments = self._require_segments(asset_id)
-        evidences = self.retrieve_evidence(asset_id, "high energy climax mood genre summary", top_k=4)
-        return {
-            "asset": asset.model_dump(mode="json"),
-            "summary": f"{asset.title} 已拆分为 {len(segments)} 个片段，可用于风格检索、推荐解释和相似内容分析。",
-            "top_evidences": [evidence.model_dump(mode="json") for evidence in evidences],
-            "fingerprint": {
-                "genre": asset.genre,
-                "mood": asset.mood,
-                "tempo_bpm": asset.tempo_bpm,
-                "energy_level": asset.energy_level,
-            },
-        }
+        return self.rag.generate_report(asset_id)
 
     def summarize_taste(self, user_id: str, *, include_artists: bool = True, memory: UserMemory | None = None) -> str:
-        # memory 可由调用方传入（recommend_for_query 已 get_memory 过），省掉同请求内
-        # 对同一用户的重复读盘+校验。不传则照旧自行读取，行为不变。
-        if memory is None:
-            memory = self.memory.get_memory(user_id)
-        if not memory.taste_profile:
-            library = [asset for asset in self.list_assets() if asset.status == "analyzed"]
-            memory = self.memory.refresh_taste_profile(user_id, library)
-        taste = memory.taste_profile or TasteProfile()
-        genres = [genre for genre, _ in taste.top_genres[:4]]
-        moods = [mood for mood, _ in taste.top_moods[:4]]
-        artists = [artist for artist, _ in taste.top_artists[:5]]
-        prefs = memory.preferences[-3:]
-        genre_text = "、".join(genres) if genres else "未形成稳定风格"
-        mood_text = "、".join(moods) if moods else "暂无明显偏好"
-        pref_text = "；".join(prefs) if prefs else "暂无"
-        artist_text = "、".join(artists) if artists else ""
-        parts = [
-            f"你的品味目前更偏向 {genre_text}，"
-            f"情绪上常出现 {mood_text}，"
-        ]
-        if include_artists and artist_text:
-            parts.append(f"偏好的艺人有 {artist_text}，")
-        parts.append(f"显式表达过的偏好包括 {pref_text}。")
-        return "".join(parts)
+        return self.profile_signals.summarize_taste(user_id, include_artists=include_artists, memory=memory)
 
     def profile_context_text(self, user_id: str) -> str:
-        """压缩画像仪表盘（app/profile/）为 query_plan 用的品位上下文（软参考）。
-
-        与 summarize_taste（听歌历史频次）互补：这里带场景偏好、探索风格、画像级排除/回避，
-        以及被用户「纠错」后落地的信号。空画像/异常返 ""——调用方据此跳过注入，行为不变。
-        """
-        try:
-            from app.services.profile import UserProfileService
-            ctx = UserProfileService(self.store, self.memory).get_context_for_llm(user_id)
-        except Exception:
-            logger.debug("profile_context_text 失败，跳过画像注入", exc_info=True)
-            return ""
-        parts: list[str] = []
-        if ctx.taste_summary:
-            parts.append(f"当前品味：{ctx.taste_summary}")
-        if ctx.active_scene_preference:
-            parts.append(f"常听场景：{ctx.active_scene_preference}")
-        if ctx.discovery_mode:
-            parts.append(f"探索风格：{ctx.discovery_mode}")
-        if ctx.hard_constraints:
-            parts.append(f"明确排除：{'、'.join(ctx.hard_constraints[:5])}")
-        if ctx.avoid_features:
-            parts.append(f"场景应回避：{'、'.join(ctx.avoid_features[:5])}")
-        if ctx.rejected_signals:
-            # 用户在画像页「纠错」否定过的判断——推荐应反转/回避，别再按这些推。
-            parts.append(f"用户已否定（勿据此推荐）：{'；'.join(ctx.rejected_signals[:4])}")
-        return "；".join(parts)
+        return self.profile_signals.profile_context_text(user_id)
 
     def _profile_rerank_signals(self, user_id: str) -> tuple[set[str], set[str]]:
-        """从画像仪表盘取 rerank 艺人信号：core/rising→加分，avoid→减分。
-
-        与 memory.taste_profile（听歌频次）互补——画像是可解释的艺人关系判断。
-        **纠错回流**：用户在画像页否定的艺人洞察会反转关系——
-          否定「X 是核心艺人」→ X 从加分移到减分（别再按核心推）；
-          否定「不要推 X」→ X 从减分移除（用户其实不排斥 X）。
-        空画像/异常返回空集，rerank 行为不变。
-        """
-        try:
-            from app.services.profile import UserProfileService
-            profile = UserProfileService(self.store, self.memory).get_profile(user_id)
-        except Exception:
-            logger.debug("_profile_rerank_signals 失败，降级无画像信号", exc_info=True)
-            return set(), set()
-        if getattr(profile, "is_empty", True):
-            return set(), set()
-        # 纠错回流：被否定的艺人洞察（title 含艺人名）决定关系反转方向——
-        #   core/rising 被否定 → 从加分改减分；avoid 被否定 → 不再减分。
-        # 直接按关系+是否被否定一次建表，避免先加进 penalty 又被第二轮扫描误删。
-        rejected_titles = [
-            i.title for i in profile.insights
-            if i.status == "rejected" and i.dimension == "artist"
-        ]
-
-        def _rejected(name: str) -> bool:
-            return any(name in t for t in rejected_titles)
-
-        boost: set[str] = set()
-        penalty: set[str] = set()
-        for a in profile.artists:
-            if not a.artist:
-                continue
-            if a.relation_type in {"core", "rising"}:
-                (penalty if _rejected(a.artist) else boost).add(a.artist)
-            elif a.relation_type == "avoid" and not _rejected(a.artist):
-                penalty.add(a.artist)
-        return boost, penalty
+        return self.profile_signals.profile_rerank_signals(user_id)
 
     def recommend_artist_albums(self, user_id: str, artist: str, limit: int = 12) -> list[dict[str, Any]]:
         return self._catalog_service().recommend_artist_albums(user_id, artist, limit)
@@ -1126,14 +899,14 @@ class AudioVisualAgent:
             user_id,
             prompt,
             total=total,
-            taste_experiment_hypothesis=self._taste_experiment_hypothesis,
-            taste_experiment_search_seeds=self._taste_experiment_search_seeds,
+            taste_experiment_hypothesis=TasteExperimentService.taste_experiment_hypothesis,
+            taste_experiment_search_seeds=TasteExperimentService.taste_experiment_search_seeds,
             collect_taste_candidates=self._collect_taste_candidates,
-            taste_prompt_exclusions=self._taste_prompt_exclusions,
+            taste_prompt_exclusions=TasteExperimentService.taste_prompt_exclusions,
             filter_taste_experiment_candidates=self._filter_taste_experiment_candidates,
-            bucket_taste_experiment_candidates=self._bucket_taste_experiment_candidates,
-            taste_experiment_track=self._taste_experiment_track,
-            new_taste_experiment_id=self._new_taste_experiment_id,
+            bucket_taste_experiment_candidates=bucket_taste_experiment_candidates,
+            taste_experiment_track=TasteExperimentService.taste_experiment_track,
+            new_taste_experiment_id=TasteExperimentService.new_taste_experiment_id,
             save_taste_experiment=self._save_taste_experiment,
         )
 
@@ -1145,31 +918,20 @@ class AudioVisualAgent:
     ) -> list[tuple[Any, dict[str, float], str, float]]:
         return self._taste_experiment_service().collect_taste_candidates(user_id, seeds, total)
 
-    @staticmethod
-    def _taste_prompt_exclusions(prompt: str) -> list[str]:
-        return TasteExperimentService.taste_prompt_exclusions(prompt)
-
     def regenerate_taste_experiment_bucket(self, user_id: str, experiment_id: str, bucket: str) -> TasteExperiment:
         return self._taste_experiment_service().regenerate_taste_experiment_bucket(
             user_id,
             experiment_id,
             bucket,
-            taste_experiment_seeds_for_bucket=self._taste_experiment_seeds_for_bucket,
+            taste_experiment_seeds_for_bucket=TasteExperimentService.taste_experiment_seeds_for_bucket,
             collect_taste_candidates=self._collect_taste_candidates,
             filter_taste_experiment_candidates=self._filter_taste_experiment_candidates,
-            taste_experiment_track_key=self._taste_experiment_track_key,
-            candidate_key=self._candidate_key,
-            taste_familiarity=self._taste_familiarity,
-            slice_for_bucket=self._slice_for_bucket,
-            taste_experiment_track=self._taste_experiment_track,
+            taste_experiment_track_key=taste_experiment_track_key,
+            candidate_key=candidate_key,
+            taste_familiarity=taste_familiarity,
+            slice_for_bucket=slice_for_bucket,
+            taste_experiment_track=TasteExperimentService.taste_experiment_track,
         )
-
-    def _taste_experiment_seeds_for_bucket(self, memory: UserMemory, prompt: str, bucket: str) -> list[str]:
-        return TasteExperimentService.taste_experiment_seeds_for_bucket(memory, prompt, bucket)
-
-    @staticmethod
-    def _dedupe_seeds(seeds: list[str]) -> list[str]:
-        return TasteExperimentService.dedupe_seeds(seeds)
 
     def list_taste_experiments(self, user_id: str) -> list[TasteExperiment]:
         return self._taste_experiment_service().list_taste_experiments(user_id)
@@ -1183,32 +945,22 @@ class AudioVisualAgent:
     def record_taste_experiment_feedback(self, request: TasteExperimentFeedbackRequest) -> TasteExperiment:
         return self._taste_experiment_service().record_taste_experiment_feedback(
             request,
-            find_taste_experiment_track=self._find_taste_experiment_track,
+            find_taste_experiment_track=find_taste_experiment_track,
             apply_taste_experiment_ts_feedback=self._apply_taste_experiment_ts_feedback,
             record_taste_experiment_listen=self._record_taste_experiment_listen,
-            taste_experiment_feedback_count=self._taste_experiment_feedback_count,
+            taste_experiment_feedback_count=taste_experiment_feedback_count,
         )
 
     def summarize_taste_experiment(self, user_id: str, experiment_id: str) -> TasteExperimentReport:
         return self._taste_experiment_service().summarize_taste_experiment(
             user_id,
             experiment_id,
-            taste_experiment_bucket_stats=self._taste_experiment_bucket_stats,
-            bucket_label=self._bucket_label,
+            taste_experiment_bucket_stats=taste_experiment_bucket_stats,
+            bucket_label=bucket_label,
         )
 
     def _save_taste_experiment(self, experiment: TasteExperiment) -> None:
         self._taste_experiment_service().save_taste_experiment(experiment)
-
-    @staticmethod
-    def _new_taste_experiment_id(user_id: str, prompt: str) -> str:
-        return TasteExperimentService.new_taste_experiment_id(user_id, prompt)
-
-    def _taste_experiment_hypothesis(self, memory: UserMemory) -> str:
-        return TasteExperimentService.taste_experiment_hypothesis(memory)
-
-    def _taste_experiment_search_seeds(self, memory: UserMemory, prompt: str) -> list[str]:
-        return TasteExperimentService.taste_experiment_search_seeds(memory, prompt)
 
     def _filter_taste_experiment_candidates(
         self,
@@ -1221,53 +973,8 @@ class AudioVisualAgent:
             user_id=user_id,
             candidates=candidates,
             exclusion_rules=exclusion_rules,
-            is_quality_track=self._is_taste_experiment_quality_track,
+            is_quality_track=_is_recommendation_quality_track,
         )
-
-    @staticmethod
-    def _is_taste_experiment_quality_track(track: Any) -> bool:
-        """Taste Lab 候选质量门槛：挡掉明显不像正式歌曲的搜索噪声。"""
-        return _is_recommendation_quality_track(track)
-
-    def _bucket_taste_experiment_candidates(
-        self,
-        candidates: list[tuple[Any, dict[str, float], str, float]],
-        per_bucket: int,
-    ) -> dict[str, list[tuple[Any, dict[str, float], str, float]]]:
-        return bucket_taste_experiment_candidates(candidates, per_bucket)
-
-    @staticmethod
-    def _taste_familiarity(item: tuple[Any, dict[str, float], str, float]) -> float:
-        return taste_familiarity(item)
-
-    @staticmethod
-    def _slice_for_bucket(
-        ranked: list[tuple[Any, dict[str, float], str, float]],
-        bucket: str,
-        per_bucket: int,
-    ) -> list[tuple[Any, dict[str, float], str, float]]:
-        return slice_for_bucket(ranked, bucket, per_bucket)
-
-    @staticmethod
-    def _candidate_key(item: tuple[Any, dict[str, float], str, float]) -> str:
-        return candidate_key(item)
-
-    @staticmethod
-    def _taste_experiment_track(
-        track: Any,
-        bucket: str,
-        components: dict[str, float],
-        reason: str,
-        score: float,
-    ) -> TasteExperimentTrack:
-        return TasteExperimentService.taste_experiment_track(track, bucket, components, reason, score)
-
-    @staticmethod
-    def _taste_experiment_track_key(item: TasteExperimentTrack) -> str:
-        return taste_experiment_track_key(item)
-
-    def _find_taste_experiment_track(self, experiment: TasteExperiment, track_key: str) -> TasteExperimentTrack | None:
-        return find_taste_experiment_track(experiment, track_key)
 
     def _apply_taste_experiment_ts_feedback(self, item: TasteExperimentTrack, signal: str, score: float | None) -> None:
         apply_taste_experiment_ts_feedback(
@@ -1295,17 +1002,6 @@ class AudioVisualAgent:
         except Exception:
             logger.debug("taste experiment listen record failed", exc_info=True)
 
-    @staticmethod
-    def _taste_experiment_feedback_count(experiment: TasteExperiment) -> int:
-        return taste_experiment_feedback_count(experiment)
-
-    def _taste_experiment_bucket_stats(self, experiment: TasteExperiment) -> dict[str, dict[str, float | int]]:
-        return taste_experiment_bucket_stats(experiment)
-
-    @staticmethod
-    def _bucket_label(bucket: str) -> str:
-        return bucket_label(bucket)
-
     def recommend_for_query(
         self,
         user_id: str,
@@ -1316,7 +1012,7 @@ class AudioVisualAgent:
         search_variants: list[str] | None = None,
         seed_tracks: list[Asset | ExternalTrack] | None = None,
         prefer_playlist: bool = False,
-        local_ratio: float = 0.4,
+        local_ratio: float = settings.recommend_local_ratio_default,
         search_query_override: str | None = None,
     ) -> DailyRecommendation:
         self._apply_netease_cookie(user_id)
@@ -1510,7 +1206,7 @@ class AudioVisualAgent:
     def _balance_recommendation_sources(
         ranked: list[tuple[Asset | ExternalTrack, Any]],
         top_k: int,
-        local_ratio: float = 0.4,
+        local_ratio: float = settings.recommend_local_ratio_default,
     ) -> list[tuple[Asset | ExternalTrack, Any]]:
         """Thin wrapper so source balancing can move out of the agent incrementally."""
         return balance_recommendation_sources(
@@ -1731,9 +1427,6 @@ class AudioVisualAgent:
             return fallback
 
     def _require_segments(self, asset_id: str) -> list[Segment]:
-        segments = self.media.get_segments(asset_id)
-        if not segments:
-            _, segments = self.analyze_media(asset_id)
-        return segments
+        return self.rag._require_segments(asset_id)
 # 向后兼容别名
 CineSonicAgent = AudioVisualAgent

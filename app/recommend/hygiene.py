@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.retrieval.embeddings import embeddings_available, semantic_scores
 
 # ── 规则层：高精度拦截明显垃圾 ──────────────────────────────────────────
@@ -226,7 +227,7 @@ def classify_candidate(track: Any, query: str = "") -> CandidateQuality:
         best_junk_label, best_junk_score = ("", 0.0)
         if junk:
             best_junk_label, best_junk_score = max(junk.items(), key=lambda kv: kv[1])
-        semantic_junk = best_junk_score > track_score + 0.08
+        semantic_junk = best_junk_score > track_score + settings.hygiene_junk_margin
         if semantic_junk and source in {"bilibili", "youtube"}:
             return CandidateQuality(status="reject", entity_type=best_junk_label or "unknown", track_score=track_score, junk_score=best_junk_score, confidence=0.7, reasons=[f"semantic_junk:{best_junk_label}"])
         # 用户明确要 mix 时，语义判 dj_mix 降为 maybe（出口 allow_maybe=True 时可入）。

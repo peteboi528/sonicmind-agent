@@ -97,6 +97,18 @@ class Settings:
         self.tri_anchor_w_collaborative: float = float(os.getenv("TRI_ANCHOR_W_COLLABORATIVE", "0.20"))
         # MMR 多样性重排：λ 越大越偏相关性，越小越偏多样性。
         self.mmr_lambda: float = float(os.getenv("MMR_LAMBDA", "0.7"))
+        # rerank 微调魔法数（量级远小于相关性差异；进 config 便于 P1 eval 做 ablation）。
+        # profile 艺人关系：core/rising 加分、avoid 减分；语言加权 multiplier = base + span*share；
+        # 场景 vibe 降分幅度；hygiene 语义 junk 判定余量。
+        self.rerank_profile_core_delta: float = float(os.getenv("RERANK_PROFILE_CORE_DELTA", "0.06"))
+        self.rerank_profile_avoid_delta: float = float(os.getenv("RERANK_PROFILE_AVOID_DELTA", "-0.12"))
+        self.rerank_language_weight_base: float = float(os.getenv("RERANK_LANGUAGE_WEIGHT_BASE", "0.85"))
+        self.rerank_language_weight_span: float = float(os.getenv("RERANK_LANGUAGE_WEIGHT_SPAN", "0.30"))
+        self.rerank_scene_vibe_penalty: float = float(os.getenv("RERANK_SCENE_VIBE_PENALTY", "-0.08"))
+        self.hygiene_junk_margin: float = float(os.getenv("HYGIENE_JUNK_MARGIN", "0.08"))
+        # recommend 本地占比：默认（exact/anchor 路由）、每日推荐（略压本地让位线上发现）。
+        self.recommend_local_ratio_default: float = float(os.getenv("RECOMMEND_LOCAL_RATIO_DEFAULT", "0.4"))
+        self.daily_local_ratio: float = float(os.getenv("DAILY_LOCAL_RATIO", "0.3"))
         # Thompson Sampling 探索：尾部候选中用于探索的比例。
         self.exploration_ratio: float = float(os.getenv("EXPLORATION_RATIO", "0.2"))
         self.enable_explore: bool = os.getenv("ENABLE_EXPLORE", "true").lower() == "true"

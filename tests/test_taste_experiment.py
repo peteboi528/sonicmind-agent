@@ -8,6 +8,12 @@ from app.models import (
     TasteExperimentTrack,
     TrackRef,
 )
+from app.rules.taste_experiment import (
+    bucket_taste_experiment_candidates,
+    taste_experiment_track_key,
+    taste_familiarity,
+)
+from app.services.taste_experiment import TasteExperimentService
 from app.storage import JsonStore
 
 
@@ -35,7 +41,7 @@ def test_taste_experiment_feedback_and_report(agent):
         req = TasteExperimentFeedbackRequest(
             user_id="feedback-user",
             experiment_id=exp.experiment_id,
-            track_key=agent._taste_experiment_track_key(item),
+            track_key=taste_experiment_track_key(item),
             signal=signal,
         )
         exp = agent.record_taste_experiment_feedback(req)
@@ -82,12 +88,12 @@ def test_bucketing_splits_by_familiarity_into_three_even_buckets(agent):
         _cand(0.5, 0.3), _cand(0.4, 0.2),
         _cand(0.2, 0.1), _cand(0.1, 0.0),
     ]
-    buckets = agent._bucket_taste_experiment_candidates(candidates, per_bucket=2)
+    buckets = bucket_taste_experiment_candidates(candidates, 2)
     assert len(buckets["safe"]) == 2
     assert len(buckets["stretch"]) == 2
     assert len(buckets["bold"]) == 2
-    safe_fam = agent._taste_familiarity(buckets["safe"][0])
-    bold_fam = agent._taste_familiarity(buckets["bold"][0])
+    safe_fam = taste_familiarity(buckets["safe"][0])
+    bold_fam = taste_familiarity(buckets["bold"][0])
     assert safe_fam > bold_fam
 
 
@@ -96,14 +102,14 @@ def test_bucketing_refuses_fake_labels_when_scores_are_indistinguishable(agent):
         _cand(0.05, 0.05), _cand(0.04, 0.05), _cand(0.04, 0.04),
         _cand(0.03, 0.04), _cand(0.03, 0.03), _cand(0.02, 0.03),
     ]
-    buckets = agent._bucket_taste_experiment_candidates(candidates, per_bucket=2)
+    buckets = bucket_taste_experiment_candidates(candidates, 2)
     assert buckets["safe"] == []
     assert buckets["bold"] == []
     assert len(buckets["stretch"]) == 6
 
 
 def test_prompt_negative_constraints_become_hard_rules(agent):
-    rules = agent._taste_prompt_exclusions("推荐点不一样的，别太吵，不要 Type Beat")
+    rules = TasteExperimentService.taste_prompt_exclusions("推荐点不一样的，别太吵，不要 Type Beat")
     assert "激昂" in rules
     assert "type beat" in rules
 

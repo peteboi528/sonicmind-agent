@@ -704,6 +704,11 @@ def test_library_evidence_search_does_not_analyze_or_write_missing_segments():
     agent.media = MagicMock()
     agent.media.get_segments.return_value = []
     agent.analyze_media = MagicMock()
+    from app.services.rag import RagService
+    agent.rag = RagService(
+        MagicMock(), agent.media, MagicMock(),
+        analyze_media=agent.analyze_media, list_assets=agent.list_assets,
+    )
 
     assert agent.retrieve_library_evidence("专注", top_k=5) == []
     agent.media.get_segments.assert_called_once_with("readonly")
@@ -736,6 +741,8 @@ class TestRecommendForQueryRoutes:
         agent.library = mock_library
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])  # 不走 store
+        from app.services.profile_signals import ProfileSignals
+        agent.profile_signals = ProfileSignals(MagicMock(), agent.memory, list_assets=agent.list_assets)
 
         # search_web_music 已被 conftest mock → 固定返回 3 首
         result = agent.recommend_for_query("user1", "Drake 的歌", top_k=5)
@@ -764,6 +771,8 @@ class TestRecommendForQueryRoutes:
         agent.library = mock_library
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])
+        from app.services.profile_signals import ProfileSignals
+        agent.profile_signals = ProfileSignals(MagicMock(), agent.memory, list_assets=agent.list_assets)
 
         seen_offsets: list[int] = []
 
@@ -910,6 +919,8 @@ class TestRecommendForQueryRoutes:
         agent.library = mock_library
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])  # 不走 store
+        from app.services.profile_signals import ProfileSignals
+        agent.profile_signals = ProfileSignals(MagicMock(), agent.memory, list_assets=agent.list_assets)
 
         result = agent.recommend_for_query("user1", "深夜 慵懒 律动", top_k=5)
 
@@ -1026,6 +1037,11 @@ class TestSearchAbstractFallback:
         agent.library = mock_library
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])
+        from app.services.rag import RagService
+        agent.rag = RagService(
+            MagicMock(), MagicMock(), agent.memory,
+            analyze_media=MagicMock(), list_assets=agent.list_assets,
+        )
 
         # 字面 netease 搜空（"痛苦"没有同名歌曲）
         agent.search_web_music = lambda query, top_k=5, relevance_query="", offset=0, **_: []

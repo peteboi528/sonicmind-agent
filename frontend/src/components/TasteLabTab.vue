@@ -4,7 +4,7 @@ import { api } from "../api.js";
 import { store } from "../store.js";
 import SongCard from "./SongCard.vue";
 
-const prompt = ref("推荐点不一样的，做个品味实验");
+const prompt = ref("带我听点库里没有的新东西");
 const loading = ref(false);
 const historyLoading = ref(false);
 const experiments = ref([]);
@@ -83,21 +83,21 @@ async function loadExperiments() {
     experiments.value = data.experiments || [];
     if (!current.value && experiments.value.length) current.value = experiments.value[experiments.value.length - 1];
   } catch {
-    showToast("实验历史加载失败");
+    showToast("探索历史加载失败");
   } finally {
     historyLoading.value = false;
   }
 }
 
 async function generate() {
-  const text = prompt.value.trim() || "探索我的口味";
+  const text = prompt.value.trim() || "带我听点库里没有的新东西";
   loading.value = true;
   try {
-    current.value = await api.generateTasteExperiment(store.userId, text, 12);
+    current.value = await api.generateTasteExperiment(store.userId, text, 12, true);
     await loadExperiments();
-    showToast("已生成新的品味实验");
+    showToast("已为你找来一批库外新歌");
   } catch {
-    showToast("实验生成失败，请稍后再试");
+    showToast("探索失败，请稍后再试");
   } finally {
     loading.value = false;
   }
@@ -133,7 +133,7 @@ async function buildReport() {
   try {
     const report = await api.tasteExperimentReport(store.userId, current.value.experiment_id);
     current.value = { ...current.value, report, result_summary: report.summary };
-    showToast("实验报告已更新");
+    showToast("探索报告已更新");
     await loadExperiments();
   } catch {
     showToast("报告生成失败");
@@ -172,7 +172,7 @@ async function deleteExperiment(exp, ev) {
     if (current.value?.experiment_id === exp.experiment_id) {
       current.value = experiments.value.length ? experiments.value[experiments.value.length - 1] : null;
     }
-    showToast("已删除该实验");
+    showToast("已删除该探索");
   } catch {
     showToast("删除失败");
   } finally {
@@ -187,28 +187,28 @@ onMounted(loadExperiments);
   <div class="taste-lab">
     <div class="lab-head">
       <div>
-        <p class="eyebrow">Taste Lab</p>
-        <h1>品味实验室</h1>
-        <p class="subtitle">用安全区、轻微越界和大胆探索三档推荐，验证你真正喜欢什么。</p>
+        <p class="eyebrow">Explore</p>
+        <h1>探索</h1>
+        <p class="subtitle">从你曲库之外拉来新歌、新歌手，按安全区 / 轻微越界 / 大胆探索三档铺开，帮你找到下一个喜欢。</p>
       </div>
       <div class="lab-stats">
-        <span>{{ experiments.length }} 次实验</span>
-        <strong>{{ activeTracks }} 首候选</strong>
+        <span>{{ experiments.length }} 次探索</span>
+        <strong>{{ activeTracks }} 首库外候选</strong>
       </div>
     </div>
 
     <section class="how-to">
       <details>
         <summary>
-          <span class="ht-icon">💡</span>
-          怎么用品味实验室？
+          <span class="ht-icon">🧭</span>
+          探索页怎么用？
           <span class="ht-hint">（点开看说明）</span>
         </summary>
         <div class="ht-body">
           <ol>
-            <li><b>三档候选</b>：<em class="c-safe">安全区</em>＝你大概率喜欢；<em class="c-stretch">轻微越界</em>＝相邻的新风格；<em class="c-bold">大胆探索</em>＝明显越界，但已避开你不喜欢的。</li>
-            <li><b>听一首、点一下</b>：每首歌告诉系统你的真实反应——<b>听完 / 喜欢 / 跳过</b>。觉得这档放错了就点 <b>太稳</b>（无聊）或 <b>太远</b>（太怪）。</li>
-            <li><b>攒够反馈 → 生成报告</b>：系统会算出哪一档你最买账，并给出下一轮该往哪探索。不满意某一档可以单独<b>重做</b>。</li>
+            <li><b>全是库外新发现</b>：这里只拉你曲库里<b>没有的</b>新歌新歌手，听过的也会自动跳过——专门用来扩边界，不重复推你已有的。</li>
+            <li><b>三档由近到远</b>：<em class="c-safe">安全区</em>＝贴近你口味的库外歌；<em class="c-stretch">轻微越界</em>＝相邻的新风格；<em class="c-bold">大胆探索</em>＝明显越界，但已避开你不喜欢的。</li>
+            <li><b>听一首、点一下</b>：每首歌告诉系统你的真实反应——<b>听完 / 喜欢 / 跳过</b>。喜欢的可以直接收藏入库。觉得这档放错了就点 <b>太稳</b>（无聊）或 <b>太远</b>（太怪）。</li>
           </ol>
           <p class="ht-legend">
             每首歌下方的
@@ -223,10 +223,10 @@ onMounted(loadExperiments);
 
     <section class="control-row">
       <div class="generator">
-        <input v-model="prompt" type="text" placeholder="例如：推荐点不一样的，别太吵" @keydown.enter="generate" />
+        <input v-model="prompt" type="text" placeholder="例如：带我听点库里没有的新东西，别太吵" @keydown.enter="generate" />
         <button class="primary-btn" :disabled="loading" @click="generate">
-          <svg v-if="!loading" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-          <span>{{ loading ? "生成中" : "生成实验" }}</span>
+          <svg v-if="!loading" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <span>{{ loading ? "探索中" : "开始探索" }}</span>
         </button>
       </div>
       <button class="ghost-btn" :disabled="!current || reportLoading" @click="buildReport">
@@ -239,7 +239,7 @@ onMounted(loadExperiments);
 
     <section v-if="current" class="exp-toolbar">
       <span class="status-badge" :class="current.status">{{ statusLabel(current.status) }}</span>
-      <span class="exp-prompt" :title="current.prompt">{{ current.prompt || "品味实验" }}</span>
+      <span class="exp-prompt" :title="current.prompt">{{ current.prompt || "库外探索" }}</span>
       <button class="del-btn" :disabled="deleting" @click="deleteExperiment(current)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
         <span>{{ deleting ? "删除中" : "删除本轮" }}</span>
@@ -306,7 +306,7 @@ onMounted(loadExperiments);
     </section>
 
     <section v-if="current?.report" class="report">
-      <h2>实验报告</h2>
+      <h2>探索报告</h2>
       <p>{{ current.report.summary }}</p>
       <div class="report-grid">
         <div v-for="(stats, name) in current.report.bucket_stats" :key="name" class="report-card">
@@ -331,15 +331,15 @@ onMounted(loadExperiments);
       >
         <button class="history-select" @click="selectExperiment(exp)">
           <span>{{ statusLabel(exp.status) }}</span>
-          <strong>{{ exp.prompt || "品味实验" }}</strong>
+          <strong>{{ exp.prompt || "库外探索" }}</strong>
         </button>
-        <button class="history-del" title="删除这个实验" @click="deleteExperiment(exp, $event)">✕</button>
+        <button class="history-del" title="删除这次探索" @click="deleteExperiment(exp, $event)">✕</button>
       </div>
       <span v-if="historyLoading" class="history-loading">加载中</span>
     </aside>
 
     <div v-if="!current && !historyLoading" class="empty-state">
-      <p>还没有实验。先生成一组候选，听几首以后就能看到口味边界。</p>
+      <p>还没有探索记录。点「开始探索」，我去你曲库之外找一批新歌新歌手回来。</p>
     </div>
   </div>
 </template>

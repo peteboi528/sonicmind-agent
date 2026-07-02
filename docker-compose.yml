@@ -1,0 +1,21 @@
+services:
+  musicagent:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      # 数据持久化：曲库/记忆/歌单/Cookie 全存这里，重建容器不丢
+      - ./data/store:/app/data/store
+    env_file:
+      - .env
+    environment:
+      # 容器内路径覆盖 .env 里的本地绝对路径
+      STORE_ROOT: /app/data/store
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health',timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3

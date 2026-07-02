@@ -1,10 +1,26 @@
 """Web 前端路由 测试。"""
 from __future__ import annotations
 
+import io
+import uuid
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.api.main import app
+from app.api.main import agent, app
+from app.config import settings
+from app.models import Asset
+from app.services.cover_recognizer import CoverRecognition
+
+
+def _tiny_png(size=(8, 8), color=(255, 128, 0)) -> bytes:
+    """Pillow 现造小 PNG，供封面上传测试用。"""
+    from PIL import Image
+
+    img = Image.new("RGB", size, color)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 @pytest.fixture
@@ -67,6 +83,30 @@ class TestWebRoutes:
         assert resp.status_code == 200
 
     @pytest.mark.anyio
+    async def test_playback_audio_does_not_persist_asset(self, client, monkeypatch):
+        """播放 ≠ 入库：playback 成功只回一个逻辑 asset_id 供收听采集，不能把歌写进库。"""
+        monkeypatch.setattr(agent, "get_audio_url", lambda *_args, **_kwargs: "https://cdn.example.com/test.mp3")
+        source_id = f"manual-{uuid.uuid4().hex[:10]}"
+        resp = await client.post("/api/playback/audio", json={
+            "track": {
+                "title": "播放测试歌",
+                "artist": "测试歌手",
+                "source": "netease",
+                "source_id": source_id,
+                "cover_url": "https://img.example.com/cover.jpg",
+            },
+            "user_id": "test_user",
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["reason"] == "ok"
+        assert data["asset_id"]  # 有逻辑 id 给前端做 listen keying
+
+        # 但库里不该有这条——播放没入库
+        asset = agent.store.read_model("assets", data["asset_id"], Asset)
+        assert asset is None
+
+    @pytest.mark.anyio
     async def test_playback_audio_returns_reason(self, client):
         """无 URL 时返回结构化原因，便于前端区分提示。"""
         resp = await client.post("/api/playback/audio", json={
@@ -87,6 +127,78 @@ class TestWebRoutes:
         data = resp.json()
         # 拿到流则 ok，否则应提示需要 VIP/登录
         assert data["reason"] in {"ok", "vip_required"}
+
+
+class TestIdentifyAlbum:
+    """上传专辑封面识别端点（multipart）。recognize 全程 mock，离线。"""
+
+    @pytest.mark.anyio
+    async def test_identify_ok_returns_query_and_thumbnail(self, client, monkeypatch):
+        async def fake_recognize(_b, _mime):  # noqa: ARG001
+            return CoverRecognition(album="Blonde", artist="Frank Ocean", confidence=0.92, method="vision")
+
+        monkeypatch.setattr("app.api.web_routes.recognize_album_cover", fake_recognize)
+        monkeypatch.setattr("app.api.web_routes.build_thumbnail_data_url", lambda _b: "data:image/jpeg;base64,AAAA")
+
+        resp = await client.post(
+            "/api/identify-album",
+            files={"file": ("cover.png", _tiny_png(), "image/png")},
+            data={"user_id": "u1"},
+        )
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["recognized"]["album"] == "Blonde"
+        assert d["recognized"]["artist"] == "Frank Ocean"
+        # 结构化多行 query（album\nBlonde\nFrank Ocean\n解读这张专辑），可被 resolve_music_entities 解析
+        assert d["query"].startswith("album\n") and "Blonde" in d["query"]
+        assert d["thumbnail_url"].startswith("data:image/")
+        assert d["user_id"] == "u1"
+
+    @pytest.mark.anyio
+    async def test_identify_none_query_is_null(self, client, monkeypatch):
+        async def fake_recognize(_b, _mime):  # noqa: ARG001
+            return CoverRecognition(method="none", note="没认出")
+
+        monkeypatch.setattr("app.api.web_routes.recognize_album_cover", fake_recognize)
+        monkeypatch.setattr("app.api.web_routes.build_thumbnail_data_url", lambda _b: "data:image/jpeg;base64,A")
+
+        resp = await client.post(
+            "/api/identify-album",
+            files={"file": ("cover.png", _tiny_png(), "image/png")},
+            data={"user_id": "u"},
+        )
+        d = resp.json()
+        assert d["query"] is None
+        assert d["recognized"]["method"] == "none"
+
+    @pytest.mark.anyio
+    async def test_identify_415_wrong_type(self, client):
+        resp = await client.post(
+            "/api/identify-album",
+            files={"file": ("x.gif", b"abc", "image/gif")},
+            data={"user_id": "u"},
+        )
+        assert resp.status_code == 415
+
+    @pytest.mark.anyio
+    async def test_identify_400_empty_file(self, client, monkeypatch):
+        # 类型合法但内容为空 → 400（在校验读取之后）
+        resp = await client.post(
+            "/api/identify-album",
+            files={"file": ("empty.png", b"", "image/png")},
+            data={"user_id": "u"},
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.anyio
+    async def test_identify_413_too_large(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "album_cover_max_bytes", 8)
+        resp = await client.post(
+            "/api/identify-album",
+            files={"file": ("big.png", b"0123456789abcdef", "image/png")},
+            data={"user_id": "u"},
+        )
+        assert resp.status_code == 413
 
 
 class TestBotRoutes:

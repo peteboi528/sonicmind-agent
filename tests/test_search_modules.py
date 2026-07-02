@@ -78,10 +78,92 @@ def test_agent_dense_library_fallback_returns_verified_tracks(monkeypatch):
     agent.library = FakeLibrary()
 
     out = agent._dense_library_fallback("late night jazz", existing=[], limit=1)
-
     assert len(out) == 1
     assert out[0].title == "Semantic Hit"
     assert out[0].external_id == "sem-1"
+
+
+def test_discovery_route_soft_budget_skips_llm_and_lastfm():
+    from app.memory import UserMemory
+    from app.services.recommend import RecommendationService
+
+    service = RecommendationService(
+        store=None,
+        memory=MagicMock(),
+        library=MagicMock(),
+        list_assets=lambda: [],
+        track_key=lambda track: getattr(track, "external_id", getattr(track, "asset_id", "")),
+        is_quality_track=lambda _track: True,
+        query_noise=[],
+    )
+    search_and_extract = MagicMock(return_value=[
+        ExternalTrack(external_id="p1", title="Playlist Song", artist="Artist", source="netease")
+    ])
+    discover_from_llm = MagicMock(return_value=[
+        ExternalTrack(external_id="l1", title="LLM Song", artist="Artist", source="netease")
+    ])
+    discover_from_lastfm = MagicMock(return_value=[
+        ExternalTrack(external_id="f1", title="Lastfm Song", artist="Artist", source="netease")
+    ])
+
+    candidates, trace = service.extend_discovery_route_candidates(
+        candidates=[],
+        goal="深夜 慵懒 律动",
+        search_goal="深夜 慵懒 律动",
+        scene_queries=["深夜 R&B 歌单"],
+        prefer_playlist=False,
+        top_k=5,
+        memory=UserMemory(user_id="u1"),
+        taste_summary="",
+        library_artists=[],
+        dedupe_tracks=lambda items: items,
+        search_and_extract=search_and_extract,
+        discover_from_llm=discover_from_llm,
+        discover_from_lastfm=discover_from_lastfm,
+        budget_degrade_level="soft",
+    )
+
+    assert len(candidates) == 1
+    assert search_and_extract.call_count == 1
+    discover_from_llm.assert_not_called()
+    discover_from_lastfm.assert_not_called()
+    assert any("budget_degrade=soft" in line for line in trace)
+
+
+def test_discovery_route_hard_budget_skips_scene_followups():
+    from app.memory import UserMemory
+    from app.services.recommend import RecommendationService
+
+    service = RecommendationService(
+        store=None,
+        memory=MagicMock(),
+        library=MagicMock(),
+        list_assets=lambda: [],
+        track_key=lambda track: getattr(track, "external_id", getattr(track, "asset_id", "")),
+        is_quality_track=lambda _track: True,
+        query_noise=[],
+    )
+    search_and_extract = MagicMock(return_value=[])
+
+    _candidates, trace = service.extend_discovery_route_candidates(
+        candidates=[],
+        goal="深夜 慵懒 律动",
+        search_goal="深夜 慵懒 律动",
+        scene_queries=["深夜 R&B 歌单", "深夜 氛围 歌单", "凌晨 开车 歌单"],
+        prefer_playlist=True,
+        top_k=5,
+        memory=UserMemory(user_id="u1"),
+        taste_summary="",
+        library_artists=[],
+        dedupe_tracks=lambda items: items,
+        search_and_extract=search_and_extract,
+        discover_from_llm=MagicMock(return_value=[]),
+        discover_from_lastfm=MagicMock(return_value=[]),
+        budget_degrade_level="hard",
+    )
+
+    assert search_and_extract.call_count == 1
+    assert any("skip=scene_playlist_followups" in line for line in trace)
 
 
 def test_agent_lexical_library_fallback_supports_offline_mood_queries():
@@ -790,6 +872,45 @@ class TestRecommendForQueryRoutes:
         assert seen_offsets, "search_web_music 未被调用"
         assert seen_offsets[0] == 5
 
+    def test_seeds_skip_redundant_online_search(self):
+        """Fix: 前序 web_music_search 已搜过（seed_tracks 非空）时，recommend 不再二次联网搜——
+        网易云限流下重搜会吃光 20s 预算导致 recommend 超时（实测"深夜看球"案例）。"""
+        from app.agent import AudioVisualAgent
+        from app.memory import TasteProfile, UserMemory
+
+        mock_memory = MagicMock()
+        mock_memory.get_memory.return_value = UserMemory(
+            user_id="test", taste_profile=TasteProfile(top_genres=[("R&B", 0.8)])
+        )
+        mock_memory.weighted_query.return_value = "R&B"
+
+        mock_library = MagicMock()
+        mock_library.is_disliked.return_value = False
+
+        agent = AudioVisualAgent.__new__(AudioVisualAgent)
+        agent.memory = mock_memory
+        agent.library = mock_library
+        agent.llm = MagicMock()
+        agent.list_assets = MagicMock(return_value=[])
+        from app.services.profile_signals import ProfileSignals
+        agent.profile_signals = ProfileSignals(MagicMock(), agent.memory, list_assets=agent.list_assets)
+
+        call_count = {"n": 0}
+
+        def spy(*_a, **_k):
+            call_count["n"] += 1
+            return []
+
+        agent.search_web_music = spy  # 实例级覆盖
+
+        seeds = [
+            ExternalTrack(external_id=f"s-{i}", title=f"Seed {i}", artist="A", source="netease",
+                          playback_url=f"https://music.163.com/song?id={i}")
+            for i in range(6)  # >= top_k，命中 seed 短路
+        ]
+        agent.recommend_for_query("user1", "有节奏感的歌", top_k=5, seed_tracks=seeds)
+        assert call_count["n"] == 0, "已有 seed 时不应再调 search_web_music（会撞 20s 超时）"
+
     def test_complex_explicit_query_uses_anchor_seed_recall_and_drops_unrelated(self):
         """长 query 为空时，逐艺人 seed 能召回；不相关 city pop 不应补位。"""
         from types import SimpleNamespace
@@ -847,6 +968,64 @@ class TestRecommendForQueryRoutes:
         assert len(result.tracks) == 6
         assert {item.asset.artist for item in result.tracks} == {"toe", "Explosions In The Sky"}
         assert agent._dense_library_fallback.call_count == 0
+        assert any("anchor_filter=dropped" in line for line in result.agent_trace)
+
+    def test_llm_entity_anchors_filter_out_other_artists(self):
+        """回归：请求非硬编码名单里的歌手（The Weeknd）时，LLM entities 作艺人锚点，
+        本地库里用户爱听的其他歌手（Drake/Kanye）必须被 anchor_filter 剔除。
+
+        这是"推几首 The Weeknd 却返回 Drake/Kanye"漂移 bug 的根治验证——修复前
+        The Weeknd 不在 _KNOWN_RECOMMENDATION_ARTISTS → anchors.explicit=False →
+        过滤跳过 → 本地爱听歌手漏进来。
+        """
+        from types import SimpleNamespace
+
+        from app.agent import AudioVisualAgent
+        from app.models import UserMemory
+
+        mock_memory = MagicMock()
+        mock_memory.get_memory.return_value = UserMemory(user_id="test")
+        mock_memory.weighted_query.return_value = "The Weeknd"
+
+        mock_library = MagicMock()
+        mock_library.is_disliked.return_value = False
+        mock_library.record_exposure = MagicMock()
+        mock_library.decay_exposure_ts = MagicMock()
+
+        agent = AudioVisualAgent.__new__(AudioVisualAgent)
+        agent.memory = mock_memory
+        agent.library = mock_library
+        agent.llm = MagicMock()
+        agent.list_assets = MagicMock(return_value=[])
+        # 本地库返回用户爱听的其他歌手（模拟 taste 漏出）
+        agent._local_recommendation_candidates = MagicMock(return_value=[
+            ExternalTrack(external_id="drake-1", title="Passionfruit", artist="Drake", source="local"),
+            ExternalTrack(external_id="kanye-1", title="THIS ONE HERE", artist="Kanye West", source="local"),
+        ])
+        agent._dense_library_fallback = MagicMock(return_value=[])
+        agent._record_recommendation_history = MagicMock()
+        agent._rerank_tracks = MagicMock(side_effect=lambda _uid, _q, tracks, top_k: [
+            (t, SimpleNamespace(score=1.0 - i * 0.01, reason="test", components={}))
+            for i, t in enumerate(tracks[:top_k])
+        ])
+
+        def fake_search(query, top_k=5, relevance_query="", offset=0, **_):
+            return [
+                ExternalTrack(external_id=f"tw-{i}", title=f"Weeknd Song {i}", artist="The Weeknd", source="netease")
+                for i in range(3)
+            ]
+
+        agent.search_web_music = fake_search
+
+        # entities=["The Weeknd"] 是 LLM 规划器抽出的实体（现在会传进来）
+        result = agent.recommend_for_query(
+            "user1", "推几首 The Weeknd", top_k=5, entities=["The Weeknd"],
+        )
+
+        artists = {item.asset.artist for item in result.tracks}
+        assert "Drake" not in artists, f"Drake 漏进推荐：{artists}"
+        assert "Kanye West" not in artists, f"Kanye 漏进推荐：{artists}"
+        assert artists == {"The Weeknd"}, f"应只含 The Weeknd，实际：{artists}"
         assert any("anchor_filter=dropped" in line for line in result.agent_trace)
 
     def test_explicit_anchor_query_returns_shortfall_instead_of_unrelated_fill(self):

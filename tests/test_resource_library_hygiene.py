@@ -29,6 +29,28 @@ def test_upsert_external_blocks_fallback_and_mock(tmp_path):
     assert "Llmy" not in titles
 
 
+def test_upsert_external_blocks_structural_junk(tmp_path):
+    """Phase 1.2：池入口结构性闸门——教程/合集/串烧/功能音乐不入池。
+    upsert_external 是池子唯一入口（9 个调用点共享），结构脏数据在这里统一拦截，零 embedding。"""
+    from app.recommend.hygiene import is_structural_reject  # 顺带验证从 hygiene 导出
+    lib = ResourceLibrary(tmp_path / "lib.sqlite")
+    lib.upsert_external(_ext("Real Song", sid="1"))
+    lib.upsert_external(_ext("吉他弹唱教学课程", sid="2"))          # 教学 → HARD_REJECT
+    lib.upsert_external(_ext("深夜DJ串烧混音", sid="3"))           # dj/串烧 → mix 拒
+    # 功能音乐：艺人栏就是功能描述（轻音乐钢琴曲）→ functional_artist 拒
+    lib.upsert_external(ExternalTrack(
+        external_id="4", title="某曲", artist="轻音乐钢琴曲", source="netease", playback_url="x"))
+
+    titles = {t.title for t in lib.list_tracks(100)}
+    assert "Real Song" in titles
+    assert "吉他弹唱教学课程" not in titles
+    assert "深夜DJ串烧混音" not in titles
+    assert "某曲" not in titles  # 功能音乐艺人被拦
+    # 直接验证判定函数（与 classify_candidate 结构层同源）
+    assert is_structural_reject(_ext("吉他教学合集")) is True
+    assert is_structural_reject(_ext("God's Plan")) is False
+
+
 def test_purge_fallback_sources_removes_legacy_pollution(tmp_path):
     lib = ResourceLibrary(tmp_path / "lib.sqlite")
     # 直接走 upsert_track 模拟历史遗留的脏数据（绕过新拦截）。

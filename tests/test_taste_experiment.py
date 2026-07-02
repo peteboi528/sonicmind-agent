@@ -4,6 +4,7 @@ import pytest
 
 from app.agent import AudioVisualAgent
 from app.models import (
+    ExternalTrack,
     TasteExperimentFeedbackRequest,
     TasteExperimentTrack,
     TrackRef,
@@ -138,3 +139,44 @@ def test_taste_feedback_feeds_listening_history(agent):
     n = len(agent.memory.get_memory("u").listening_history)
     agent._record_taste_experiment_listen("u", local, "completed", None)
     assert len(agent.memory.get_memory("u").listening_history) == n  # 无在线 id 的曲不记
+
+
+# ---- 探索页：库外优先候选 ----
+
+def test_collect_candidates_online_only_drops_local_and_listened(agent, monkeypatch):
+    """online_only=True：跳过库内推荐路径，只走 web 搜索；剔除本地曲与已听过的曲目。
+
+    回归根因：旧行为里本地曲 personalize 分天然偏高，三档会被库内歌占满，
+    探索页失去"发现库外新歌/新歌手"的意义。
+    """
+    svc = agent._taste_experiment_service()
+
+    local_track = ExternalTrack(external_id="loc-1", title="本地曲", artist="A", source="local")
+    listened = ExternalTrack(external_id="netease-listened", title="听过的", artist="B", source="netease")
+    fresh = ExternalTrack(external_id="netease-fresh", title="全新曲", artist="C", source="netease")
+
+    # 库内推荐路径若被调用就报错——online_only 必须完全跳过它。
+    def _boom(*args, **kwargs):
+        raise AssertionError("online_only 不应调用库内推荐路径")
+
+    monkeypatch.setattr(svc, "_recommend_for_query", _boom)
+    monkeypatch.setattr(svc, "_search_web_music", lambda *a, **k: [local_track, listened, fresh])
+    monkeypatch.setattr(svc, "_is_recommendation_quality_track", lambda t: True)
+    monkeypatch.setattr(svc, "_dedupe_tracks", lambda tracks: tracks)
+
+    class _BD:
+        components = {"semantic": 0.5, "personalize": 0.0, "behavior": 0.0}
+        reason = "r"
+        score = 0.5
+
+    monkeypatch.setattr(svc, "_rerank_tracks", lambda u, q, tracks, top_k: [(t, _BD()) for t in tracks])
+
+    # 标记 "听过的" 已在听歌历史里
+    agent.memory.record_listen("explore-user", "netease-listened", 200, True, context="player")
+
+    result = svc.collect_taste_candidates("explore-user", ["neo soul"], 9, online_only=True)
+    titles = {getattr(t, "title", "") for t, *_ in result}
+    assert "全新曲" in titles
+    assert "本地曲" not in titles      # source==local 被剔除
+    assert "听过的" not in titles      # 已在 listening_history 被剔除
+

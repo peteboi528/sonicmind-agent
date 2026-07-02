@@ -94,6 +94,12 @@ TECHNICAL_ACTIONS = {
     "plan",
 }
 
+# episodic_memory 独立存储 collection：UserMemory.episodic_memory 标了 exclude=True
+# 不随主 memory blob 序列化——它是唯一携带大体量数据的字段（每条带 384 维 embedding，
+# cap 120 条），若留在主 blob 里，record_listen/record_rating 这类高频小改动都要
+# 连带全部 embedding 一起重写，是写放大的主因。拆出来后这类调用只重写轻量字段。
+EPISODIC_COLLECTION = "memory_episodic"
+
 
 class MemoryManager:
     def __init__(self, store: JsonStore, llm: Any | None = None) -> None:
@@ -104,10 +110,28 @@ class MemoryManager:
 
     def get_memory(self, user_id: str) -> UserMemory:
         memory = self.store.read_model("memory", user_id, UserMemory)
+        legacy_episodic = list(memory.__dict__.get("episodic_memory") or []) if memory is not None else []
         if memory is None:
             memory = UserMemory(user_id=user_id)
         self._migrate_preferences(memory)
+        # episodic_memory 落在独立 collection（见 EPISODIC_COLLECTION 常量的注释），
+        # 这里读出来挂回属性，供 recall_episodes/evidence.py 等按属性读取的代码照常用；
+        # exclude=True 保证这份数据不会被下面任何 write_model("memory", ...) 带出去重写。
+        # legacy_episodic 复用上面已读过的主 blob（exclude=True 只影响序列化，反序列化
+        # 仍会把旧数据填进这个属性），避免为迁移检查再读一次盘。
+        memory.episodic_memory = self._read_episodic(user_id, legacy_episodic)
         return memory
+
+    def _read_episodic(self, user_id: str, legacy_fallback: list[EpisodicMemory]) -> list[EpisodicMemory]:
+        episodes = self.store.read_models(EPISODIC_COLLECTION, user_id, EpisodicMemory)
+        if episodes:
+            return episodes
+        # 一次性迁移：老数据可能还挂在主 memory blob 里（升级前写入的）。命中一次后
+        # 搬到独立 collection，主 blob 那份因 exclude=True 不会再被写回、自然作废。
+        if legacy_fallback:
+            self.store.write_models(EPISODIC_COLLECTION, user_id, legacy_fallback)
+            return list(legacy_fallback)
+        return []
 
     def update_memory(self, request: MemoryUpdateRequest) -> tuple[UserMemory, bool]:
         with self.store.lock("memory", request.user_id):
@@ -258,7 +282,19 @@ class MemoryManager:
         """返回用户的排除规则列表。"""
         return list(self.get_memory(user_id).exclusion_rules)
 
-    def record_listen(self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None) -> UserMemory:
+    def record_listen(
+        self,
+        user_id: str,
+        asset_id: str,
+        duration: int,
+        completed: bool,
+        context: str | None = None,
+        title: str = "",
+        artist: str = "",
+        cover_url: str = "",
+        source: str = "",
+        source_id: str = "",
+    ) -> UserMemory:
         with self.store.lock("memory", user_id):
             memory = self.get_memory(user_id)
             event = ListeningEvent(
@@ -266,6 +302,11 @@ class MemoryManager:
                 duration_listened=duration,
                 completed=completed,
                 context=context,
+                title=title,
+                artist=artist,
+                cover_url=cover_url,
+                source=source,
+                source_id=source_id,
             )
             memory.listening_history.append(event)
             if len(memory.listening_history) > 200:
@@ -540,6 +581,8 @@ class MemoryManager:
         """把本轮交互作为情景记忆入库；可用时带 embedding 供跨会语义召回。
 
         去抖：与最近一条情景记忆文本相同则不重复写。超出 cap 时丢弃最旧。
+        独立落盘到 EPISODIC_COLLECTION（而非靠外层 write_model("memory", ...) 带出去）——
+        episodic_memory 字段已标 exclude=True，外层写主 blob 不会再持久化这份数据。
         """
         text = (query or "").strip()
         if not settings.enable_semantic_memory or len(text) < 4:
@@ -560,6 +603,7 @@ class MemoryManager:
         cap = max(10, settings.episodic_memory_cap)
         if len(memory.episodic_memory) > cap:
             memory.episodic_memory = memory.episodic_memory[-cap:]
+        self.store.write_models(EPISODIC_COLLECTION, memory.user_id, memory.episodic_memory)
         return True
 
     def recall_episodes(self, user_id: str, query: str, top_k: int | None = None) -> list[str]:
@@ -874,9 +918,12 @@ def compute_behavior_scores(
     now = datetime.now(UTC)
     scores: dict[str, float] = {}
     for event in listening_history:
-        if not event.asset_id:
+        # 本地曲用 asset_id，在线曲（netease 等）用 source_id 作行为 key，
+        # 与 rerank._track_id 的 ExternalTrack 分支（返回 external_id）对齐。
+        track_key = event.asset_id or event.source_id
+        if not track_key:
             continue
-        full = asset_durations.get(event.asset_id, 0)
+        full = asset_durations.get(event.asset_id or "", 0)
         listened = event.duration_listened or 0
         if event.completed:
             reward = 1.0
@@ -892,7 +939,7 @@ def compute_behavior_scores(
         except (ValueError, TypeError):
             age_days = 0
         decay = math.exp(-0.05 * age_days)
-        scores[event.asset_id] = scores.get(event.asset_id, 0.0) + reward * decay
+        scores[track_key] = scores.get(track_key, 0.0) + reward * decay
     return scores
 
 

@@ -16,11 +16,19 @@ dependencies = [
   "aiosqlite>=0.20.0",
   "cryptography>=42.0.0",
   "rapidfuzz>=3.0",
+  # FastAPI UploadFile（专辑封面上传识别）依赖 python-multipart 解析 multipart/form-data。
+  "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]
 media = [
   "yt-dlp>=2024.8.6",
+]
+# 专辑封面视觉识别：视觉模型走 API（DashScope/OpenAI/Gemini/Ollama，零额外依赖），
+# 这里只装「无视觉 key 时的本地 OCR 兜底」与「封面缩图」。装：pip install -e ".[vision]"
+vision = [
+  "rapidocr-onnxruntime>=1.3.8",  # 本地 OCR 兜底（未装则自动降级到提示用户输入）
+  "pillow>=10.0.0",               # 封面缩图（视觉端送图前降分辨率省 token）
 ]
 embeddings = [
   "sentence-transformers>=2.2.0",

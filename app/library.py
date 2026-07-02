@@ -5,6 +5,7 @@ import sqlite3
 from pathlib import Path
 
 from app.models import Asset, DislikeRequest, ExternalTrack, ResourceTrack, utc_now_iso
+from app.recommend.hygiene import is_structural_reject
 
 
 class ResourceLibrary:
@@ -100,6 +101,11 @@ class ResourceLibrary:
         # 拉池子的操作（semantic_search/similar_artists），且污染后续推荐。
         source = (track.source or "").lower()
         if "fallback" in source or source in {"mock", "llm"}:
+            return
+        # 结构性脏数据（教程/合集/串烧/功能音乐/mix）不入池——这是池子的唯一入口，9 个调用点
+        # （web_music_search/search.py×4/handlers 等）共享这一道闸门，无需各自过滤。零 embedding
+        # 成本（语义层判定仍只在推荐出口 classify_candidate 跑）。规则与推荐出口同源（hygiene）。
+        if is_structural_reject(track):
             return
         self.upsert_track(
             ResourceTrack(

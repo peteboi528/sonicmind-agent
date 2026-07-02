@@ -11,6 +11,49 @@ const generating = ref(false);
 const msg = ref("");
 const expanded = ref(null);
 
+// ── 多选删除 ──
+const selectMode = ref(false);
+const selectedIds = ref(new Set());
+const bulkDeleting = ref(false);
+
+function toggleSelectMode() {
+  selectMode.value = !selectMode.value;
+  if (!selectMode.value) selectedIds.value = new Set();
+}
+
+function toggleSelect(pid) {
+  const s = new Set(selectedIds.value);
+  s.has(pid) ? s.delete(pid) : s.add(pid);
+  selectedIds.value = s;
+}
+
+function selectAll() {
+  if (selectedIds.value.size === playlists.value.length) {
+    selectedIds.value = new Set();
+  } else {
+    selectedIds.value = new Set(playlists.value.map(p => p.playlist_id));
+  }
+}
+
+async function deleteSelected() {
+  const ids = [...selectedIds.value];
+  if (!ids.length || bulkDeleting.value) return;
+  if (!confirm(`确定删除选中的 ${ids.length} 个歌单？`)) return;
+  bulkDeleting.value = true;
+  let ok = 0;
+  for (const pid of ids) {
+    try {
+      await api.deletePlaylist(store.userId, pid);
+      ok++;
+    } catch { /* 单个失败不阻断其余 */ }
+  }
+  selectedIds.value = new Set();
+  selectMode.value = false;
+  bulkDeleting.value = false;
+  msg.value = ok === ids.length ? `已删除 ${ok} 个歌单。` : `删除 ${ok}/${ids.length} 个，部分失败。`;
+  await load();  // 与后端对齐：删成功的消失，失败的仍在
+}
+
 async function load() {
   loading.value = true;
   try {
@@ -106,6 +149,21 @@ onMounted(load);
         <p class="eyebrow">My Playlists</p>
         <h1>我的歌单</h1>
       </div>
+      <div v-if="playlists.length" class="pl-head-actions">
+        <template v-if="selectMode">
+          <button class="sel-btn" @click="selectAll">
+            {{ selectedIds.size === playlists.length ? "取消全选" : "全选" }}
+          </button>
+          <button class="sel-btn danger" :disabled="!selectedIds.size || bulkDeleting" @click="deleteSelected">
+            {{ bulkDeleting ? "删除中…" : `删除选中（${selectedIds.size}）` }}
+          </button>
+          <button class="sel-btn ghost" @click="toggleSelectMode">取消</button>
+        </template>
+        <button v-else class="sel-btn" @click="toggleSelectMode">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+          多选
+        </button>
+      </div>
     </div>
 
     <!-- generator -->
@@ -145,8 +203,14 @@ onMounted(load);
     </div>
 
     <!-- playlist cards -->
-    <div v-for="(pl, idx) in playlists" :key="pl.playlist_id" class="pl-card stagger-item" :style="{ animationDelay: `${idx * 55}ms` }">
+    <div v-for="(pl, idx) in playlists" :key="pl.playlist_id" class="pl-card stagger-item" :class="{ selecting: selectMode, selected: selectedIds.has(pl.playlist_id) }" :style="{ animationDelay: `${idx * 55}ms` }">
       <div class="pl-head">
+        <!-- 多选复选框 -->
+        <label v-if="selectMode" class="pl-check" @click.stop>
+          <input type="checkbox" :checked="selectedIds.has(pl.playlist_id)" @change="toggleSelect(pl.playlist_id)" />
+          <span class="pl-check-box"></span>
+        </label>
+
         <!-- cover collage -->
         <div class="pl-collage" :class="{ single: playlistCovers(pl).length === 1, empty: !playlistCovers(pl).length }">
           <template v-if="playlistCovers(pl).length >= 4">
@@ -163,13 +227,13 @@ onMounted(load);
         </div>
 
         <!-- info -->
-        <div class="pl-info" @click="expanded = expanded === pl.playlist_id ? null : pl.playlist_id">
+        <div class="pl-info" @click="selectMode ? toggleSelect(pl.playlist_id) : (expanded = expanded === pl.playlist_id ? null : pl.playlist_id)">
           <div class="pl-name">{{ pl.name }}</div>
           <div class="pl-desc">{{ pl.description || `${pl.tracks?.length || 0} 首曲目` }}</div>
         </div>
 
         <!-- action group -->
-        <div class="pl-actions">
+        <div v-if="!selectMode" class="pl-actions">
           <button
             v-if="pl.tracks?.length"
             class="pl-play-btn"
@@ -212,7 +276,40 @@ onMounted(load);
 
 .pl-page-head {
   margin-bottom: 24px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
 }
+.pl-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.sel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-sub);
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.sel-btn:hover:not(:disabled) { border-color: var(--border-light); color: var(--text); }
+.sel-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.sel-btn.danger {
+  background: rgba(231,76,60,0.1);
+  border-color: rgba(231,76,60,0.3);
+  color: #e74c3c;
+}
+.sel-btn.danger:hover:not(:disabled) { background: #e74c3c; color: #fff; border-color: #e74c3c; }
+.sel-btn.ghost { background: transparent; }
 .eyebrow {
   margin: 0 0 6px;
   color: var(--accent);
@@ -350,6 +447,43 @@ h1 {
   transition: border-color var(--dur-norm) var(--ease-out);
 }
 .pl-card:hover { border-color: var(--border-light); }
+.pl-card.selecting { cursor: pointer; }
+.pl-card.selected {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+/* 多选复选框 */
+.pl-check {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.pl-check input { position: absolute; opacity: 0; width: 0; height: 0; }
+.pl-check-box {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 2px solid var(--border-light);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition);
+}
+.pl-check input:checked + .pl-check-box {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.pl-check input:checked + .pl-check-box::after {
+  content: "";
+  width: 6px;
+  height: 11px;
+  border: solid #07120b;
+  border-width: 0 2.5px 2.5px 0;
+  transform: rotate(45deg);
+  margin-top: -2px;
+}
 
 .pl-head {
   display: flex;

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import random
+import tempfile
 from contextlib import ExitStack
 from typing import Any
 from unittest.mock import patch
@@ -18,6 +19,11 @@ def configure_offline_env() -> None:
     os.environ["LLM_API_KEY"] = ""
     os.environ.setdefault("LLM_TIMEOUT_SECONDS", "1")
     os.environ.setdefault("RESOURCE_LIBRARY_PATH", "data/test_resource_library.sqlite")
+    # STORE_ROOT 隔离：全局 app.api.main.agent 的 JSON 库（assets/memory/...）此前一直落在
+    # 真实 data/store——_default_store_root() 总挑它。开发机真库一旦有数据（如导入 200 首），
+    # API 烟雾测试/画像测试就会读到真实曲库 → '空用户'画像非空、断言假失败，且测试还会反向
+    # 污染真库。指向每进程独立临时目录，彻底隔离（unit 测试另用各自 tmp_path，不受影响）。
+    os.environ.setdefault("STORE_ROOT", tempfile.mkdtemp(prefix="musicagent_test_store_"))
     os.environ["EXTERNAL_SOURCE"] = "mock"
     os.environ["ENABLE_EMBEDDINGS"] = "false"
     os.environ["ENABLE_MUSICBRAINZ"] = "false"

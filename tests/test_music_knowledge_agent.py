@@ -3,15 +3,14 @@ from __future__ import annotations
 import asyncio
 import time
 
+import pytest
+
 from app.config import settings
 from app.graph import nodes
 from app.graph.builder import AgentGraphRunner
 from app.models import AgentPlan, StreamEvent
 from app.tools.contracts import ToolCall, ToolContext, ToolResult, ToolStatus
 from app.tools.runtime import ToolRuntime
-
-
-import pytest
 
 
 @pytest.fixture
@@ -40,7 +39,7 @@ def test_album_deep_dive_keyword_routes_to_fixed_knowledge_stages():
     plan = nodes._materialize_tool_stages(plan, "讲讲 Blonde 这张专辑，乐评怎么说？", 5)
     assert [[call.name for call in stage.calls] for stage in plan.stages] == [
         ["resolve_music_entity"],
-        ["music_metadata_lookup", "review_search"],
+        ["music_metadata_lookup", "web_knowledge_search"],
         ["build_music_dossier"],
     ]
     assert plan.stages[1].parallel is True
@@ -59,7 +58,7 @@ def test_album_listening_note_routes_to_knowledge_not_discuss():
     plan = nodes._materialize_tool_stages(plan, query, 5)
     assert [[call.name for call in stage.calls] for stage in plan.stages] == [
         ["resolve_music_entity"],
-        ["music_metadata_lookup", "review_search"],
+        ["music_metadata_lookup", "web_knowledge_search"],
         ["build_music_dossier"],
     ]
     assert "web_music_search" not in plan.tools_needed
@@ -91,7 +90,7 @@ def test_album_keyword_overrides_llm_discuss_plan(agent):
     assert plan.tools_needed == [
         "resolve_music_entity",
         "music_metadata_lookup",
-        "review_search",
+        "web_knowledge_search",
         "build_music_dossier",
     ]
 
@@ -259,7 +258,7 @@ def test_sample_lookup_routes_to_sample_tool_chain():
 
 
 def test_guard_whitelists_compare_related_entity():
-    from app.answer import guard_answer, collect_known_titles
+    from app.answer import collect_known_titles, guard_answer
 
     results = [{
         "type": "music_dossier",
@@ -328,7 +327,7 @@ def test_runtime_degrades_knowledge_timeout_without_error(monkeypatch):
 
 @pytest.mark.network
 def test_sample_source_ranking_and_relation_extraction():
-    from app.knowledge import search_sample_relations, locate_sample_sources
+    from app.knowledge import locate_sample_sources, search_sample_relations
     from app.models import MusicEntity, SampleEvidence, TrackRef
 
     payload = search_sample_relations([MusicEntity(type="track", name="Bound 2")], "Bound 2 采样了什么")
@@ -386,3 +385,580 @@ def test_knowledge_stream_returns_dossier_and_latency_budget(agent, monkeypatch)
     assert latency["budget_seconds"] == settings.knowledge_turn_budget_seconds
     assert latency["partial"] is True
     assert payload["trace_summary"]["recovery"] is False
+
+
+def test_music_compare_resolves_two_artist_entities_from_natural_language():
+    from app.knowledge import resolve_music_entities
+
+    entities = resolve_music_entities(
+        "比较 Drake 和 Future 的风格差异，并给我各自的入门歌",
+        "music_compare",
+        {"intent": "music_compare"},
+    )
+
+    assert len(entities) == 2
+    assert entities[0].name == "Drake"
+    assert entities[1].name == "Future"
+    assert all(entity.type == "artist" for entity in entities)
+
+
+def test_drake_future_compare_has_specific_axes_and_entry_tracks():
+    from app.knowledge import build_dossier, dossier_answer
+    from app.models import MusicEntity
+
+    dossier = build_dossier(
+        None,
+        "比较 Drake 和 Future 的风格差异，并给我各自的入门歌",
+        "music_compare",
+        [MusicEntity(type="artist", name="Drake"), MusicEntity(type="artist", name="Future")],
+        [], [], [], [], [],
+    )
+    text = dossier_answer(dossier)
+
+    assert "Auto-Tune" in text
+    assert "March Madness" in text
+    assert "Passionfruit" in text
+    assert "一个可能" not in text
+    assert dossier.key_tracks
+
+
+def test_drake_future_compare_profile_exposes_collabs_and_shared_ground():
+    from app.knowledge import _artist_compare_profile
+    from app.models import MusicEntity
+
+    profile = _artist_compare_profile(
+        MusicEntity(type="artist", name="Drake"),
+        MusicEntity(type="artist", name="Future"),
+    )
+
+    assert profile is not None
+    assert profile["collaboration_tracks"]
+    assert "Jumpman" in profile["collaboration_tracks"]
+    assert profile["shared_ground"]
+    assert profile["artist_cards"][0]["name"] == "Drake"
+
+
+def test_drake_weeknd_compare_has_specific_entry_tracks_and_collabs():
+    from app.models import MusicEntity
+    from app.tools.contracts import ToolContext
+    from app.tools.handlers import _build_music_dossier
+
+    ctx = ToolContext(
+        thread_id="t",
+        user_id="u",
+        query="比较 Drake 和 The Weeknd 的风格差异，并给我各自的入门歌",
+        plan={"intent": "music_compare"},
+        prior_results=[{
+            "type": "music_entity_resolution",
+            "entities": [
+                MusicEntity(type="artist", name="Drake").model_dump(mode="json"),
+                MusicEntity(type="artist", name="The Weeknd").model_dump(mode="json"),
+            ],
+        }],
+        agent=None,
+    )
+
+    result = _build_music_dossier({"query": ctx.query}, ctx)
+    text = result.data["answer"]
+    collabs = result.data["collaboration_tracks"]
+
+    assert "Blinding Lights" in text
+    assert "Headlines" in text
+    assert any(track["title"] == "Crew Love" for track in collabs)
+    assert "先听。" not in text
+
+
+def test_music_compare_cache_is_pair_aware(agent):
+    from app.knowledge import read_cached_dossier, write_cached_dossier
+    from app.models import MusicDossier, MusicEntity
+
+    drake = MusicEntity(type="artist", name="Drake")
+    future = MusicEntity(type="artist", name="Future")
+    weeknd = MusicEntity(type="artist", name="The Weeknd")
+    cached = MusicDossier(
+        entity=drake,
+        summary="Drake vs Future cached compare",
+        related_entities=[future],
+        partial=False,
+    )
+
+    write_cached_dossier(agent, cached, intent="music_compare")
+
+    future_hit = read_cached_dossier(agent, drake, related=[future], intent="music_compare")
+    weeknd_hit = read_cached_dossier(agent, drake, related=[weeknd], intent="music_compare")
+
+    assert future_hit is not None
+    assert future_hit.summary == "Drake vs Future cached compare"
+    assert weeknd_hit is None
+
+
+def test_search_reviews_compare_adds_artist_and_pair_queries(monkeypatch):
+    from app.knowledge import search_reviews
+    from app.models import MusicEntity
+
+    seen: list[str] = []
+
+    def fake_search(query, max_results=5, api_key="", timeout=None):
+        seen.append(query)
+        return []
+
+    monkeypatch.setattr("app.knowledge.web_search_source.search_web_info", fake_search)
+
+    search_reviews(
+        [MusicEntity(type="artist", name="Drake"), MusicEntity(type="artist", name="The Weeknd")],
+        intent="music_compare",
+        query="比较 Drake 和 The Weeknd 的风格差异，并给我各自的入门歌",
+    )
+
+    assert any("AllMusic biography" in query for query in seen)
+    assert any("comparison style" in query for query in seen)
+    assert any("Drake The Weeknd" in query for query in seen)
+
+
+def test_compare_evidence_rows_keep_both_entities_in_answer():
+    from app.models import MusicCitation, MusicEntity, TrackRef
+    from app.tools.contracts import ToolContext
+    from app.tools.handlers import _build_music_dossier
+
+    ctx = ToolContext(
+        thread_id="t",
+        user_id="u",
+        query="比较 Drake 和 The Weeknd 的风格差异，并给我各自的入门歌",
+        plan={"intent": "music_compare"},
+        prior_results=[
+            {
+                "type": "music_entity_resolution",
+                "entities": [
+                    MusicEntity(type="artist", name="Drake").model_dump(mode="json"),
+                    MusicEntity(type="artist", name="The Weeknd").model_dump(mode="json"),
+                ],
+            },
+            {
+                "type": "music_metadata",
+                "citations": [
+                    MusicCitation(
+                        source="allmusic",
+                        title="Drake Biography",
+                        url="https://example.com/drake",
+                        kind="encyclopedia",
+                        excerpt="Drake blends rap and R&B.",
+                        confidence=0.8,
+                    ).model_dump(mode="json"),
+                    MusicCitation(
+                        source="allmusic",
+                        title="The Weeknd Biography",
+                        url="https://example.com/weeknd",
+                        kind="encyclopedia",
+                        excerpt="The Weeknd is known for dark alternative R&B and synth-pop.",
+                        confidence=0.8,
+                    ).model_dump(mode="json"),
+                ],
+                "tracks": [
+                    TrackRef(title="Headlines", artist="Drake", source="metadata").model_dump(mode="json"),
+                    TrackRef(title="The Hills", artist="The Weeknd", source="metadata").model_dump(mode="json"),
+                ],
+                "metadata": [],
+            },
+        ],
+        agent=None,
+    )
+
+    result = _build_music_dossier({"query": ctx.query}, ctx)
+    evidence = result.data["evidence"]
+    answer = result.data["answer"]
+
+    assert any("Drake" in " / ".join(item.get("supports", [])) for item in evidence)
+    assert any("The Weeknd" in " / ".join(item.get("supports", [])) for item in evidence)
+    assert "Headlines" in answer
+    assert "The Hills" in answer
+
+
+def test_music_compare_resolves_real_cards_when_sources_available(monkeypatch):
+    from app.models import ExternalTrack, MusicEntity
+    from app.tools.contracts import ToolContext
+    from app.tools.handlers import _build_music_dossier
+
+    monkeypatch.setattr("app.search.verifier.verify_song", lambda title, artist: None)
+
+    class Agent:
+        def search_web_music(self, query, top_k=5, relevance_query="", **_kwargs):
+            mapping = {
+                ("Headlines", "Drake"): ExternalTrack(
+                    external_id="d1",
+                    title="Headlines",
+                    artist="Drake",
+                    source="netease",
+                    cover_url="https://img.example.com/d1.jpg",
+                    playback_url="https://music.163.com/song?id=d1",
+                ),
+                ("Jumpman", "Drake / Future"): ExternalTrack(
+                    external_id="j1",
+                    title="Jumpman",
+                    artist="Drake & Future",
+                    source="netease",
+                    cover_url="https://img.example.com/j1.jpg",
+                    playback_url="https://music.163.com/song?id=j1",
+                ),
+            }
+            for (title, artist), track in mapping.items():
+                if title.lower() in query.lower() and artist.split(" / ")[0].lower() in query.lower():
+                    return [track]
+            return []
+
+    ctx = ToolContext(
+        thread_id="t",
+        user_id="u",
+        query="比较 Drake 和 Future 的风格差异，并给我各自的入门歌",
+        plan={"intent": "music_compare"},
+        prior_results=[{
+            "type": "music_entity_resolution",
+            "entities": [
+                MusicEntity(type="artist", name="Drake").model_dump(mode="json"),
+                MusicEntity(type="artist", name="Future").model_dump(mode="json"),
+            ],
+        }],
+        agent=Agent(),
+    )
+
+    result = _build_music_dossier({"query": ctx.query}, ctx)
+
+    assert result.cards
+    assert any(card["source"] == "netease" for card in result.cards)
+    assert any(card["title"] == "Jumpman" for card in result.cards)
+
+
+def test_music_compare_query_variants_help_collab_and_punctuation(monkeypatch):
+    from app.models import MusicEntity
+    from app.tools.contracts import ToolContext
+    from app.tools.handlers import _build_music_dossier
+
+    monkeypatch.setattr("app.search.verifier.verify_song", lambda title, artist: None)
+    monkeypatch.setattr("app.sources.netease.search_netease_many", lambda query, limit=5: (
+        [{
+            "song_id": "d2",
+            "title": "Hold On, We're Going Home",
+            "artist": "Drake",
+            "album": "Nothing Was the Same",
+            "cover": "https://img.example.com/d2.jpg",
+        }] if "hold on we re going home" in query.lower().replace("'", " ").replace(",", " ") else []
+    ))
+
+    class Agent:
+        def __init__(self):
+            self.queries = []
+
+        def search_web_music(self, query, top_k=5, relevance_query="", **_kwargs):
+            self.queries.append(query)
+            return []
+
+    agent = Agent()
+    ctx = ToolContext(
+        thread_id="t",
+        user_id="u",
+        query="比较 Drake 和 Future 的风格差异，并给我各自的入门歌",
+        plan={"intent": "music_compare"},
+        prior_results=[{
+            "type": "music_entity_resolution",
+            "entities": [
+                MusicEntity(type="artist", name="Drake").model_dump(mode="json"),
+                MusicEntity(type="artist", name="Future").model_dump(mode="json"),
+            ],
+        }],
+        agent=agent,
+    )
+
+    result = _build_music_dossier({"query": ctx.query}, ctx)
+
+    assert any(card["title"] == "Hold On, We're Going Home" and card["source"] == "netease" for card in result.cards)
+
+
+# ── 直答路径正文/卡片去重 + md 后处理 + 流式切块 ──
+
+
+def test_polish_narrative_strips_meta_tail_lines():
+    """直答正文里的资料声明/风格标签/'没拿到乐评来源'尾巴应被剔除，正文叙述保留。"""
+    from app.knowledge import _polish_narrative
+
+    raw = (
+        "## 背景\n"
+        "Frank Ocean 在 2016 年发行了 Blonde。\n\n\n"
+        "风格标签：艺术流行、另类 R&B\n"
+        "资料状态：本档案主要基于模型先验知识（DeepSeek），未联网核实。\n"
+        "乐评/资料共识：本轮没有拿到足够乐评来源，因此不硬凑专业评价。\n"
+        "- **Nikes**：开篇曲，奠定疏离基调。\n"
+    )
+    out = _polish_narrative(raw)
+
+    assert "Frank Ocean 在 2016 年发行了 Blonde。" in out
+    assert "**Nikes**：开篇曲，奠定疏离基调。" in out
+    assert "风格标签" not in out
+    assert "资料状态" not in out
+    assert "未联网核实" not in out
+    assert "没有拿到足够乐评来源" not in out
+    assert "\n\n\n" not in out  # 多余空行归一
+
+
+def test_narrative_dossier_answer_is_body_only():
+    """summary_is_narrative=True 时，dossier_answer 只回正文，不再追加机械尾巴。"""
+    from app.knowledge import dossier_answer
+    from app.models import MusicDossier, MusicEntity, TrackRef
+
+    dossier = MusicDossier(
+        entity=MusicEntity(type="album", name="Blonde", artist="Frank Ocean"),
+        summary="## 背景\nFrank Ocean 的 Blonde 是一座孤峰。\n- **Nikes**：开篇曲。",
+        summary_is_narrative=True,
+        style_tags=["艺术流行", "另类 R&B"],
+        key_tracks=[TrackRef(title="Nikes", artist="Frank Ocean", source="guide")],
+        partial=True,
+        degraded_reason="本档案主要基于模型先验知识（DeepSeek），未联网核实",
+    )
+    text = dossier_answer(dossier)
+
+    assert text == dossier.summary  # 正文逐字透传
+    assert "风格标签" not in text  # 标签由卡片承载，正文不重复
+    assert "资料状态" not in text
+    assert "可以先听" not in text
+
+
+def test_parametric_dossier_answer_appends_short_note():
+    """is_parametric=True 的直答：气泡末尾追加一行「未联网核实」短声明，不再是免责长文。"""
+    from app.knowledge import dossier_answer
+    from app.models import CareerPhase, MusicDossier, MusicEntity
+
+    # album 直答（summary_is_narrative 分支）
+    dossier = MusicDossier(
+        entity=MusicEntity(type="album", name="Blonde", artist="Frank Ocean"),
+        summary="## 背景\nFrank Ocean 的 Blonde 是一座孤峰。",
+        summary_is_narrative=True,
+        is_parametric=True,
+    )
+    text = dossier_answer(dossier)
+    assert dossier.summary in text
+    assert "未联网核实" in text
+    assert "资料状态" not in text  # 不再出旧的免责长文
+    assert "本档案主要基于模型先验知识" not in text
+
+    # artist 直答（_artist_career_answer 分支）
+    artist = MusicDossier(
+        entity=MusicEntity(type="artist", name="The Weeknd"),
+        summary="# The Weeknd：暗夜中的流行灵魂",
+        summary_is_narrative=True,
+        is_parametric=True,
+        career_phases=[CareerPhase(phase_name="代表作品")],
+    )
+    atext = dossier_answer(artist)
+    assert "未联网核实" in atext
+    assert "资料状态" not in atext
+
+
+def test_build_dossier_parametric_is_complete_not_partial():
+    """parametric 直答是完整正文：is_parametric=True、不再被标 partial、无证据也不算"资料不完整"。
+
+    回归点：旧实现把 parametric 免责声明塞进 partial_reasons 且 report.ok 也强压 partial=True，
+    导致前端每张直答卡片都挂琥珀色"资料不完整"警告。
+    """
+    from app.knowledge import build_dossier
+    from app.models import MusicEntity
+
+    entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
+    dossier = build_dossier(
+        None, "Blonde", "album_deep_dive", [entity], [], [], [], [], [],
+        web_knowledge_provider="deepseek_parametric",
+        web_knowledge_answer="## 背景\nBlonde 是 Frank Ocean 2016 年的实验性 R&B 专辑。",
+    )
+    assert dossier.is_parametric is True
+    assert dossier.summary_is_narrative is True
+    assert dossier.partial is False  # 完整直答，不是"资料不完整"
+    assert dossier.summary  # 正文照常生成
+
+
+def test_extract_career_phases_from_parametric_text():
+    """直答正文里的「年份+《作品》」应抽成职业时间线：左→右归年、无年份句不产阶段。"""
+    from app.knowledge import _extract_career_phases_from_text
+
+    body = (
+        "# The Weeknd：暗夜中的流行灵魂\n\n"
+        "## 背景与脉络\n"
+        "2010年末，他匿名上传三张混音带《House of Balloons》《Thursday》《Echoes of Silence》。\n"
+        "关键转折是2015年《Beauty Behind the Madness》——首张主流厂牌专辑。\n"
+        "2020年《After Hours》与2022年《Dawn FM》进入概念化阶段。\n\n"
+        "## 代表曲目与听法\n"
+        "- **Can't Feel My Face**：流行巅峰，没有年份不应产阶段。\n"
+    )
+    phases = _extract_career_phases_from_text(body)
+    assert [p.period for p in phases] == ["2010", "2015", "2020", "2022"]
+    by_year = {p.period: p for p in phases}
+    assert "House of Balloons" in by_year["2010"].key_releases
+    assert "Thursday" in by_year["2010"].key_releases
+    assert by_year["2015"].key_releases == ["Beauty Behind the Madness"]
+    # 左→右归年：After Hours→2020、Dawn FM→2022，不串年
+    assert by_year["2020"].key_releases == ["After Hours"]
+    assert by_year["2022"].key_releases == ["Dawn FM"]
+    # 无年份的听法段不产阶段
+    assert all(p.phase_name != "代表作品" for p in phases)
+
+
+def test_build_dossier_parametric_artist_career_from_text():
+    """实体解析空（无专辑年表）的 artist 直答：career_phases 从正文抽，不再是空壳「代表作品」。"""
+    from app.knowledge import build_dossier
+    from app.models import MusicEntity
+
+    entity = MusicEntity(type="artist", name="The Weeknd")
+    answer = (
+        "# The Weeknd\n"
+        "2015年《Beauty Behind the Madness》大获成功。"
+        "2020年《After Hours》成为现象级作品。"
+    )
+    dossier = build_dossier(
+        None, "The Weeknd 的音乐路线", "artist_deep_dive", [entity], [], [], [], [], [],
+        web_knowledge_provider="deepseek_parametric",
+        web_knowledge_answer=answer,
+    )
+    assert dossier.career_phases, "应从正文抽出时间线"
+    years = [p.period for p in dossier.career_phases]
+    assert "2015" in years and "2020" in years
+    # 不再是无年份空壳阶段
+    assert all(p.phase_name != "代表作品" for p in dossier.career_phases)
+
+
+def test_nonnarrative_dossier_answer_keeps_tail():
+    """非直答(机械摘要)路径仍保留风格标签/资料状态尾巴，旧行为不回归。"""
+    from app.knowledge import dossier_answer
+    from app.models import MusicDossier, MusicEntity
+
+    dossier = MusicDossier(
+        entity=MusicEntity(type="album", name="某专辑"),
+        summary="我整理了《某专辑》的可追溯音乐资料。",
+        summary_is_narrative=False,
+        style_tags=["流行"],
+    )
+    text = dossier_answer(dossier)
+
+    assert text.startswith("某专辑：")
+    assert "风格标签" in text
+
+
+def test_chunk_for_stream_preserves_text_and_newlines():
+    """切块只为流式观感，拼回去必须与原文逐字一致，且保住换行。"""
+    from app.graph.nodes import _chunk_for_stream
+
+    text = "## 标题\n第一段很长" + "啊" * 80 + "。结束。\n- 列表项\n"
+    chunks = _chunk_for_stream(text)
+
+    assert len(chunks) > 1  # 确实切成了多块
+    assert "".join(chunks) == text  # 无损
+    assert _chunk_for_stream("") == []
+
+
+# ── 知识档案 × 用户曲库交叉命中（让介绍歌手/专辑结合你的库与口味）──
+
+
+def _lib_agent(tmp_path, *, user_id="lib-user", tracks=()):
+    """造一个带真实库的 agent，库里塞入指定 (title, artist, genre) 并听过它们，
+    让 taste_profile 把这些歌手/曲风算进 top。"""
+    from types import SimpleNamespace
+
+    from app.agent import AudioVisualAgent
+    from app.storage import JsonStore
+
+    agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+    for i, (title, artist, genre) in enumerate(tracks):
+        t = SimpleNamespace(
+            title=title, artist=artist, source="netease",
+            external_id=f"id{i}", source_url="", cover_url=None, duration_seconds=200,
+        )
+        asset = agent.library_svc.ensure_asset_from_track(t)
+        # ensure_asset_from_track 落的是 INGESTED，这里补成 analyzed + 打曲风标签，
+        # 模拟歌单导入后的真实库（导入写的就是 analyzed）。
+        from app.models import Asset, AssetStatus
+        stored = agent.store.read_model("assets", asset.asset_id, Asset)
+        stored.status = AssetStatus.ANALYZED
+        stored.genre = list(genre)
+        agent.store.write_model("assets", stored.asset_id, stored)
+        agent.library_svc._invalidate_assets_cache()
+        agent.record_listen(user_id, asset.asset_id, duration=200, completed=True)
+    return agent
+
+
+def test_knowledge_dossier_matches_library_by_artist(tmp_path):
+    """问 Frank Ocean，库里有他的歌 → dossier.library_matches 命中 artist，正文带'结合你的曲库'。"""
+    from app.knowledge import build_dossier, dossier_answer
+    from app.models import MusicEntity
+
+    agent = _lib_agent(tmp_path, tracks=[
+        ("Nights", "Frank Ocean", ["R&B"]),
+        ("Ivy", "Frank Ocean", ["R&B"]),
+        ("无关歌", "别的歌手", ["流行"]),
+    ])
+    entity = MusicEntity(type="artist", name="Frank Ocean")
+    dossier = build_dossier(
+        agent, "讲讲 Frank Ocean", "artist_deep_dive", [entity],
+        [], [], [], [], [], user_id="lib-user",
+    )
+    titles = {m.title for m in dossier.library_matches if m.relation == "artist"}
+    assert {"Nights", "Ivy"} <= titles
+    assert "无关歌" not in titles  # 别的歌手不命中 artist
+    text = dossier_answer(dossier)
+    assert "结合你的曲库" in text
+    assert "Nights" in text or "Ivy" in text
+
+
+def test_knowledge_dossier_matches_library_by_genre(tmp_path):
+    """库里没这位歌手但有同曲风 → genre 扩展命中。"""
+    from app.knowledge import build_dossier
+    from app.models import MusicEntity
+
+    agent = _lib_agent(tmp_path, tracks=[
+        ("某说唱", "本地说唱歌手", ["说唱"]),
+    ])
+    entity = MusicEntity(type="artist", name="Kendrick Lamar")
+    # style_tags 来自 metadata tags：喂一个说唱标签让 genre 命中。
+    metadata = [{"entity": entity.model_dump(mode="json"), "summary": "rap", "tags": ["说唱"]}]
+    dossier = build_dossier(
+        agent, "讲讲 Kendrick Lamar", "artist_deep_dive", [entity],
+        metadata, [], [], [], [], user_id="lib-user",
+    )
+    genre_hits = [m for m in dossier.library_matches if m.relation == "genre"]
+    assert any(m.title == "某说唱" for m in genre_hits)
+
+
+def test_knowledge_dossier_no_user_no_matches(tmp_path):
+    """不传 user_id（或无 agent）→ 不做匹配，library_matches 为空，旧行为不变。"""
+    from app.knowledge import build_dossier
+    from app.models import MusicEntity
+
+    agent = _lib_agent(tmp_path, tracks=[("Nights", "Frank Ocean", ["R&B"])])
+    entity = MusicEntity(type="artist", name="Frank Ocean")
+    dossier = build_dossier(
+        agent, "讲讲 Frank Ocean", "artist_deep_dive", [entity],
+        [], [], [], [], [],  # 不传 user_id
+    )
+    assert dossier.library_matches == []
+
+
+def test_knowledge_dossier_cache_does_not_leak_library_across_users(tmp_path):
+    """缓存按实体共享、不含用户维度：写缓存时 library_matches 必须被置空，
+    命中时由 build_dossier 用当前 user_id 重算——否则会把别人的库命中串出来。"""
+    from app.knowledge import read_cached_dossier, write_cached_dossier
+    from app.models import LibraryMatch, MusicDossier, MusicEntity
+    from app.storage import JsonStore
+
+    class _Agent:
+        def __init__(self, store):
+            self.store = store
+
+    agent = _Agent(JsonStore(tmp_path / "store"))
+    entity = MusicEntity(type="artist", name="Frank Ocean")
+    dossier = MusicDossier(
+        entity=entity,
+        summary="Frank Ocean 是当代 R&B 代表。",
+        partial=False,  # 非 partial 才会写缓存
+        library_matches=[LibraryMatch(title="Nights", artist="Frank Ocean", relation="artist")],
+    )
+    write_cached_dossier(agent, dossier, intent="artist_deep_dive")
+
+    cached = read_cached_dossier(agent, entity, intent="artist_deep_dive")
+    assert cached is not None
+    assert cached.summary == "Frank Ocean 是当代 R&B 代表。"  # 知识正文照常缓存
+    assert cached.library_matches == []  # 但 per-user 的库命中被置空，不跨用户泄漏
+

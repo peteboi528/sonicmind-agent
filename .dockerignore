@@ -1,14 +1,23 @@
-# 构建上下文瘦身：这些目录不进镜像、不参与层缓存失效判断
-.git
-.github
-data
-artifacts
-frontend
-docs
-**/__pycache__
-**/*.egg-info
-**/.pytest_cache
-**/.ruff_cache
+# 开发/测试文件
 .env
-.venv
-venv
+tests/
+docs/
+*.md
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+# 前端源码（容器只需构建产物 app/web/dist/）
+frontend/
+# 数据目录（由 volume 挂载，不进镜像）
+data/
+artifacts/
+# IDE
+.vscode/
+.idea/
+*.swp

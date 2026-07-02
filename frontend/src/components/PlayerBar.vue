@@ -108,8 +108,11 @@ function flushSession(completed) {
     return;
   }
   session.reported = true;
+  const p = store.player;
   api
-    .listen(store.userId, session.key, Math.round(session.elapsed), completed)
+    .listen(store.userId, session.key, Math.round(session.elapsed), completed, "player", {
+      title: p.title, artist: p.artist, cover: p.cover, source: p.source, sourceId: p.sourceId,
+    })
     .catch(() => {});
 }
 

@@ -26,6 +26,15 @@ export const store = reactive({
   toastMsg: "",
   toastKey: 0,
 
+  // ── 跨 tab 导航请求 ──
+  // 历史 tab 点「最近对话」时调 navigateTo('chat', threadId)：App.vue watch nonce 切 tab，
+  // ChatTab watch nonce 载入该线程。nonce 自增，重复点同一线程也能触发。
+  navigate: null,
+  _navSeq: 0,
+  navigateTo(tab, threadId = null) {
+    this.navigate = { tab, threadId, nonce: ++this._navSeq };
+  },
+
   setUser(id) {
     this.userId = (id || "").trim() || "web_user";
     localStorage.setItem("sonicmind_user", this.userId);
@@ -136,7 +145,7 @@ export const store = reactive({
         url: data.url,
         source: card.source || "",
         sourceId: card.source_id || "",
-        assetId: card.asset_id || "",
+        assetId: data.asset_id || card.asset_id || "",
       });
     } catch {
       if (seq !== this._playSeq) return;

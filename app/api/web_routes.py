@@ -6,10 +6,17 @@ import logging
 from pathlib import Path
 from types import SimpleNamespace
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
-from app.api.main import agent
+from app.api.main import _effective_user_id, agent
+from app.config import settings
+from app.services.cover_recognizer import (
+    CoverRecognition,
+    build_thumbnail_data_url,
+    recognize_album_cover,
+    synthesize_query,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +24,30 @@ router = APIRouter(tags=["web"])
 
 _WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 _DIST_DIR = _WEB_DIR / "dist"
+
+
+def _sniff_image_mime(data: bytes) -> str | None:
+    """按魔数字节判真实图片类型，不信客户端 Content-Type（可伪造）。"""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+async def _read_capped(file: UploadFile, cap: int) -> bytes:
+    """分块读取上传文件，累计超过 cap 立即 413 中止——不一次性把超大文件读进内存。"""
+    buf = bytearray()
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        buf.extend(chunk)
+        if len(buf) > cap:
+            raise HTTPException(status_code=413, detail="图片过大")
+    return bytes(buf)
 
 
 # ---- Vue SPA 服务 ----
@@ -70,10 +101,13 @@ async def playback_audio(request: Request):
         url = agent.get_audio_url(track_obj, netease_cookie=cookie)
     except Exception:
         logger.exception("get_audio_url failed for %s", track.get("title", ""))
-        return {"url": None, "reason": "error"}
+        return {"url": None, "reason": "error", "asset_id": track.get("asset_id", "")}
 
     if url:
-        return {"url": url, "reason": "ok"}
+        # ⚠️ 播放 ≠ 入库：不再 ensure_asset_from_track（那是 bug——每首播过的歌都进库且无标签）。
+        # 只回一个逻辑 asset_id（与入库同算法）供前端收听采集 keying，库本身不动。
+        logical_id = agent.library_svc.asset_id_for_track(track_obj)
+        return {"url": url, "reason": "ok", "asset_id": logical_id or track.get("asset_id", "")}
 
     # 无 URL：区分原因，便于前端给出可操作提示
     if "netease" in source:
@@ -83,7 +117,7 @@ async def playback_audio(request: Request):
         reason = "not_found"  # 视频源无音频直链，应走 MV
     else:
         reason = "not_found"
-    return {"url": None, "reason": reason}
+    return {"url": None, "reason": reason, "asset_id": track.get("asset_id", "")}
 
 
 @router.post("/api/playback/mv")
@@ -103,6 +137,59 @@ async def playback_mv(request: Request):
         logger.exception("get_mv_url failed for %s", track.get("title", ""))
 
     return {"url": url}
+
+
+# ---- 专辑封面识别 ----
+
+
+@router.post("/api/identify-album")
+async def identify_album(
+    request: Request,
+    file: UploadFile = File(...),
+    user_id: str = Form("web_user"),
+):
+    """上传专辑封面 → 识别专辑/歌手 → 返回可路由进知识链路的 query。
+
+    前端拿到 ``query`` 后，直接用现有 ``/agent/stream`` 发这一句（命中 album_deep_dive 意图），
+    于是整条知识链路（消歧→元数据→乐评→档案）原样复用，本端点只负责「图片→文字」。
+
+    返回::
+        {
+          "recognized": {album, artist, confidence, method, raw_text, note},
+          "query": "album\\nX\\nY\\n解读这张专辑" | null,  # null → 前端提示用户输入
+          "thumbnail_url": "data:image/jpeg;base64,…",      # 气泡里显示的缩略图（解码失败为空串）
+          "user_id": "<effective uid>"
+        }
+    """
+    uid = _effective_user_id(request, user_id)
+    # 分块限速读取 + 魔数字节判真实类型（不信可伪造的 Content-Type 头）。
+    raw = await _read_capped(file, settings.album_cover_max_bytes)
+    if not raw:
+        raise HTTPException(status_code=400, detail="空文件")
+    mime = _sniff_image_mime(raw)
+    if mime is None:
+        raise HTTPException(status_code=415, detail="文件不是合法的 PNG/JPEG/WebP 图片")
+
+    try:
+        recognition = await recognize_album_cover(raw, mime)
+    except Exception:
+        logger.exception("封面识别失败")
+        recognition = None
+    if recognition is None:
+        recognition = CoverRecognition()
+
+    query = synthesize_query(recognition)
+    try:
+        thumbnail = build_thumbnail_data_url(raw)
+    except Exception:
+        thumbnail = ""
+
+    return {
+        "recognized": recognition.to_dict(),
+        "query": query,
+        "thumbnail_url": thumbnail,
+        "user_id": uid,
+    }
 
 
 # ---- Helpers ----

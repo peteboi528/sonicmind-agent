@@ -358,6 +358,15 @@ class AudioVisualAgent:
     def analyze_media(self, asset_id: str, force_refresh: bool = False) -> tuple[Asset, list[Segment]]:
         return self.library_svc.analyze_media(asset_id, force_refresh=force_refresh)
 
+    def classify_asset(self, asset_id: str) -> Asset | None:
+        return self.library_svc.classify_asset(asset_id)
+
+    def backfill_estimated_features(self) -> dict:
+        return self.library_svc.backfill_estimated_features()
+
+    def cleanup_play_pollution(self, user_id: str | None = None) -> dict:
+        return self.library_svc.cleanup_play_pollution(user_id=user_id)
+
     def _playlist_tags_to_genres(self, tags: list[str]) -> list[str]:
         return self.library_svc._playlist_tags_to_genres(tags)
 
@@ -596,8 +605,12 @@ class AudioVisualAgent:
 
     # --- 用户反馈/状态（薄委托到 FeedbackService）---
 
-    def record_listen(self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None) -> UserMemory:
-        return self.feedback.record_listen(user_id, asset_id, duration, completed, context)
+    def record_listen(self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None,
+                      title: str = "", artist: str = "", cover_url: str = "", source: str = "", source_id: str = "") -> UserMemory:
+        return self.feedback.record_listen(
+            user_id, asset_id, duration, completed, context,
+            title=title, artist=artist, cover_url=cover_url, source=source, source_id=source_id,
+        )
 
     def rate_asset(self, user_id: str, asset_id: str, score: float) -> UserMemory:
         return self.feedback.rate_asset(user_id, asset_id, score)
@@ -686,7 +699,15 @@ class AudioVisualAgent:
         return self.feedback.record_feedback(request)
 
     def record_dislike(self, request: DislikeRequest) -> UserMemory:
-        return self.feedback.record_dislike(request)
+        memory = self.feedback.record_dislike(request)
+        # × 的心智 = "不想要这首歌"：若它已在库里，一并移除（delete_asset 清引用 + 刷品味）。
+        # 不在库里则只记 dislike（用于未来推荐降权），无副作用。
+        asset_id = self.library_svc.find_asset_id_for_dislike(
+            request.title, request.artist, request.source, request.source_id
+        )
+        if asset_id:
+            self.library_svc.delete_asset(asset_id, user_id=request.user_id)
+        return memory
 
     def list_resource_tracks(self, limit: int = 100):
         return self.library_svc.list_resource_tracks(limit)
@@ -795,6 +816,13 @@ class AudioVisualAgent:
     def save_playlist(self, user_id: str, playlist: Playlist) -> None:
         self._playlist_service().save_playlist(user_id, playlist)
 
+    def create_playlist_from_assets(
+        self, user_id: str, name: str, asset_ids: list[str], description: str = "",
+    ) -> Playlist:
+        return self._playlist_service().create_playlist_from_assets(
+            user_id, name, asset_ids, description=description,
+        )
+
     def list_playlists(self, user_id: str) -> list[Playlist]:
         return self._playlist_service().list_playlists(user_id)
 
@@ -893,12 +921,13 @@ class AudioVisualAgent:
     ) -> list[dict[str, Any]]:
         return await self._catalog_service().recommend_artist_albums_async(user_id, artist, limit)
 
-    def generate_taste_experiment(self, user_id: str, prompt: str, total: int = 12) -> TasteExperiment:
-        """生成 safe/stretch/bold 三档品味实验。"""
+    def generate_taste_experiment(self, user_id: str, prompt: str, total: int = 12, online_only: bool = False) -> TasteExperiment:
+        """生成 safe/stretch/bold 三档品味实验。online_only=True 时只拉库外新歌（探索页）。"""
         return self._taste_experiment_service().generate_taste_experiment(
             user_id,
             prompt,
             total=total,
+            online_only=online_only,
             taste_experiment_hypothesis=TasteExperimentService.taste_experiment_hypothesis,
             taste_experiment_search_seeds=TasteExperimentService.taste_experiment_search_seeds,
             collect_taste_candidates=self._collect_taste_candidates,
@@ -915,8 +944,12 @@ class AudioVisualAgent:
         user_id: str,
         seeds: list[str],
         total: int,
+        *,
+        online_only: bool = False,
     ) -> list[tuple[Any, dict[str, float], str, float]]:
-        return self._taste_experiment_service().collect_taste_candidates(user_id, seeds, total)
+        return self._taste_experiment_service().collect_taste_candidates(
+            user_id, seeds, total, online_only=online_only,
+        )
 
     def regenerate_taste_experiment_bucket(self, user_id: str, experiment_id: str, bucket: str) -> TasteExperiment:
         return self._taste_experiment_service().regenerate_taste_experiment_bucket(
@@ -1014,6 +1047,8 @@ class AudioVisualAgent:
         prefer_playlist: bool = False,
         local_ratio: float = settings.recommend_local_ratio_default,
         search_query_override: str | None = None,
+        budget_degrade_level: str | None = None,
+        entities: list[str] | None = None,
     ) -> DailyRecommendation:
         self._apply_netease_cookie(user_id)
         rec_service = self._recommendation_service()
@@ -1025,7 +1060,7 @@ class AudioVisualAgent:
             search_query_override=search_query_override,
             seed_tracks=seed_tracks,
             extract_search_query=_extract_search_query,
-            extract_recommendation_anchors=_extract_recommendation_anchors,
+            extract_recommendation_anchors=lambda q: _extract_recommendation_anchors(q, entities=entities),
             scene_playlist_queries=_scene_playlist_queries,
             query_has_entity=self._query_has_entity,
             summarize_taste=self.summarize_taste,
@@ -1071,6 +1106,7 @@ class AudioVisualAgent:
                 search_and_extract=search_and_extract,
                 discover_from_llm=lambda **kwargs: discover_from_llm(**kwargs, llm=self.llm),
                 discover_from_lastfm=discover_from_lastfm,
+                budget_degrade_level=budget_degrade_level,
             )
             trace_lines.extend(route_trace)
 
@@ -1104,7 +1140,9 @@ class AudioVisualAgent:
             top_k=top_k,
             excluded_tracks=excluded_tracks,
             search_variants=search_variants,
-            can_fallback=not ctx.anchors.explicit and not ctx.scene_queries,
+            # 已有 seed（前序 web_music_search 工具搜过）就不再二次联网搜：网易云限流下重搜会
+            # 吃光 20s 预算导致 recommend 超时（实测"深夜看球"案例）。改由 resource_pool(SQLite)+local+rerank 兜底。
+            can_fallback=(not ctx.anchors.explicit and not ctx.scene_queries) and not (seed_tracks or []),
             search_web_music=self.search_web_music,
             is_verified_online_track=_is_verified_online_track,
             is_quality_track=_is_recommendation_quality_track,

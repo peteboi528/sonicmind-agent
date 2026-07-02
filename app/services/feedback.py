@@ -48,8 +48,12 @@ class FeedbackService:
 
     def record_listen(
         self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None,
+        title: str = "", artist: str = "", cover_url: str = "", source: str = "", source_id: str = "",
     ) -> UserMemory:
-        memory = self.memory.record_listen(user_id, asset_id, duration, completed, context)
+        memory = self.memory.record_listen(
+            user_id, asset_id, duration, completed, context,
+            title=title, artist=artist, cover_url=cover_url, source=source, source_id=source_id,
+        )
         # Thompson 在线学习反馈环：听完 → 正反馈(α+1)，秒跳 → 负反馈(β+0.5)。
         asset = self.store.read_model("assets", asset_id, Asset)
         if asset is not None:
@@ -57,7 +61,24 @@ class FeedbackService:
                 self.library.update_ts_feedback(asset, positive=True, weight=1.0)
             elif duration and asset.duration_seconds and duration < asset.duration_seconds * 0.3:
                 self.library.update_ts_feedback(asset, positive=False, weight=0.5)
+        # 收听后刷新品味档案——否则收听历史只累积、永不重塑派生品味（习惯记录不到）。
+        # 关键：把用户真实听过的曲目纳入计算，即使它只是 INGESTED 的在线曲（无分析标签
+        # 也有艺人信号）。只用 analyzed 会把"实际在听的歌"全滤掉，习惯无从积累。
+        memory = self.memory.refresh_taste_profile(user_id, self._taste_library(user_id))
         return memory
+
+    def _taste_library(self, user_id: str) -> list[Asset]:
+        """品味计算用的曲库：已分析曲 + 用户真实听过的曲（含 INGESTED 在线曲）。
+
+        refresh_taste_profile 内部会再按 listening_history 过滤，这里只负责"别在分析状态
+        门槛上把听过的在线曲提前筛掉"——它们带艺人/曲风信号，是习惯的主要载体。
+        """
+        listened_ids = {ev.asset_id for ev in self.memory.get_memory(user_id).listening_history if ev.asset_id}
+        out: list[Asset] = []
+        for asset in self._list_assets():
+            if asset.status == "analyzed" or asset.asset_id in listened_ids:
+                out.append(asset)
+        return out
 
     def rate_asset(self, user_id: str, asset_id: str, score: float) -> UserMemory:
         asset = self.store.read_model("assets", asset_id, Asset)

@@ -203,6 +203,77 @@ EVAL_CASES: list[EvalCase] = [
         ],
         must_not_mention=["七里香", "晴天"],
     ),
+    EvalCase(
+        case_id="recommend_pure_discovery_paraphrase",
+        description="'纯发现新的'同义改写——应路由到 recommend 且不带本地偏好（paraphrase：换说法不丢意图）",
+        user_id="eval_no_local_user",
+        query="别用我库里的，给我纯发现的新歌",
+        setup_actions=[
+            {"type": "seed_local_library"},
+        ],
+        criteria=[
+            "是否识别为'不要本地库/纯发现'意图，而非把'别用'误解为排除关键词",
+            "最终推荐是否主要来自线上结果",
+        ],
+        must_not_mention=["Local Seed 1", "Local Seed 2"],
+        max_local_ratio=0.0,
+    ),
+    EvalCase(
+        case_id="recommend_no_library_paraphrase",
+        description="'别推荐我听过的'同义改写——应路由到 recommend 且尊重去重约束（paraphrase）",
+        user_id="eval_no_local_user",
+        query="别推荐我库里已经有的，来点新鲜的",
+        setup_actions=[
+            {"type": "seed_local_library"},
+        ],
+        criteria=[
+            "是否保留'不要库里已有'的约束",
+            "最终推荐是否避开本地种子曲目",
+        ],
+        must_not_mention=["Local Seed 1"],
+        max_local_ratio=0.0,
+    ),
+    EvalCase(
+        case_id="fact_check_non_hallucination",
+        description="音乐事实核验：证据不足时应标不确定，不得强行断言",
+        user_id="eval_fact_check_user",
+        query="Frank Ocean 的 Blonde 是 2016 年的专辑吗，帮我核验一下",
+        criteria=[
+            "是否明确这是核验型回答，而不是泛泛介绍",
+            "是否在证据不足时保守表达，而不是强行肯定或否定",
+            "是否给出了可追溯来源或核验理由",
+        ],
+        expected_intent="music_fact_check",
+    ),
+    EvalCase(
+        case_id="recommend_explainer_grounded",
+        description="解释上一轮推荐依据，应 grounded 到真实推荐与用户口味",
+        user_id="eval_rec_explain_user",
+        query="为什么推荐这些歌",
+        setup_actions=[
+            {"type": "seed_local_library"},
+            {"type": "chat", "query": "给我推荐几首适合放松的歌"},
+        ],
+        criteria=[
+            "是否明确解释上一轮推荐依据",
+            "是否引用用户口味、场景或推荐理由，而不是空泛夸赞",
+            "是否保持 grounded，不编造不存在的推荐来源",
+        ],
+        expected_intent="recommend_explainer",
+    ),
+    EvalCase(
+        case_id="multi_intent_recommend_plus_deep_dive",
+        description="双意图并行：一句话既要推荐又要讲解艺人（需 ENABLE_MULTI_INTENT=true）",
+        user_id="eval_multi_intent_user",
+        query="推几首 The Weeknd，顺便讲讲他的风格",
+        criteria=[
+            "是否同时给出了具体的歌曲推荐（编号曲目清单）",
+            "是否同时给出了对 The Weeknd 风格/生涯的讲解",
+            "两段内容是否都真实 grounded，不编造",
+        ],
+        must_mention=["The Weeknd"],
+        must_not_mention=["LLM 请求失败", "无法识别"],
+    ),
 ]
 
 
@@ -222,6 +293,12 @@ _CASE_EXPECTED_INTENT = {
     "similar_artists_continue_more": "similar_artists",
     "recommend_no_local_preference": "recommend",
     "recommend_english_no_chinese": "recommend",
+    "recommend_pure_discovery_paraphrase": "recommend",
+    "recommend_no_library_paraphrase": "recommend",
+    "fact_check_non_hallucination": "music_fact_check",
+    "recommend_explainer_grounded": "recommend_explainer",
+    # 多意图：primary 恒为 track 类（recommend），trace 里 [plan] 行会带 primary 意图。
+    "multi_intent_recommend_plus_deep_dive": "recommend",
 }
 for _c in EVAL_CASES:
     _c.expected_intent = _CASE_EXPECTED_INTENT.get(_c.case_id)

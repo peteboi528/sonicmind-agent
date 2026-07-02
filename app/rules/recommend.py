@@ -55,6 +55,14 @@ _KNOWN_RECOMMENDATION_ARTISTS = (
     "Nujabes", "J Dilla", "Uyama Hiroto",
 )
 
+# LLM entities 里偶尔混进的非艺人词（场景/情绪/请求词）——这些不能当艺人硬锚点，
+# 否则会用一个泛词去 anchor_filter 把所有真实候选清空。genre/mood 走 styles 分支。
+_NON_ANCHOR_ENTITY_WORDS = {
+    "", "推荐", "音乐", "歌曲", "歌", "song", "songs", "music", "track", "tracks",
+    "chill", "vibe", "vibes", "playlist", "mix", "放松", "深夜", "学习", "工作", "跑步",
+    "随便", "好听", "来点", "来几首", "更多", "similar", "more",
+}
+
 _RECOMMENDATION_STYLE_ALIASES: dict[str, tuple[str, ...]] = {
     "R&B": ("r&b", "rnb", "neo-soul", "neo soul", "soul", "节奏布鲁斯"),
     "ambient techno": ("ambient techno", "ambient", "techno"),
@@ -153,12 +161,24 @@ _GENERIC_SCENE_ARTIST_COMPACTS = {
 }
 
 
-def _extract_recommendation_anchors(query: str) -> RecommendationAnchors:
+def _extract_recommendation_anchors(query: str, entities: list[str] | None = None) -> RecommendationAnchors:
     lowered = (query or "").lower()
     artists: list[str] = []
     for artist in _KNOWN_RECOMMENDATION_ARTISTS:
         if artist.lower() in lowered or artist in query:
             artists.append(artist)
+
+    # LLM 抽取的实体（歌手/歌名/专辑）——这是硬编码 _KNOWN_RECOMMENDATION_ARTISTS 名单
+    # 覆盖不到的长尾艺人（如 The Weeknd）的锚点来源。有它们才让 anchors.explicit=True，
+    # 从而在 recommend_for_query 里触发艺人过滤（否则本地库里用户爱听的其他歌手会漏进来）。
+    # 只接受出现在本轮 query 里的实体——延续指令继承的旧实体不在本句时不作硬锚点，
+    # 避免"再来几首"把上一轮艺人当成本轮强约束。
+    for entity in entities or []:
+        value = str(entity or "").strip()
+        if not value or value.lower() in _NON_ANCHOR_ENTITY_WORDS:
+            continue
+        if value.lower() in lowered or value in query:
+            artists.append(value)
 
     styles: list[str] = []
     for style, aliases in _RECOMMENDATION_STYLE_ALIASES.items():

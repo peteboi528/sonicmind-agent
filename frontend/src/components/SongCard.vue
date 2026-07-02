@@ -13,7 +13,15 @@ const adding = ref(false);
 const coverBroken = ref(false);
 watch(() => props.card.cover_url, () => { coverBroken.value = false; });
 
+function isGuideCard() {
+  return props.card.source === "guide";
+}
+
 async function play() {
+  if (isGuideCard()) {
+    emit("toast", "这张卡是比较用的入门提示，还没有绑定可播放来源。");
+    return;
+  }
   try {
     const data = await api.playbackAudio(store.userId, props.card);
     if (!data.url) {
@@ -30,12 +38,16 @@ async function play() {
       cover: props.card.cover_url || "", url: data.url,
       source: props.card.source || "",
       sourceId: props.card.source_id || "",
-      assetId: props.card.asset_id || "",
+      assetId: data.asset_id || props.card.asset_id || "",
     });
   } catch { emit("toast", "⚠️ 播放失败"); }
 }
 
 async function playMv() {
+  if (isGuideCard()) {
+    emit("toast", "这张卡是比较用的入门提示，暂时没有 MV 来源。");
+    return;
+  }
   try {
     const data = await api.playbackMv(store.userId, props.card);
     if (!data.url) { emit("toast", "⚠️ 暂无 MV 链接"); return; }
@@ -44,9 +56,13 @@ async function playMv() {
 }
 
 async function dislike() {
+  if (isGuideCard()) {
+    emit("toast", "比较提示卡不会进入你的偏好黑名单。");
+    return;
+  }
   try {
     await api.dislike(store.userId, props.card);
-    emit("toast", "已记录，以后会少推这类。");
+    emit("toast", "已记录不喜欢；若它在你的曲库里也会一并移除。");
   } catch { emit("toast", "操作失败"); }
 }
 
@@ -88,13 +104,13 @@ async function addToLibrary() {
       <div v-if="showReason && card.reason" class="reason">{{ card.reason }}</div>
     </div>
     <div class="actions">
-      <button class="icon-btn play-btn" title="听歌" @click="play">
+      <button class="icon-btn play-btn" :title="isGuideCard() ? '提示卡' : '听歌'" @click="play">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
       </button>
-      <button class="icon-btn" title="MV" @click="playMv">
+      <button class="icon-btn" :title="isGuideCard() ? '提示卡' : 'MV'" @click="playMv">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
       </button>
-      <button v-if="card.source !== 'local'" class="icon-btn" title="加入我的库" :disabled="adding" @click="addToLibrary">
+      <button v-if="card.source !== 'local' && card.source !== 'guide'" class="icon-btn" title="加入我的库" :disabled="adding" @click="addToLibrary">
         <svg v-if="!adding" width="15" height="15" viewBox="0 0 24 24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
         <svg v-else width="15" height="15" viewBox="0 0 24 24" fill="currentColor" class="spin"><path d="M12 4V1L8 5l4 4V6c3.31 0 6 2.69 6 6 0 1.01-.25 1.97-.7 2.8l1.46 1.46C19.54 15.03 20 13.57 20 12c0-4.42-3.58-8-8-8zm0 14c-3.31 0-6-2.69-6-6 0-1.01.25-1.97.7-2.8L5.24 7.74C4.46 8.97 4 10.43 4 12c0 4.42 3.58 8 8 8v3l4-4-4-4v3z"/></svg>
       </button>

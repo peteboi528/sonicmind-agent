@@ -174,8 +174,12 @@ class RecommendationService:
         search_and_extract: Callable[..., list[ExternalTrack]],
         discover_from_llm: Callable[..., list[ExternalTrack]],
         discover_from_lastfm: Callable[..., list[ExternalTrack]],
+        budget_degrade_level: str | None = None,
     ) -> tuple[list[Asset | ExternalTrack], list[str]]:
         trace_lines: list[str] = []
+        degrade = (budget_degrade_level or "").strip().lower()
+        disable_discovery_expansion = degrade in {"soft", "hard"}
+        disable_scene_followups = degrade == "hard"
         taste_genres = ""
         if memory.taste_profile and memory.taste_profile.top_genres:
             taste_genres = " ".join(g for g, _ in memory.taste_profile.top_genres[:2])
@@ -189,7 +193,11 @@ class RecommendationService:
         trace_lines.append(f"route=playlist, query={playlist_query!r}, extracted={len(playlist_tracks)}")
         candidates.extend(playlist_tracks)
 
-        if not prefer_playlist:
+        if disable_discovery_expansion:
+            trace_lines.append(
+                f"budget_degrade={degrade}, skip=llm_candidates+lastfm"
+            )
+        elif not prefer_playlist:
             llm_tracks = discover_from_llm(
                 query=goal,
                 taste_summary=taste_summary,
@@ -211,7 +219,11 @@ class RecommendationService:
                 trace_lines.append(f"route=lastfm, verified={len(lastfm_tracks)}")
                 candidates.extend(lastfm_tracks)
 
-        if prefer_playlist and len(dedupe_tracks(candidates)) < candidate_budget:
+        if disable_scene_followups:
+            if prefer_playlist:
+                trace_lines.append("budget_degrade=hard, skip=scene_playlist_followups")
+            follow_up_scene_queries = []
+        elif prefer_playlist and len(dedupe_tracks(candidates)) < candidate_budget:
             follow_up_scene_queries = scene_queries[1:]
         else:
             follow_up_scene_queries = []

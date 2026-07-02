@@ -234,8 +234,24 @@ def _audio_features(agent: AudioVisualAgent, args: dict[str, Any]):
         "danceability": None,
     }
     known = any(value is not None for value in features.values())
-    summary = "已读取曲库中的真实音频特征。" if known else "当前没有经过测量的音频特征；不会用随机值补齐。"
-    return {"type": "audio_features", "asset_id": getattr(track, "asset_id", ""), "features": features, "measured": known}, summary
+    # 诚实化：tempo/energy 可能是「基于标签估算」而非真实测量。只有 features_source=='measured'
+    # 才算真实音频特征（目前没有任何路径产出 measured——DemoAnalyzer 不做真实分析，估算走
+    # app/recommend/features.py 并标 'estimated'）。绝不把估算值冒充测量值告诉用户。
+    source = getattr(track, "features_source", None) if track else None
+    measured = known and source == "measured"
+    if measured:
+        summary = "已读取曲库中的真实音频特征。"
+    elif known:
+        summary = "基于曲风/情绪标签估算的能量与节奏（非真实测量）；曲库暂无音频文件可做真实分析。"
+    else:
+        summary = "当前没有可用的能量/节奏特征；不会用随机值补齐。"
+    return {
+        "type": "audio_features",
+        "asset_id": getattr(track, "asset_id", ""),
+        "features": features,
+        "measured": measured,
+        "features_source": source,
+    }, summary
 
 
 def _preview_account_write(name: str, user_id: str, args: dict[str, Any]):
@@ -262,5 +278,190 @@ def _concert_events(agent: AudioVisualAgent, args: dict[str, Any]):
     city = str(args.get("city", "")).strip()
     query = " ".join(filter(None, [artist, city, "演出 巡演 官方"])).strip()
     sources = agent.search_artist_info(query)
-    summary = f"找到 {len(sources)} 条可追溯的演出信息来源。" if sources else "暂未找到可核实的演出信息。"
-    return {"type": "concert_events", "artist": artist, "city": city, "events": sources}, summary
+    events: list[dict[str, Any]] = []
+    unverified_sources: list[dict[str, Any]] = []
+    seen_verified: set[tuple[str, str]] = set()
+    seen_weak: set[tuple[str, str]] = set()
+    for item in sources:
+        title = str(item.get("title", "") or "")
+        content = str(item.get("content", "") or "")
+        url = item.get("url", "")
+        host = _source_label(url)
+        event = {
+            "title": title or "未命名演出信息",
+            "venue": _extract_venue_text(f"{title} {content}"),
+            "date_text": _extract_date_text(f"{title} {content}"),
+            "city": city or _extract_city_text(f"{title} {content}"),
+            "source_name": host,
+            "source_url": url,
+            "summary": content,
+        }
+        event["kind"] = "event" if any(event.get(k) for k in ("date_text", "city", "venue")) else "tour_page"
+        event["source_tier"] = _concert_source_tier(url, artist)
+        verified, weak_reason = _looks_like_verified_event_signal(title, content, url, artist=artist, city=city)
+        dedupe_key = (_norm(event["title"]), event["source_url"] or host)
+        if verified:
+            if dedupe_key in seen_verified:
+                continue
+            seen_verified.add(dedupe_key)
+            events.append(event)
+        else:
+            if dedupe_key in seen_weak:
+                continue
+            seen_weak.add(dedupe_key)
+            unverified_sources.append({
+                "title": title or "未命名线索页",
+                "source_name": host,
+                "source_url": url,
+                "reason": weak_reason,
+            })
+    events.sort(key=_concert_event_sort_key)
+    concrete = [event for event in events if event.get("kind") == "event"]
+    pages = [event for event in events if event.get("kind") != "event"]
+    events = [*concrete, *pages]
+    summary = (
+        f"整理出 {len(events)} 条可核实演出事件，另有 {len(unverified_sources)} 条弱线索来源。"
+        if events or unverified_sources else
+        "暂未找到可核实的演出信息。"
+    )
+    return {
+        "type": "concert_events",
+        "artist": artist,
+        "city": city,
+        "events": events,
+        "unverified_sources": unverified_sources,
+    }, summary
+
+
+def _extract_date_text(text: str) -> str:
+    import re
+
+    match = re.search(r"(20\d{2}[./-]\d{1,2}[./-]\d{1,2})", text)
+    if match:
+        return match.group(1)
+    match = re.search(r"\b(20\d{2})(\d{2})(\d{2})\b", text)
+    if match:
+        return f"{match.group(1)}-{match.group(2)}-{match.group(3)}"
+    match = re.search(r"\b(20\d{2})\b", text)
+    return match.group(1) if match else ""
+
+
+def _extract_city_text(text: str) -> str:
+    for city in ("上海", "北京", "广州", "深圳", "杭州", "成都", "东京", "首尔", "London", "New York", "Los Angeles"):
+        if city.lower() in text.lower():
+            return city
+    return ""
+
+
+def _extract_venue_text(text: str) -> str:
+    for venue in ("启德体育园", "体育馆", "体育场", "Arena", "Stadium", "Hall", "Center"):
+        if venue.lower() in text.lower():
+            return venue
+    return ""
+
+
+def _looks_like_verified_event_signal(title: str, content: str, url: str, *, artist: str = "", city: str = "") -> tuple[bool, str]:
+    from urllib.parse import urlparse
+
+    text = " ".join([title or "", content or "", url or ""]).lower()
+    host = urlparse(url or "").netloc.lower().removeprefix("www.")
+    weak_hosts = {
+        "music.apple.com", "open.spotify.com", "threads.com", "instagram.com",
+        "x.com", "twitter.com", "facebook.com", "wikipedia.org", "en.wikipedia.org",
+    }
+    weak_terms = ("歌单", "playlist", "粉丝团", "threads", "forum", "讨论")
+    event_terms = ("tour", "concert", "live", "巡演", "演出", "场馆", "门票", "tickets", "stadium", "arena")
+    if host in weak_hosts:
+        return False, "weak_host"
+    if any(term in text for term in weak_terms) and not any(term in text for term in event_terms):
+        return False, "weak_term"
+    if _is_stale_event_text(text):
+        return False, "stale_event"
+    if artist and not _concert_artist_match(text, artist):
+        return False, "artist_mismatch"
+    extracted_city = _extract_city_text(text)
+    if city and extracted_city and extracted_city.lower() != city.lower():
+        return False, "city_mismatch"
+    if not any(term in text for term in event_terms):
+        return False, "no_event_signal"
+    return True, ""
+
+
+def _is_stale_event_text(text: str) -> bool:
+    date_text = _extract_date_text(text)
+    if not date_text:
+        return False
+    current_year = datetime.now(UTC).year
+    year_match = re.search(r"20\d{2}", date_text)
+    if not year_match:
+        return False
+    year = int(year_match.group(0))
+    if year < current_year:
+        return True
+    if re.match(r"20\d{2}-\d{2}-\d{2}$", date_text):
+        try:
+            event_date = datetime.strptime(date_text, "%Y-%m-%d").replace(tzinfo=UTC)
+            return event_date.date() < datetime.now(UTC).date()
+        except ValueError:
+            return False
+    return False
+
+
+def _source_label(url: str) -> str:
+    from urllib.parse import urlparse
+
+    host = urlparse(url).netloc.lower()
+    if not host:
+        return "web"
+    return host.removeprefix("www.")
+
+
+def _concert_source_tier(url: str, artist: str) -> str:
+    host = _source_label(url)
+    artist_key = _norm(artist)
+    if artist_key and artist_key in _norm(host):
+        return "official"
+    if any(token in host for token in ("ticketmaster", "livenation", "axs", "bandsintown", "songkick")):
+        return "ticketing"
+    if any(token in host for token in ("stadium", "arena", "theater", "theatre", "center", "sportspark", "venue")):
+        return "venue"
+    if any(token in host for token in ("trip.com", "shazam", "setlist", "eventbrite")):
+        return "aggregator"
+    return "web"
+
+
+def _concert_artist_match(text: str, artist: str) -> bool:
+    raw_artist = (artist or "").strip()
+    if not raw_artist:
+        return True
+    if re.fullmatch(r"[A-Za-z0-9 .&'_-]+", raw_artist):
+        return bool(re.search(rf"(?<![A-Za-z0-9]){re.escape(raw_artist)}(?![A-Za-z0-9])", text or "", flags=re.I))
+    return _norm(raw_artist) in _norm(text)
+
+
+def _concert_event_sort_key(event: dict[str, Any]) -> tuple[int, int, int, str]:
+    tier_rank = {"official": 0, "ticketing": 1, "venue": 2, "aggregator": 3, "web": 4}
+    kind_rank = 0 if event.get("kind") == "event" else 1
+    date_rank = 99999999
+    parsed = _parse_concert_date(event.get("date_text", ""))
+    if parsed is not None:
+        date_rank = int(parsed.strftime("%Y%m%d"))
+    return (
+        kind_rank,
+        tier_rank.get(str(event.get("source_tier") or "web"), 9),
+        date_rank,
+        str(event.get("title") or ""),
+    )
+
+
+def _parse_concert_date(text: str) -> datetime | None:
+    value = str(text or "").strip()
+    if not value:
+        return None
+    normalized = value.replace(".", "-").replace("/", "-")
+    if re.match(r"20\d{2}-\d{1,2}-\d{1,2}$", normalized):
+        try:
+            return datetime.strptime(normalized, "%Y-%m-%d").replace(tzinfo=UTC)
+        except ValueError:
+            return None
+    return None

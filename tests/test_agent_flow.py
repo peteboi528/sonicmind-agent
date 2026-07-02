@@ -121,6 +121,29 @@ def test_delete_asset_removes_user_memory_references(tmp_path):
     assert not agent.media.get_segments(asset.asset_id)
 
 
+def test_listening_external_track_reshapes_taste(tmp_path):
+    """收听在线曲（INGESTED，无分析标签）应通过艺人信号重塑品味——验证修复后的反馈环：
+    record_listen 会刷新品味档案，且把听过的 INGESTED 曲纳入计算（此前只用 analyzed，
+    实际在听的歌全被滤掉，习惯永远积累不到）。"""
+    from types import SimpleNamespace
+
+    agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+    user_id = "ext-listener"
+
+    track = SimpleNamespace(
+        title="Nights", artist="Frank Ocean", source="netease",
+        external_id="123456", source_url="", cover_url=None, duration_seconds=300,
+    )
+    asset = agent.library_svc.ensure_asset_from_track(track)
+    assert asset is not None and asset.status == "ingested"  # 在线曲不做假分析
+
+    agent.record_listen(user_id, asset.asset_id, duration=300, completed=True)
+
+    taste = agent.get_taste_profile(user_id)
+    artists = [name.lower() for name, _ in taste.top_artists]
+    assert "frank ocean" in artists  # 听过的在线曲的艺人进入了品味档案
+
+
 def test_generic_music_recommendation_does_not_auto_bind_recent_asset(tmp_path):
     agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
     asset = agent.ingest_video("https://example.com/recent-asset")
@@ -147,8 +170,10 @@ def test_netease_enrich_uses_title_artist_hint_when_api_falls_back(tmp_path, mon
     url = "https://music.163.com/song?id=2700274699&uct2=U2FsdGVkX19mdtaezH9kDfy33am/mSBDHG4wr6X+Ur8="
     asset = agent.ingest_video(url, force_refresh=True)
 
-    monkeypatch.setattr(agent, "_enrich_from_netease", lambda asset, song_id: False)
-    monkeypatch.setattr(agent, "_fetch_video_title", lambda url: "浪人的… - 张震岳")
+    # LibraryService 拆分后这两个方法住在 library_svc 里——monkeypatch 要落在 library_svc
+    # 上，agent 上的薄委托不会被 enrich_asset 内部调用（否则 library_svc 打真网络，flaky）。
+    monkeypatch.setattr(agent.library_svc, "_enrich_from_netease", lambda asset, song_id: False)
+    monkeypatch.setattr(agent.library_svc, "_fetch_video_title", lambda url: "浪人的… - 张震岳")
 
     response = agent.enrich_asset(asset.asset_id, use_network=True)
 

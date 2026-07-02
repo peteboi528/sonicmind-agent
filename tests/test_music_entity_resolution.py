@@ -8,9 +8,6 @@
 """
 from __future__ import annotations
 
-import pytest
-
-
 # ── canonicalize_entities 消歧状态 ────────────────────────────────────────────
 
 def test_canonicalize_flags_same_title_different_artist_as_ambiguous(monkeypatch):
@@ -100,7 +97,7 @@ def test_canonicalize_unchanged_when_musicbrainz_disabled(monkeypatch):
 
 def test_citation_entity_score_is_kind_aware():
     from app.knowledge import citation_entity_score
-    from app.models import MusicEntity, MusicCitation
+    from app.models import MusicCitation, MusicEntity
 
     entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
     # 结构化平台源按构造归属，默认高分
@@ -119,12 +116,27 @@ def test_citation_entity_score_is_kind_aware():
     ) == 0.0
 
 
+def test_artist_citation_score_avoids_partial_name_false_positive():
+    from app.knowledge import citation_entity_score
+    from app.models import MusicCitation, MusicEntity
+
+    entity = MusicEntity(type="artist", name="Drake")
+    citation = MusicCitation(
+        source="allmusic",
+        kind="encyclopedia",
+        title="Nick Drake — Biography, Discography, Albums & Reviews",
+        excerpt="Nick Drake was an English singer-songwriter.",
+    )
+
+    assert citation_entity_score(citation, entity) == 0.0
+
+
 # ── validate_evidence_consistency ─────────────────────────────────────────────
 
 def test_structured_metadata_citation_kept_without_artist_mention():
     """平台/元数据类来源 excerpt 不重述艺人也保留——它们是按实体检索来的。"""
     from app.knowledge import validate_evidence_consistency
-    from app.models import MusicEntity, MusicCitation
+    from app.models import MusicCitation, MusicEntity
 
     entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
     netease = MusicCitation(source="netease", title="Blonde", kind="platform", excerpt="网易云专辑元数据", confidence=0.85)
@@ -309,4 +321,37 @@ def test_artist_compare_keeps_compare_render_not_timeline():
     text = dossier_answer(dossier)
     assert "区别" in text
     assert "职业生涯脉络" not in text
+
+
+def test_music_compare_can_be_projected_to_structured_payload():
+    from app.knowledge import build_dossier
+    from app.models import MusicEntity
+
+    left = MusicEntity(type="album", name="Kid A")
+    right = MusicEntity(type="album", name="OK Computer")
+    dossier = build_dossier(None, "Kid A 和 OK Computer 的区别", "music_compare", [left, right], [], [], [], [], [])
+
+    assert dossier.related_entities
+    assert dossier.summary
+
+
+def test_clarification_lead_phrases_do_not_garble_entity():
+    """用户口语澄清「我指的是frank ocean的blonde」不能被当成歌名乱码。
+
+    回归：_explicit_artist_entity_from_query 的「的」分隔模式曾把「我指的是」里的「的」
+    当成 artist/name 分隔，产出 name='是frank ocean的blonde' artist='我指' → 专辑卡变成
+    《是frank ocean的blonde》无法播放。lead-strip 现已加「我指的是/我说的是/我想问…」。
+    """
+    from app.knowledge import canonicalize_entities, resolve_music_entities
+
+    for q in [
+        "我指的是frank ocean的blonde",
+        "我指的是 Frank Ocean 的 Blonde",
+        "我说的是frank ocean的blonde",
+        "我想问frank ocean的blonde",
+    ]:
+        ent = resolve_music_entities(q, "album_deep_dive")[0]
+        canon = canonicalize_entities([ent])[0]
+        assert canon.name.lower() == "blonde", f"{q!r} 解析出 name={canon.name!r}"
+        assert "frank ocean" in canon.artist.lower(), f"{q!r} 解析出 artist={canon.artist!r}"
 

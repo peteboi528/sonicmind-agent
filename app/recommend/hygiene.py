@@ -53,7 +53,12 @@ _MOOD_DESCRIPTOR_RE = re.compile(
 )
 # 艺人栏 = 功能音乐描述（非真实艺人）：「轻音乐钢琴曲」「纯音乐」「咖啡厅音乐」「助眠白噪音」。
 # 真实艺人不会拿这些词当名字，高精度。挡掉深夜/下午推荐里混进的功能/氛围音频。
-_FUNCTIONAL_ARTIST_RE = re.compile(r"(轻音乐|纯音乐|钢琴曲|八音盒|白噪音|助眠|催眠|氛围音乐|治愈音乐|咖啡厅|纯钢琴)")
+# 补充：「Generation R&B、R&B、Hip Hop & R&B United」这类艺人栏塞满曲风标签的合集。
+_FUNCTIONAL_ARTIST_RE = re.compile(
+    r"(轻音乐|纯音乐|钢琴曲|八音盒|白噪音|助眠|催眠|氛围音乐|治愈音乐|咖啡厅|纯钢琴"
+    r"|Generation R&B|Hip Hop & R&B|Soul Music United|R&B United|Music United"
+    r"|Smooth Jazz|Relaxing Piano|Chillout Music|Sleep Music|Study Music)"
+)
 
 # ── 语义原型：embedding 不可用时整段跳过，确定可降级 ──
 QUALITY_PROTOTYPES: dict[str, list[str]] = {
@@ -167,10 +172,14 @@ def semantic_prototype_scores(text: str) -> dict[str, float]:
     return out
 
 
-def classify_candidate(track: Any, query: str = "") -> CandidateQuality:
-    """判定单个候选是不是「该进推荐/歌单的歌曲」。
+def _structural_quality(track: Any, query: str = "") -> CandidateQuality | None:
+    """结构性脏数据判定（零 embedding 成本）：基础字段 → candidate_kind → 句子标点 →
+    氛围描述/功能音乐 → bilibili 句子 → 硬拒关键词 → DJ/mix(query-aware)。命中任一返回
+    reject 的 CandidateQuality，否则 None（交由 classify_candidate 继续语义层/source 兜底）。
 
-    顺序：基础字段 → 句子标点 → 硬拒关键词 → DJ/mix(query-aware) → 语义原型margin → source 兜底。
+    提取出来供 is_structural_reject / 入库闸门复用——入库路径（upsert_external/import）需要
+    便宜的结构过滤，但跑不起语义 embedding；且语义层只在推荐出口有意义。这样「什么算脏数据」
+    的结构性规则只有这一处定义，入库与推荐出口共享同一标准。
     """
     title = str(getattr(track, "title", "") or "").strip()
     artist = str(getattr(track, "artist", "") or "").strip()
@@ -193,13 +202,10 @@ def classify_candidate(track: Any, query: str = "") -> CandidateQuality:
     # 2. 句子/新闻/节目型标题（。！？【）——歌曲几乎不用。
     if any(p in title for p in _SENTENCE_PUNCT):
         return CandidateQuality(status="reject", entity_type="program", junk_score=1.0, confidence=0.9, reasons=["sentence_punct_title"])
-
     # 2b. 网易云用户上传的氛围/翻唱/助眠假歌：「曲名 - <氛围|男声|女声|助眠…>」后缀。
-    #     挡在 source 兜底（netease+artist=accept）之前，否则这类脏候选会被无条件放行。
     if _MOOD_DESCRIPTOR_RE.search(title):
         return CandidateQuality(status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=["mood_descriptor_title"])
     # 2c. 艺人栏本身就是功能音乐描述（轻音乐钢琴曲/纯音乐/咖啡厅音乐…）= 功能音频，非真实艺人。
-    #     信号在艺人栏（不在标题），2b 扫不到；这里补。
     if _FUNCTIONAL_ARTIST_RE.search(artist):
         return CandidateQuality(status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=["functional_artist"])
     # bilibili 句子标题（含逗号的长句 vlog/新闻）。
@@ -215,8 +221,68 @@ def classify_candidate(track: Any, query: str = "") -> CandidateQuality:
     is_mix = any(p in lower for p in MIX_PATTERNS)
     if is_mix and not query_allows_mix(query):
         return CandidateQuality(status="reject", entity_type="dj_mix", junk_score=0.95, confidence=0.9, reasons=["mix_not_allowed_by_query"])
+    return None
 
-    # 5. 语义原型 margin：未命中关键词但语义像 junk 的，按 source 区别对待——
+
+def is_structural_reject(track: Any) -> bool:
+    """廉价结构性脏数据判定（零 embedding）：入库/池入口复用，挡教程/合集/串烧/功能音乐/mix。
+    query="" → DJ/mix 默认拒（池子默认不收混音）。是 classify_candidate 结构层的精确子集；
+    语义层判断仍由 classify_candidate 在推荐出口做。"""
+    return _structural_quality(track, "") is not None
+
+
+# 入库/修复路径用的「是不是真歌」保守门槛（比 is_structural_reject 窄：不含 mood-descriptor/
+# functional-artist/mix 等更宽的 HARD_REJECT 超集）。历史在 tools/handlers 与 services/playlist_repair
+# 各重复一份且黑名单已漂移，统一到这里的较全版本，单一事实来源。
+_NON_TRACK_KINDS = {"playlist", "compilation", "long_mix", "lyrics_video"}
+_BAD_TITLE_KEYWORDS = (
+    "教程", "教学", "怎么做", "怎么唱", "编曲技巧", "合集", "全集", "精选集",
+    "歌单", "playlist", "节目", "电台", "混剪", "串烧", "连播", "纯音乐合集",
+    "现场合集", "翻唱合集", "cover合集", "cover 合集", "dj mix", "reaction",
+    "真的好难做", "弹跳全集", "音乐制作", "编曲", "乐理",
+    "广播剧", "原声带", "ost", "bgm", "同人", "警示录", "日记", "纪实", "监控",
+    "录像", "现场实录", "车祸", "事故", "实录", "解说", "旁白", "字幕",
+)
+
+
+def is_valid_music_track(track: Any) -> bool:
+    """轻量结构性「真歌」判定（零 embedding）：title/artist 非空 → candidate_kind → 句子标点 →
+    脏标题黑名单 → bilibili 高风险句型。供 tools 与 playlist_repair 共享（单一事实来源）。"""
+    if track is None:
+        return False
+    title = str(getattr(track, "title", "") or "").strip()
+    artist = str(getattr(track, "artist", "") or "").strip()
+    if not title or not artist:
+        return False
+    kind = str(getattr(track, "candidate_kind", "") or "").strip().lower()
+    if kind in _NON_TRACK_KINDS:
+        return False
+    if any(p in title for p in _SENTENCE_PUNCT):
+        return False
+    text = f"{title} {artist}".lower()
+    if any(kw in text for kw in _BAD_TITLE_KEYWORDS):
+        return False
+    source = str(getattr(track, "source", "") or "").strip().lower()
+    if source == "bilibili" and any(w in title for w in ("，", "？", "?", "怎么", "为什么", "教你", "如何", "技巧", "！")):
+        return False
+    return True
+
+
+def classify_candidate(track: Any, query: str = "") -> CandidateQuality:
+    """判定单个候选是不是「该进推荐/歌单的歌曲」。
+
+    顺序：结构性判定(_structural_quality，零 embedding) → 语义原型margin → source 兜底。
+    结构层与 is_structural_reject / 入库闸门共享同一套规则（单一事实来源）。
+    """
+    structural = _structural_quality(track, query)
+    if structural is not None:
+        return structural
+
+    artist = str(getattr(track, "artist", "") or "").strip()
+    source = str(getattr(track, "source", "") or "").lower()
+    text = candidate_text(track)
+
+    # 5. 语义原型 margin：未命中结构规则但语义像 junk 的，按 source 区别对待——
     #    视频源(bilibili/youtube)天然多 junk，语义判 junk 即拒；
     #    可信源(netease/spotify/local 带 artist)可能是真歌被 embedding 误判(如 Firework)，
     #    不因语义硬拒，回落 source 兜底，防误杀。

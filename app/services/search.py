@@ -9,6 +9,7 @@ from typing import Any
 from app.config import settings
 from app.graph.tag_rules import extract_tags
 from app.models import ExternalTrack, ResourceTrack
+from app.recommend.hygiene import is_structural_reject
 from app.sources import bilibili as bilibili_source
 from app.sources import youtube as youtube_source
 from app.sources.mock_source import MockSource
@@ -232,6 +233,10 @@ class SearchService:
                     source=item.source,
                     candidate_kind="track",
                 )
+                # 旧池条目可能早于入库闸门进入（或语义召回带出脏数据）——召回时再过一遍结构性闸门，
+                # 不盲目信 candidate_kind="track"。
+                if is_structural_reject(track):
+                    continue
                 if self._track_key(track) in existing_keys:
                     continue
                 out.append(track)

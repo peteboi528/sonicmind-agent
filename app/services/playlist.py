@@ -120,6 +120,15 @@ class PlaylistService:
             and is_playlist_context_compatible(instruction, track)
         ]
         tracks = self._fill_tracks(tracks, clean_candidates, target_count)
+        # 防御性去重：LLM 偶尔在 JSON 里列出重复 asset_id，dedupe 确保最终歌单无重复曲目。
+        seen_final: set[str] = set()
+        deduped_final: list[Asset | ExternalTrack] = []
+        for t in tracks:
+            key = PlaylistService._fallback_track_key(t)
+            if key not in seen_final:
+                seen_final.add(key)
+                deduped_final.append(t)
+        tracks = deduped_final
 
         playlist = Playlist(
             playlist_id=hashlib.sha1(f"{user_id}-{instruction}".encode()).hexdigest()[:8],
@@ -167,6 +176,39 @@ class PlaylistService:
 
     def save_playlist(self, user_id: str, playlist: Playlist) -> None:
         self.store.write_model("playlists", f"{user_id}_{playlist.playlist_id}", playlist)
+
+    def create_playlist_from_assets(
+        self,
+        user_id: str,
+        name: str,
+        asset_ids: list[str],
+        *,
+        description: str = "",
+    ) -> Playlist:
+        """从用户库内指定曲目直接建歌单（不走 LLM）：按传入顺序保留命中的曲目。"""
+        name = (name or "").strip() or "我的歌单"
+        asset_map = {asset.asset_id: asset for asset in self._list_assets()}
+        tracks: list[Asset | ExternalTrack] = []
+        seen: set[str] = set()
+        for asset_id in asset_ids:
+            asset = asset_map.get(asset_id)
+            if asset and asset.asset_id not in seen:
+                tracks.append(asset)
+                seen.add(asset.asset_id)
+        if not tracks:
+            raise ValueError("no valid tracks for playlist")
+        # id 含曲目签名：同名但选不同曲目不互相覆盖。
+        sig = ",".join(sorted(seen))
+        playlist = Playlist(
+            playlist_id=hashlib.sha1(f"{user_id}-{name}-{sig}".encode()).hexdigest()[:8],
+            user_id=user_id,
+            name=name,
+            description=description or f"手动挑选的 {len(tracks)} 首",
+            tracks=tracks,
+            generated_by="manual",
+        )
+        self.save_playlist(user_id, playlist)
+        return playlist
 
     def list_playlists(self, user_id: str) -> list[Playlist]:
         playlists: list[Playlist] = []

@@ -42,7 +42,8 @@ QUERY_PLAN_SYSTEM = f"""\
   - "不要吵的" → search_query 写"安静 舒缓 轻音乐"
   - "别推抖音神曲" → search_query 写正经曲风词（无法转正向的留给 hard_exclude 概念，但本字段只写正向）
 - **纯实体查询**：直接用实体名，如"周杰伦"。
-- 只写检索词，不要整句，不要"推荐""帮我"这类功能词。情绪/场景用具体词（深夜→"深夜 安静 慵懒"）。
+- **优先具体曲风/场景词，少用抽象氛围词**：用 说唱/hiphop/trap/electronic/摇滚/R&B/lo-fi 等曲风词 + 运动/跑步/派对/通勤/助眠 等场景词；**避免 节奏/律动/动感/好听/震撼/燃 这类抽象词**——它们会命中歌名字面（搜"律动"只会返回一堆叫《律动》的歌），污染结果。例："有节奏感 适合看球"→ search_query 写"说唱 hiphop electronic 运动"，不要写"节奏 律动"。
+- 只写检索词，不要整句，不要"推荐""帮我"这类功能词。情绪/场景用具体曲风/场景词（深夜→"深夜 lo-fi 氛围"）。
 - chat/taste 等不需要检索的意图，search_query 留空字符串。
 
 ## language：语言偏好
@@ -77,6 +78,16 @@ QUERY_PLAN_SYSTEM = f"""\
 14. ⭐ 用户要某歌手的**专辑列表**（有哪些专辑/哪几张专辑/discography/推荐他的专辑/听某歌手的专辑）→ intent=artist_albums, entities=[歌手名], use_web=true。**直接取真实专辑清单，不走单曲搜索**——这样能拿到可整张播放的真实专辑，而非限流后的假候选。若用户是在讨论某一张专辑本身，选 album_deep_dive，不选 artist_albums。
    例："推荐他的专辑""The Weeknd 有哪些专辑""听周杰伦的专辑""Taylor Swift 的唱片"
 
+## ⭐ 主意图优先（务必先选唯一主意图）
+永远先按上面的规则选出唯一的主意图 intent，这是主线，绝不动摇。绝大多数输入都是单意图，secondary 留空（不填）。
+
+## secondary：可选的第二意图（仅双意图场景填）
+仅当用户在**一句话里明确同时要两类不同的事**（典型："推几首 X，顺便讲讲/介绍一下他的风格"），才额外填 secondary，最多 1 个：
+- primary 为动作类（recommend / search），secondary 为知识类（artist_deep_dive / album_deep_dive / review_summary / artist_info），是最常见的组合。
+- secondary 是一个对象：{{"intent": 意图名, "entities": [实体], "search_query": 检索词}}，字段含义与顶层同名字段一致。
+- 拿不准、只有一个诉求、或两半其实是同一件事时，**不要填 secondary**——宁可漏，不可错拆。填错会污染主意图，代价更大。
+- secondary.intent 必须是合法意图名；两半共享同一个实体时，两边 entities 都带上该实体。
+
 ## 多轮对话规则
 - 若提供了【最近对话】，且本轮输入是"再来几首""换一批""还要""类似这个""不要X""换成Y"等延续/修正指令：
   沿用上文最近提到的歌手/歌名作为 entities，保持与上一轮一致的 intent，**并把上一轮的场景/情绪合进 search_query**。
@@ -91,7 +102,7 @@ QUERY_PLAN_SYSTEM = f"""\
 ## few-shot 示例
 
 用户：给我推荐几首适合跑步的歌
-{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"跑步 动感 节奏","search_variants":["running workout"],"language":"","target_count":null,"reasoning":"按场景推荐，需语义+联网"}}
+{{"intent":"recommend","entities":[],"use_local":true,"use_vector":true,"use_web":true,"search_query":"运动 说唱 hiphop electronic","search_variants":["running workout rap"],"language":"","target_count":null,"reasoning":"按场景推荐，用曲风+场景词检索而非抽象氛围词，需语义+联网"}}
 
 用户：找一些 Beyond 的歌
 {{"intent":"search","entities":["Beyond"],"use_local":true,"use_vector":false,"use_web":true,"search_query":"Beyond","search_variants":[],"language":"","target_count":null,"reasoning":"搜歌手，实体匹配+联网"}}
@@ -143,7 +154,13 @@ assistant: 推荐了几首学习音乐
 用户：介绍一下 NewJeans 这个团体
 {{"intent":"artist_info","entities":["NewJeans"],"use_local":false,"use_vector":false,"use_web":true,"search_query":"NewJeans","search_variants":[],"language":"","target_count":null,"reasoning":"了解歌手背景，用搜索引擎"}}
 
-只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, search_query, search_variants, language, target_count, reasoning。
+用户：推几首 The Weeknd，顺便讲讲他的风格
+{{"intent":"recommend","entities":["The Weeknd"],"use_local":true,"use_vector":false,"use_web":true,"search_query":"The Weeknd","search_variants":[],"language":"","target_count":null,"reasoning":"推荐+讲风格，双意图","secondary":{{"intent":"artist_deep_dive","entities":["The Weeknd"],"search_query":"The Weeknd"}}}}
+
+用户：找几首周杰伦的歌，再介绍下他
+{{"intent":"search","entities":["周杰伦"],"use_local":true,"use_vector":false,"use_web":true,"search_query":"周杰伦","search_variants":["Jay Chou"],"language":"","target_count":null,"reasoning":"搜歌+介绍，双意图","secondary":{{"intent":"artist_info","entities":["周杰伦"],"search_query":"周杰伦"}}}}
+
+只输出 JSON，不要解释。字段：intent, entities, use_local, use_vector, use_web, search_query, search_variants, language, target_count, reasoning, secondary(可选)。
 """
 
 
@@ -153,7 +170,7 @@ QUERY_PLAN_REPAIR_SYSTEM = """\
 你会收到一段上游模型产出的原始内容，它本来应该是一个 JSON 规划对象，但格式或字段可能有误。
 你的任务只有一个：修复成合法 JSON，并严格符合下面字段：
 
-intent, entities, use_local, use_vector, use_web, search_query, search_variants, language, target_count, reasoning
+intent, entities, use_local, use_vector, use_web, search_query, search_variants, language, target_count, reasoning, secondary(可选)
 
 要求：
 1. 只输出一个 JSON 对象，不要解释。
@@ -169,6 +186,7 @@ intent, entities, use_local, use_vector, use_web, search_query, search_variants,
    - target_count: null
    - reasoning: ""
 4. intent 必须保留为原意；若无法判断则填 chat。
+5. 若原始内容含 secondary（第二意图）字段，原样保留（对象含 intent/entities/search_query）；没有就不要加。
 """
 
 

@@ -13,6 +13,24 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
+_TAVILY_UNAVAILABLE_WARNED = False
+
+
+def _warn_tavily_unavailable(status: int | None) -> None:
+    """Tavily 鉴权失败/套餐超额（401/403/429/432）时打一条醒目 warning，提醒续费/换 key。
+
+    只警告一次避免刷屏。Tavily 是乐评搜索与正文抓取的主源，挂了会整体降级到 DuckDuckGo
+    （稀疏）或空——用户得知道是 key 过期/超额，而不是以为 agent 坏了。
+    """
+    global _TAVILY_UNAVAILABLE_WARNED
+    if status in (401, 403, 429, 432) and not _TAVILY_UNAVAILABLE_WARNED:
+        _TAVILY_UNAVAILABLE_WARNED = True
+        logger.warning(
+            "Tavily 不可用（HTTP %s：鉴权失败或套餐超额限流）。乐评搜索/正文抓取降级到 DuckDuckGo 或为空——"
+            "请到 https://app.tavily.com 续费/升级或更换 TAVILY_API_KEY。",
+            status,
+        )
+
 
 def search_web_info(
     query: str,
@@ -64,7 +82,8 @@ def fetch_url_content(url: str, api_key: str = "", timeout: float | None = None,
         )
         with urllib.request.urlopen(req, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
-    except Exception:
+    except Exception as exc:
+        _warn_tavily_unavailable(getattr(exc, "code", None))
         logger.debug("Tavily extract failed for url=%s", url, exc_info=True)
         return ""
     results = data.get("results") or []
@@ -102,6 +121,11 @@ async def _asearch_tavily(query: str, max_results: int, api_key: str) -> list[di
             },
             headers={"Authorization": f"Bearer {api_key}"}, retries=0, concurrency=3,
         )
+        # transport 只对 429/5xx 抛错；432(超额)/401/403 会原样返回，这里显式判一下再解析。
+        status = getattr(response, "status_code", 200)
+        if status >= 400:
+            _warn_tavily_unavailable(status)
+            return []
         return _parse_tavily_results(response.json(), max_results)
     except Exception:
         logger.debug("Async Tavily search failed for query=%s", query, exc_info=True)
@@ -141,7 +165,8 @@ def _search_tavily(query: str, max_results: int, api_key: str, timeout: float = 
         with urllib.request.urlopen(req, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
         return _parse_tavily_results(data, max_results)
-    except Exception:
+    except Exception as exc:
+        _warn_tavily_unavailable(getattr(exc, "code", None))
         logger.debug("Tavily search failed for query=%s", query, exc_info=True)
         return []
 

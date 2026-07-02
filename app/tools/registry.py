@@ -142,6 +142,38 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         },
         required=("prompt",),
     ),
+    "playlist_repair": ToolSpec(
+        name="playlist_repair",
+        description="诊断上一轮歌单或推荐结果里的重复、脏数据、风格跳跃、能量断层、语言混杂和目标偏移，并给出修复建议。",
+        args_schema={
+            "instruction": {"type": "string", "description": "用户对想修复效果的补充描述，例如“更适合深夜”"},
+            "target": {"type": "string", "description": "显式指定要修复的对象，例如“上一轮歌单”"},
+        },
+    ),
+    "taste_shift_detector": ToolSpec(
+        name="taste_shift_detector",
+        description="分析用户近期与历史听歌偏好的变化，识别新上升的曲风、情绪和艺人。",
+        args_schema={
+            "window_recent_days": {"type": "integer", "default": 30},
+            "window_baseline_days": {"type": "integer", "default": 90},
+        },
+    ),
+    "music_fact_check": ToolSpec(
+        name="music_fact_check",
+        description="核验音乐事实陈述，只在有可追溯资料支持时标记 verified，证据不足时明确 uncertain。",
+        args_schema={
+            "query": {"type": "string", "description": "用户当前要核验的音乐问题或陈述"},
+            "claims_text": {"type": "string", "description": "可选：明确给出待核验陈述"},
+        },
+        required=("query",),
+    ),
+    "recommend_explainer": ToolSpec(
+        name="recommend_explainer",
+        description="解释最近一轮推荐为什么会出现这些歌，基于真实推荐结果、用户口味和场景证据生成 grounded 说明。",
+        args_schema={
+            "query": {"type": "string", "description": "用户想解释的推荐轮次或补充说明"},
+        },
+    ),
     "resolve_music_entity": ToolSpec(
         name="resolve_music_entity",
         description="在严格时间预算内解析音乐实体（艺人/专辑/歌曲/流派），不确定时返回候选而非强行猜测。",
@@ -172,13 +204,32 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         timeout_seconds=8.0,
         max_retries=0,
     ),
+    "web_knowledge_search": ToolSpec(
+        name="web_knowledge_search",
+        description=(
+            "强搜索 provider：为知识类问题（album/artist/review/compare/concert/fact_check）取结构化 "
+            "claims + sources + citations。web provider 不可用时降级 DeepSeek 先验（claim 标未联网核实），"
+            "全空时回退 legacy review_search。是知识链路取代 review_search 的主检索工具。"
+        ),
+        args_schema={
+            "query": {"type": "string", "description": "用户原始音乐知识问题"},
+            "intent": {"type": "string", "description": "知识类意图"},
+        },
+        required=("query",),
+        llm_visible=False,
+        # parametric 直答是首选 provider，一次长答案生成可达 ~25-35s（非流式，等整段算完）。
+        # 必须 ≥ web_knowledge_timeout_seconds(40s)，否则工具墙会比 provider 预算先到，杀掉正在生成的答案。
+        timeout_seconds=40.0,
+        max_retries=0,
+    ),
     "build_music_dossier": ToolSpec(
         name="build_music_dossier",
         description="把实体、元数据和乐评证据合成为结构化音乐档案；含正文抓取(Tavily Extract/Discogs API)+LLM 合成，超时或证据不足时输出 partial dossier。",
         args_schema={"query": {"type": "string", "description": "用户原始音乐知识问题"}},
         required=("query",),
         llm_visible=False,
-        timeout_seconds=24.0,
+        # web_knowledge 工具失败时，dossier 侧兜底会再生成一次直答（~20-30s）；放宽到 35s 让兜底能跑完。
+        timeout_seconds=35.0,
         max_retries=0,
     ),
     "sample_relation_search": ToolSpec(
@@ -377,7 +428,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "concert_events": ToolSpec(
         name="concert_events",
-        description="查找歌手公开演出信息并返回可追溯网页来源；不会臆测用户位置。",
+        description="查找歌手公开演出或巡演信息，返回可追溯事件卡和网页来源；不会臆测用户位置。",
         args_schema={
             "artist": {"type": "string"},
             "city": {"type": "string"},
@@ -400,8 +451,8 @@ for _name in ("save_to_playlist", "favorite_track"):
 # 走 LLM 发现 + 多轮网易云搜索 + 重排，也常 >8s。按真实内部耗时放宽。
 _HEAVY_TOOL_TIMEOUTS = {
     "journey": 18.0,            # 内部 5 阶段并行歌单搜索 timeout=15.0，留余量
-    "recommend": 20.0,         # LLM 发现 + 多轮网易云搜索 + 重排
-    "playlist": 20.0,          # 同 recommend，且常要更多候选
+    "recommend": 30.0,          # LLM 发现 + 多轮网易云搜索 + 重排（国内访问偶尔 >20s）
+    "playlist": 30.0,           # 同 recommend，且常要更多候选
     "web_music_search": 16.0,  # 多端点搜索 + 验证
     "taste_experiment": 20.0,  # 三档候选生成，LLM + 搜索
     "import_netease_playlist": 30.0,  # 批量导入大歌单

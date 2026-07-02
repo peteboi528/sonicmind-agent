@@ -8,13 +8,14 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from app.config import settings
 from app.concurrency import run_parallel
+from app.config import settings
 from app.llm.structured import extract_json_dict
 from app.models import (
     CareerPhase,
     EvidenceConsistencyReport,
     KnowledgeEvidencePack,
+    LibraryMatch,
     MusicCitation,
     MusicDossier,
     MusicEntity,
@@ -67,16 +68,32 @@ def remaining_seconds(deadline_at: float | None) -> float | None:
     return max(0.0, deadline_at - time.monotonic())
 
 
-def cache_key(entity: MusicEntity) -> str:
+def cache_key(entity: MusicEntity, related: list[MusicEntity] | None = None, intent: str = "") -> str:
     artist = _norm(entity.artist)
     name = _norm(entity.name)
     source = _norm(entity.source or "unknown")
-    return re.sub(r"[^a-z0-9_\-]+", "_", f"{entity.type}:{name}:{artist}:{source}")[:160]
+    compare_suffix = ""
+    if intent == "music_compare" and related:
+        compare_suffix = "|" + "|".join(
+            re.sub(
+                r"[^a-z0-9_\-]+",
+                "_",
+                f"{item.type}:{_norm(item.name)}:{_norm(item.artist)}:{_norm(item.source or 'unknown')}",
+            )
+            for item in related
+        )
+    return re.sub(r"[^a-z0-9_\-:|]+", "_", f"{entity.type}:{name}:{artist}:{source}{compare_suffix}")[:220]
 
 
-def read_cached_dossier(agent: Any, entity: MusicEntity) -> MusicDossier | None:
+def read_cached_dossier(
+    agent: Any,
+    entity: MusicEntity,
+    *,
+    related: list[MusicEntity] | None = None,
+    intent: str = "",
+) -> MusicDossier | None:
     try:
-        item = agent.store.read_model("knowledge_cache", cache_key(entity), KnowledgeCacheItem)
+        item = agent.store.read_model("knowledge_cache", cache_key(entity, related, intent), KnowledgeCacheItem)
     except Exception:
         return None
     if item is None:
@@ -87,12 +104,16 @@ def read_cached_dossier(agent: Any, entity: MusicEntity) -> MusicDossier | None:
     return None
 
 
-def write_cached_dossier(agent: Any, dossier: MusicDossier) -> None:
+def write_cached_dossier(agent: Any, dossier: MusicDossier, *, intent: str = "") -> None:
     if dossier.partial:
         return
     try:
-        key = cache_key(dossier.entity)
-        agent.store.write_model("knowledge_cache", key, KnowledgeCacheItem(key=key, dossier=dossier))
+        related = dossier.related_entities[:1] if intent == "music_compare" else []
+        key = cache_key(dossier.entity, related, intent)
+        # library_matches 是 per-user 的，缓存按实体共享、不存用户维度——置空再写，
+        # 命中时由 build_dossier 用当前 user_id 重算，避免跨用户串库。
+        cacheable = dossier.model_copy(update={"library_matches": []})
+        agent.store.write_model("knowledge_cache", key, KnowledgeCacheItem(key=key, dossier=cacheable))
     except Exception:
         return
 
@@ -100,6 +121,18 @@ def write_cached_dossier(agent: Any, dossier: MusicDossier) -> None:
 def resolve_music_entities(query: str, intent: str, plan: dict[str, Any] | None = None) -> list[MusicEntity]:
     query = (query or "").strip()
     plan = plan or {}
+    if intent == "music_compare":
+        names = _compare_names(query)
+        if not names:
+            retrieval = plan.get("retrieval_plan") or {}
+            planned_entities = [str(e).strip() for e in (retrieval.get("entities") or []) if str(e).strip()]
+            names = planned_entities[:2]
+        if names:
+            entity_type = _infer_entity_type(query, intent)
+            return [
+                MusicEntity(type=entity_type, name=name, artist=_infer_artist(query, name, entity_type), source="query")
+                for name in names if name
+            ][:2]
     structured = _structured_entity_from_query(query, intent)
     if structured:
         return [structured]
@@ -125,7 +158,8 @@ def resolve_music_entities(query: str, intent: str, plan: dict[str, Any] | None 
 _ENTITY_NOISE_LEAD = re.compile(
     r"^\s*(介绍一下|介绍下|介绍|讲一下|讲一讲|讲讲|聊聊看|聊聊|聊一聊|说说|谈谈|"
     r"分析一下|分析|了解|科普|解读|为什么经典|为什么这么经典|为什么|评价如何|评价|"
-    r"乐评怎么说|请|帮我|搜索|查一下|查下)\s*",
+    r"乐评怎么说|请|帮我|搜索|查一下|查下|"
+    r"我指的是|我说的是|我是说|我是指|指的是|我是想问|我想问的是|我想问)\s*",
     re.I,
 )
 _ENTITY_NOISE_TAIL = re.compile(
@@ -207,7 +241,8 @@ def _explicit_artist_entity_from_query(query: str, entity_type: str, intent: str
         return None
     text = re.sub(r"[《》“”\"']", " ", query or "")
     text = re.sub(
-        r"(讲一下|讲一讲|讲讲|聊聊|聊一聊|说说|谈谈|介绍一下|介绍|分析一下|分析|了解|科普|解读|为什么经典|为什么|乐评怎么说|评价如何|评价|请|帮我|搜索|查一下|这张专辑|这首歌)",
+        r"(讲一下|讲一讲|讲讲|聊聊|聊一聊|说说|谈谈|介绍一下|介绍|分析一下|分析|了解|科普|解读|为什么经典|为什么|乐评怎么说|评价如何|评价|请|帮我|搜索|查一下|这张专辑|这首歌|"
+        r"我指的是|我说的是|我是说|我是指|指的是|我是想问|我想问的是|我想问)",
         " ",
         text,
         flags=re.I,
@@ -392,7 +427,8 @@ def citation_entity_score(citation: MusicCitation, entity: MusicEntity) -> float
     """
     if citation.kind in {"metadata", "platform"}:
         return 0.8
-    text = _match_norm(" ".join([citation.title or "", citation.excerpt or ""]))
+    title_text = " ".join([citation.title or "", citation.excerpt or ""])
+    text = _match_norm(title_text)
     name_key = _match_norm(entity.name)
     name_hit = bool(name_key) and name_key in text
     artist = (entity.artist or "").strip()
@@ -410,8 +446,34 @@ def citation_entity_score(citation: MusicCitation, entity: MusicEntity) -> float
                 return 0.6 if len(name_key) >= 12 else 0.2
             return 0.0
         return 0.6 if name_hit else 0.0
-    # artist 类型实体：name 即艺人名，出现即归属
+    # artist 类型实体：拉丁艺人名要避免 Drake 命中 Nick Drake 这类子串误伤。
+    if _is_latin_name(entity.name):
+        return 1.0 if _latin_name_in_text(entity.name, title_text) else 0.0
     return 1.0 if (artist_hit or name_hit) else 0.0
+
+
+def _is_latin_name(name: str) -> bool:
+    text = (name or "").strip()
+    return bool(text) and bool(re.fullmatch(r"[A-Za-z0-9 .&'_-]+", text))
+
+
+def _latin_name_in_text(name: str, text: str) -> bool:
+    escaped = re.escape((name or "").strip())
+    if not escaped:
+        return False
+    raw = text or ""
+    for match in re.finditer(rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])", raw, flags=re.I):
+        prefix = raw[:match.start()].rstrip()
+        prev = re.search(r"([A-Za-z0-9']+)$", prefix)
+        prev_token = (prev.group(1) if prev else "").lower()
+        if prev_token and prev_token not in {
+            "review", "reviews", "album", "albums", "artist", "artists",
+            "biography", "discography", "guide", "feature", "essay",
+            "the", "a", "an", "of", "for", "by", "vs", "and",
+        }:
+            continue
+        return True
+    return False
 
 
 def _track_matches_artist(track: TrackRef, artist: str) -> str | bool:
@@ -486,6 +548,50 @@ def validate_evidence_consistency(
     )
 
 
+def validate_compare_evidence_consistency(
+    entities: list[MusicEntity],
+    metadata_citations: list[MusicCitation],
+    review_citations: list[MusicCitation],
+    tracks: list[TrackRef],
+) -> EvidenceConsistencyReport:
+    """Compare 模式的一致性校验：允许资料命中任一比较对象，避免第二个实体被误杀。"""
+    pair = entities[:2]
+    all_citations = [*metadata_citations, *review_citations]
+    kept: list[MusicCitation] = []
+    dropped = 0
+    for citation in all_citations:
+        score = max((citation_entity_score(citation, entity) for entity in pair), default=0.0)
+        if score <= 0.0:
+            dropped += 1
+            continue
+        kept.append(citation)
+
+    problems: list[str] = []
+    hits: dict[str, int] = {entity.name: 0 for entity in pair}
+    for citation in kept:
+        for entity in pair:
+            if citation_entity_score(citation, entity) >= 0.5:
+                hits[entity.name] += 1
+
+    if dropped:
+        problems.append(f"剔除 {dropped} 条与比较对象无关的资料")
+
+    missing = [name for name, count in hits.items() if count <= 0]
+    if len(missing) == len(pair) and all_citations:
+        problems.append("所有资料都未明确指向这两个比较对象")
+    elif missing:
+        problems.append("未拿到明确指向 " + " / ".join(missing) + " 的资料")
+
+    confidence = (sum(1 for count in hits.values() if count > 0) / len(pair)) if pair else 0.0
+    return EvidenceConsistencyReport(
+        ok=not (all_citations and len(missing) == len(pair)),
+        problems=problems,
+        confidence=confidence,
+        kept_citations=kept,
+        kept_tracks=tracks,
+    )
+
+
 def _ambiguous_summary(entity: MusicEntity) -> str:
     """同名歧义时的消歧提示：列出候选，请用户补艺人名，绝不凭猜测拼完整答案。"""
     names: list[str] = []
@@ -556,6 +662,64 @@ def _build_career_timeline(
     return phases
 
 
+_CAREER_YEAR_RE = re.compile(r"(19[5-9]\d|20[0-3]\d)")   # 1950–2039
+_CAREER_TITLE_RE = re.compile(r"《([^》]{1,40})》")
+
+
+def _clean_career_context(sentence: str) -> str:
+    """把含年份的句子轻清洗成短上下文：去年份、《》去括号、压空白、截 60 字。"""
+    ctx = _CAREER_YEAR_RE.sub("", sentence)
+    ctx = _CAREER_TITLE_RE.sub(lambda m: m.group(1), ctx)  # 《X》→X
+    ctx = ctx.replace("年", " ")
+    ctx = re.sub(r"\s+", " ", ctx).strip(" ，,、。：:·-—")
+    return ctx[:60]
+
+
+def _extract_career_phases_from_text(text: str) -> list[CareerPhase]:
+    """从 DeepSeek 直答正文里抽取「年份→专辑/代表作」的职业时间线。
+
+    直答正文通常自带「2015年《Beauty Behind the Madness》……」这类年份+作品的时间脉络。实体解析
+    空（无专辑年表）时，用它替换 _build_career_timeline 的无年份空壳阶段，让 artist_deep_dive 仍有
+    可读时间线，而不是「来源未提供明确发行年份」。确定性解析、不臆造：只取正文真实出现的年份+《》
+    作品，句内按出现位置左→右把作品归给最近的年份（正确处理「2020年《A》与2022年《B》」）。
+    没抽到任何「年份+作品」的正文返回 []，由调用方保留原 career_phases。
+    """
+    by_year: dict[int, dict[str, Any]] = {}
+    for sentence in re.split(r"[。！？\n]+", text or ""):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        tokens: list[tuple[int, str, str]] = []
+        for m in _CAREER_YEAR_RE.finditer(sentence):
+            tokens.append((m.start(), "year", m.group(1)))
+        for m in _CAREER_TITLE_RE.finditer(sentence):
+            tokens.append((m.start(), "title", m.group(1).strip()))
+        if not any(t[1] == "year" for t in tokens):
+            continue  # 该句没年份：不产阶段（避免把听法段曲目误当 era）
+        tokens.sort(key=lambda t: t[0])
+        cur_year: int | None = None
+        for _, kind, value in tokens:
+            if kind == "year":
+                cur_year = int(value)
+            elif kind == "title" and cur_year is not None:
+                bucket = by_year.setdefault(cur_year, {"releases": [], "context": ""})
+                if value and value not in bucket["releases"]:
+                    bucket["releases"].append(value)
+                if not bucket["context"]:
+                    bucket["context"] = _clean_career_context(sentence)
+    phases = [
+        CareerPhase(
+            period=str(year),
+            phase_name=str(year),
+            key_releases=by_year[year]["releases"][:5],
+            career_context=by_year[year]["context"],
+        )
+        for year in sorted(by_year)
+        if by_year[year]["releases"]
+    ]
+    return phases[:8]
+
+
 def lookup_metadata(agent: Any, entities: list[MusicEntity], deadline_at: float | None = None) -> dict[str, Any]:
     remaining = remaining_seconds(deadline_at)
     if remaining is not None and remaining < 1.0:
@@ -599,21 +763,50 @@ def lookup_metadata(agent: Any, entities: list[MusicEntity], deadline_at: float 
     }
 
 
-def search_reviews(entities: list[MusicEntity], deadline_at: float | None = None) -> dict[str, Any]:
+def _review_queries_for_entity(entity: MusicEntity) -> list[str]:
+    base = " ".join(part for part in [entity.artist, entity.name] if part).strip() or entity.name
+    if entity.type == "artist":
+        return [
+            f"{base} AllMusic biography",
+            f"{base} artist profile review",
+            f"{base} Pitchfork review",
+            f"{base} style influence interview",
+            f"{base} critical reception",
+        ]
+    return [
+        f"{base} Pitchfork review",
+        f"{base} AllMusic review",
+        f"{base} Guardian review",
+        f"{base} critical reception",
+        f"{base} 乐评 专辑 评价",
+    ]
+
+
+def search_reviews(
+    entities: list[MusicEntity],
+    deadline_at: float | None = None,
+    *,
+    intent: str = "",
+    query: str = "",
+) -> dict[str, Any]:
     remaining = remaining_seconds(deadline_at)
     if remaining is not None and remaining < 1.0:
         return {"citations": [], "opinions": [], "skipped_due_to_deadline": ["review_search"]}
     timeout = min(settings.knowledge_review_timeout_seconds, remaining or settings.knowledge_review_timeout_seconds)
     queries: list[str] = []
-    for entity in entities:
-        base = " ".join(part for part in [entity.artist, entity.name] if part).strip() or entity.name
+    if intent == "music_compare" and len(entities) >= 2:
+        left, right = entities[:2]
+        pair = f"{left.name} {right.name}".strip()
         queries.extend([
-            f"{base} Pitchfork review",
-            f"{base} AllMusic review",
-            f"{base} Guardian review",
-            f"{base} critical reception",
-            f"{base} 乐评 专辑 评价",
+            f"{pair} comparison style",
+            _review_queries_for_entity(left)[0],
+            _review_queries_for_entity(right)[0],
         ])
+    else:
+        for entity in entities:
+            queries.extend(_review_queries_for_entity(entity))
+    if query.strip():
+        queries.append(query.strip())
     deduped = []
     seen: set[str] = set()
     for q in queries:
@@ -872,12 +1065,17 @@ def _synthesize_dossier_prose(
     review_citations: list[MusicCitation],
     opinions: list[ReviewOpinion],
     deadline_at: float | None,
+    web_knowledge_claims: list[str] | None = None,
+    parametric: bool = False,
 ) -> dict[str, str] | None:
     """把零散（多为英文）证据交给 LLM 翻译+总结成连贯中文。
 
     防幻觉铁律：只允许基于给定证据改写/翻译/压缩，禁止补充证据外的事实。证据不足时
     宁可返回 None 让上层走机械兜底，也不硬编。严格 JSON 输出——解析失败即视为不可用，
     保证 MockLLM（离线测试）与任何非 JSON 回复都安全回落到机械摘要，输出确定。
+
+    ``web_knowledge_claims``：强搜索 provider 产出的结构化事实（web 真来源或 DeepSeek 先验）。
+    ``parametric=True`` 时这些 claim 来自模型先验、未联网核实——会如实声明，绝不冒充有据可查。
 
     返回 {"summary": ..., "critical_consensus": ...}，或 None（无 LLM / 无证据 / 无预算 / 解析失败）。
     """
@@ -887,7 +1085,8 @@ def _synthesize_dossier_prose(
     # 没有任何可总结的证据就不调 LLM（省延迟，也避免"无中生有"）。
     facts = [f for f in evidence_pack.facts if f.strip()]
     critic_points = [c for c in evidence_pack.critic_points if c.strip()]
-    if not meta_text and not facts and not critic_points:
+    claims = [c.strip() for c in (web_knowledge_claims or []) if c and c.strip()]
+    if not meta_text and not facts and not critic_points and not claims:
         return None
     # 预算闸：合成是锦上添花，剩余时间不足 2.5s 直接放弃走机械兜底，守住知识链硬预算。
     remaining = remaining_seconds(deadline_at)
@@ -904,6 +1103,9 @@ def _synthesize_dossier_prose(
     for o in opinions[:6]:
         if o.summary.strip():
             evidence_lines.append(f"- 评价（{o.source}/{o.sentiment}）：{o.summary[:200]}")
+    for claim in claims[:8]:
+        tag = "模型先验事实（未联网核实，仅供组织语言，不得冒充有据可查）" if parametric else "已知事实"
+        evidence_lines.append(f"- {tag}：{claim[:300]}")
     if style_tags:
         evidence_lines.append(f"- 风格标签：{'、'.join(style_tags[:8])}")
     has_reviews = bool(review_citations or critic_points)
@@ -914,6 +1116,11 @@ def _synthesize_dossier_prose(
         "严禁补充证据里没有的事实、评分、年份或人物。证据是英文或德文就翻译成自然地道的中文，"
         "不要保留外文残句、不要逐条罗列证据条目，要融会成连贯的分析。"
     )
+    if parametric:
+        system += (
+            "本次证据主要来自模型先验知识、未联网核实；summary 须在末尾如实简短说明"
+            "“基于模型先验知识，具体来源/评分请另行核实”，不要冒充引用了真实出处。"
+        )
     consensus_rule = (
         "综合多条乐评，写 3-5 句中文共识：点明专辑在制作、词曲、概念、人声、影响力等维度的具体表现，"
         "引用评论的关键观点或评价倾向，若有分歧也点明；行文专业、信息密度高、连贯成段。"
@@ -948,6 +1155,99 @@ def _synthesize_dossier_prose(
     return {"summary": summary[:1000], "critical_consensus": consensus[:1000]}
 
 
+def _match_library_to_entity(
+    agent: Any,
+    user_id: str,
+    entity: MusicEntity,
+    style_tags: list[str],
+    *,
+    limit: int = 8,
+) -> list[LibraryMatch]:
+    """把知识档案的实体与用户曲库交叉命中，让回答「结合你的库与口味」。
+
+    两级命中（强→弱）：
+      1) artist：库里 artist 字段（拆合作歌手后）命中该歌手/专辑艺人——精确、最强信号；
+      2) genre：库里曲风与档案 style_tags 有交集——扩展命中，曲风是粗标签，排在 artist 后。
+    再用用户 top 口味（曲风/歌手）标 taste_aligned，taste_aligned 的排前。
+
+    全程容错：拿不到 agent/库/口味就返回空，绝不让知识链路因个性化失败而崩。
+    """
+    if agent is None or not user_id:
+        return []
+    try:
+        from app.recommend.engine import _split_artists
+
+        assets = [a for a in agent.list_assets() if getattr(a, "status", "") == "analyzed"]
+    except Exception:
+        logger.debug("library match: list_assets 失败", exc_info=True)
+        return []
+    if not assets:
+        return []
+
+    # 目标艺人集合：album 用其 artist，artist 实体用 name；都拆合作歌手并归一。
+    target_artists: set[str] = set()
+    for raw in (entity.artist, entity.name if entity.type == "artist" else ""):
+        for piece in _split_artists(raw):
+            if piece:
+                target_artists.add(piece)
+    target_styles = {_match_norm(t) for t in style_tags if t}
+    # 同时纳入父类：档案标签可能是细分（"另类R&B"）而库里是一级（"R&B"），或反之；
+    # 上卷到父类再比，粗细两种粒度都能命中（依赖 genres.parent_genre）。
+    from app.genres import parent_genre
+
+    target_styles |= {_match_norm(parent_genre(t)) for t in style_tags if t}
+
+    # 用户 top 口味，用于 taste_aligned 加权（容错：拿不到就空集，不加权）。
+    taste_artists: set[str] = set()
+    taste_genres: set[str] = set()
+    try:
+        profile = agent.get_taste_profile(user_id)
+        taste_artists = {_match_norm(a) for a, _ in (profile.top_artists or [])}
+        taste_genres = {_match_norm(g) for g, _ in (profile.top_genres or [])}
+    except Exception:
+        logger.debug("library match: get_taste_profile 失败", exc_info=True)
+
+    artist_hits: list[LibraryMatch] = []
+    genre_hits: list[LibraryMatch] = []
+    seen: set[str] = set()
+    for asset in assets:
+        title = (asset.title or "").strip()
+        if not title:
+            continue
+        key = _match_norm(title) + "|" + _match_norm(asset.artist or "")
+        if key in seen:
+            continue
+        asset_artists = {a for a in _split_artists(asset.artist) if a}
+        # 库曲风也上卷父类，与 target_styles 同口径比较，粗细互通。
+        asset_genres_norm = {_match_norm(g) for g in (asset.genre or [])}
+        asset_genres_norm |= {_match_norm(parent_genre(g)) for g in (asset.genre or [])}
+        is_artist_hit = bool(target_artists & asset_artists)
+        is_genre_hit = bool(target_styles & asset_genres_norm) and not is_artist_hit
+        if not (is_artist_hit or is_genre_hit):
+            continue
+        seen.add(key)
+        taste_aligned = bool(
+            (asset_artists & taste_artists) or (asset_genres_norm & taste_genres)
+        )
+        match = LibraryMatch(
+            title=title,
+            artist=asset.artist or "",
+            source=asset.source or "local",
+            source_id=asset.external_id or "",
+            asset_id=asset.asset_id,
+            cover_url=asset.cover_url or "",
+            genre=list(asset.genre or []),
+            relation="artist" if is_artist_hit else "genre",
+            taste_aligned=taste_aligned,
+        )
+        (artist_hits if is_artist_hit else genre_hits).append(match)
+
+    # 排序：artist 命中优先于 genre；同级里 taste_aligned 优先。
+    artist_hits.sort(key=lambda m: not m.taste_aligned)
+    genre_hits.sort(key=lambda m: not m.taste_aligned)
+    return (artist_hits + genre_hits)[:limit]
+
+
 def build_dossier(
     agent: Any,
     query: str,
@@ -962,23 +1262,67 @@ def build_dossier(
     skipped: list[str] | None = None,
     albums: list[dict[str, Any]] | None = None,
     timed_out: list[str] | None = None,
+    web_knowledge_claims: list[str] | None = None,
+    web_knowledge_provider: str = "",
+    web_knowledge_answer: str = "",
+    web_knowledge_style_tags: list[str] | None = None,
+    user_id: str = "",
 ) -> MusicDossier:
     entity = entities[0] if entities else MusicEntity(type=_infer_entity_type(query, intent), name=_guess_entity_name(query), source="query")
-    cached = read_cached_dossier(agent, entity)
+    is_compare = intent == "music_compare" and len(entities) >= 2
+    cached = read_cached_dossier(
+        agent,
+        entity,
+        related=entities[1:2] if is_compare else None,
+        intent=intent,
+    )
     if cached and not skipped:
-        return cached.model_copy(update={"partial": False, "degraded_reason": None})
+        # library_matches 是 per-user 的，缓存按实体+意图共享、不含用户维度——命中后
+        # 必须用当前 user_id 重算，否则会把别的用户/旧用户的库命中带出来。
+        refreshed_matches = (
+            _match_library_to_entity(agent, user_id, cached.entity, cached.style_tags)
+            if cached.entity.ambiguity != "ambiguous" else []
+        )
+        return cached.model_copy(update={
+            "partial": False,
+            "degraded_reason": None,
+            "library_matches": refreshed_matches,
+        })
 
     # ── Phase 0 证据一致性校验：剔除归属错误的 citation/曲目，治同名实体资料混拼 ──
-    report = validate_evidence_consistency(entity, metadata_citations, review_citations, tracks)
+    report = (
+        validate_compare_evidence_consistency(entities[:2], metadata_citations, review_citations, tracks)
+        if is_compare else
+        validate_evidence_consistency(entity, metadata_citations, review_citations, tracks)
+    )
     citations = _limit_citations(report.kept_citations)
     tracks = report.kept_tracks
     # 合成只喂「命中目标实体」的资料，避免把同名异作品的乐评混进 LLM 总结。
-    on_target = [c for c in report.kept_citations if citation_entity_score(c, entity) >= 0.5]
+    if is_compare:
+        on_target = [
+            c for c in report.kept_citations
+            if any(citation_entity_score(c, compare_entity) >= 0.5 for compare_entity in entities[:2])
+        ]
+    else:
+        on_target = [c for c in report.kept_citations if citation_entity_score(c, entity) >= 0.5]
     synth_citations = on_target or report.kept_citations
 
-    meta_text = _first_nonempty(*(m.get("summary", "") for m in metadata), *(m.get("bio", "") for m in metadata))
+    if is_compare:
+        meta_chunks: list[str] = []
+        for compare_entity in entities[:2]:
+            matched = next((
+                str(item.get("summary") or item.get("bio") or "").strip()
+                for item in metadata
+                if _norm((item.get("entity") or {}).get("name") or "") == _norm(compare_entity.name)
+                and str(item.get("summary") or item.get("bio") or "").strip()
+            ), "")
+            if matched:
+                meta_chunks.append(f"{compare_entity.name}: {matched}")
+        meta_text = "\n".join(meta_chunks[:2])
+    else:
+        meta_text = _first_nonempty(*(m.get("summary", "") for m in metadata), *(m.get("bio", "") for m in metadata))
     evidence_pack = build_evidence_pack(metadata, synth_citations, opinions)
-    style_tags = _merge_unique([*_tags_from_metadata(metadata), *evidence_pack.sound_descriptors])[:8]
+    style_tags = _merge_unique([*(web_knowledge_style_tags or []), *_tags_from_metadata(metadata), *evidence_pack.sound_descriptors])[:8]
     partial_reasons: list[str] = []
     skipped = skipped or []
     timed_out = timed_out or []
@@ -997,13 +1341,41 @@ def build_dossier(
     if remaining_seconds(deadline_at) is not None and remaining_seconds(deadline_at) <= 0:
         partial_reasons.append(f"本轮达到 {int(settings.knowledge_turn_budget_seconds)} 秒知识链路预算")
 
-    is_compare = intent == "music_compare" and len(entities) >= 2
+    # 强搜索 provider 走 DeepSeek 先验（无真网页来源）时：去掉"乐评未取回/外部资料不足"的失败性描述，
+    # 换成诚实的先验声明——仍标 partial 让前端 dossier-warning 显示，但内容来自直答/claim，不再是"资料不足"。
+    is_parametric = web_knowledge_provider == "deepseek_parametric" and bool(web_knowledge_answer or web_knowledge_claims)
+    if is_parametric:
+        # parametric 直答是完整正文（只是未联网核实），不是"资料不完整"——
+        # 剔除"乐评未取回/外部资料不足"这类失败性描述（它们不适用于一份成文的直答），
+        # 但不再往 partial_reasons 塞免责声明：改由 is_parametric 标志承载，前端显柔和徽标、
+        # 气泡出短声明，避免「明明是完整深度解读却挂琥珀色"资料不完整"警告」。
+        partial_reasons = [
+            r for r in partial_reasons
+            if "乐评来源本轮未在时间预算内取回足够结果" not in r
+            and "外部资料来源不足，无法做完整乐评总结" not in r
+        ]
+
     ambiguous = entity.ambiguity == "ambiguous" and not is_compare
     guide = _listening_guide(entity, tracks, style_tags)
     career_phases: list[CareerPhase] = []
+    summary_is_narrative = False
     if entity.type == "artist" and not is_compare and not ambiguous:
         career_phases = _build_career_timeline(entity, albums or [], tracks, meta_text, style_tags)
+        # parametric 直答正文通常自带「年份+专辑」的时间脉络——实体解析空（无专辑年表）时，
+        # 从正文抽出来替换掉上面的无年份空壳阶段，给 artist 仍一条可读时间线，而不是
+        # 「代表作品 / 来源未提供明确发行年份」。抽空则保留原 career_phases。
+        if is_parametric and web_knowledge_answer:
+            _extracted_phases = _extract_career_phases_from_text(web_knowledge_answer)
+            if _extracted_phases:
+                career_phases = _extracted_phases
     if is_compare:
+        profiled = _artist_compare_profile(entities[0], entities[1])
+        if profiled:
+            partial_reasons = [
+                reason for reason in partial_reasons
+                if "乐评来源本轮未在时间预算内取回足够结果" not in reason
+                and "外部资料来源不足，无法做完整乐评总结" not in reason
+            ]
         summary = _compare_summary(entities[0], entities[1])
         related = [entities[1]]
         consensus = _critical_consensus(citations, opinions)
@@ -1013,26 +1385,82 @@ def build_dossier(
         related = entities[1:]
         consensus = ""
         partial_reasons.append("实体存在同名歧义，已改为返回消歧提示而非完整答案")
-    elif not report.ok:
+    elif not report.ok and not web_knowledge_answer and not web_knowledge_claims:
         # 证据归属不一致/全部偏题：抑制完整总结，回落机械兜底，防混拼错误实体。
+        # （有 web_knowledge 直答/claim 时放过——先验产物不走一致性校验，仍可出带声明的总结。）
         related = entities[1:]
         summary = f"我整理了《{entity.name}》的可追溯音乐资料，但本轮证据归属不一致，未能合成可靠总结（原始资料多为英文，已避免直出以免误导）。"
         consensus = ""
         partial_reasons.append("证据归属不一致，已抑制完整总结以防混拼错误实体")
     else:
         related = entities[1:]
-        # 合成层：把零散英文证据(MB/Spotify/Discogs/乐评摘录)交给 LLM 翻译+总结成
-        # 连贯中文 summary/乐评共识，治"原始摘录直出、半句英文"。失败/无预算/无证据时
-        # 回落机械摘要，保证 offline(MockLLM)与降级路径确定可用。
-        synth = _synthesize_dossier_prose(
-            agent, entity, meta_text, style_tags, evidence_pack, synth_citations, opinions, deadline_at,
-        )
-        if synth:
-            summary = synth.get("summary") or f"我整理了《{entity.name}》的可追溯音乐资料。"
-            consensus = synth.get("critical_consensus") or _critical_consensus(citations, opinions)
+        if web_knowledge_answer:
+            # DeepSeek 直答（parametric）：直接用作正文，不再二次合成——对名盘模型知识扎实，
+            # 一次写全比「抽要点→再改写」更准、更省、更少信息损失（参考裸 DeepSeek chat 效果）。
+            # 经 _polish_narrative 清洗：去掉模型自带的资料声明/风格标签尾巴（这些由卡片承载，
+            # 否则正文与卡片重复），归一标题层级与空行。
+            summary = _polish_narrative(web_knowledge_answer)[:4000]
+            summary_is_narrative = True
+            # 直答正文已含乐评口碑讨论，不再单列 consensus——否则 _critical_consensus 在无真引用时
+            # 会输出"本轮没有拿到足够乐评来源"，与富正文自相矛盾、误导用户。
+            consensus = ""
         else:
-            summary = f"我整理了《{entity.name}》的可追溯音乐资料，但本轮未能合成完整中文介绍（资料来源多为英文原文，已避免直出半句英文）。"
-            consensus = _critical_consensus(citations, opinions)
+            # 合成层：把零散英文证据(MB/Spotify/Discogs/乐评摘录)交给 LLM 翻译+总结成
+            # 连贯中文 summary/乐评共识，治"原始摘录直出、半句英文"。失败/无预算/无证据时
+            # 回落机械摘要，保证 offline(MockLLM)与降级路径确定可用。
+            synth = _synthesize_dossier_prose(
+                agent, entity, meta_text, style_tags, evidence_pack, synth_citations, opinions, deadline_at,
+                web_knowledge_claims=web_knowledge_claims,
+                parametric=is_parametric,
+            )
+            if synth:
+                summary = synth.get("summary") or f"我整理了《{entity.name}》的可追溯音乐资料。"
+                consensus = synth.get("critical_consensus") or _critical_consensus(citations, opinions)
+            else:
+                summary = f"我整理了《{entity.name}》的可追溯音乐资料，但本轮未能合成完整中文介绍（资料来源多为英文原文，已避免直出半句英文）。"
+                consensus = _critical_consensus(citations, opinions)
+    key_tracks = tracks[:8]
+    if is_compare:
+        profiled = _artist_compare_profile(entities[0], entities[1])
+        if profiled and profiled.get("entry_tracks"):
+            track_map = profiled["entry_tracks"]
+            key_tracks = [
+                TrackRef(title=title, artist=artist_name.title() if artist_name.islower() else artist_name, source="guide")
+                for artist_name, titles in track_map.items()
+                for title in titles
+            ][:10]
+        else:
+            grouped: list[TrackRef] = []
+            for compare_entity in entities[:2]:
+                seen_titles: set[str] = set()
+                for track in tracks:
+                    title = (track.title or "").strip()
+                    if not title:
+                        continue
+                    if compare_entity.type == "artist":
+                        match = _track_matches_artist(track, compare_entity.name)
+                        if match is False:
+                            continue
+                    elif compare_entity.artist:
+                        match = _track_matches_artist(track, compare_entity.artist)
+                        if match is False:
+                            continue
+                    key = title.lower()
+                    if key in seen_titles:
+                        continue
+                    seen_titles.add(key)
+                    grouped.append(track)
+                    if len(seen_titles) >= 4:
+                        break
+            if grouped:
+                key_tracks = grouped[:8]
+
+    # 个性化：把档案实体与用户曲库/口味交叉命中（不影响百科正文，只追加"你库里有…"）。
+    # 同名歧义未澄清时不匹配——避免把无关同名实体的库歌硬塞进来。
+    library_matches: list[LibraryMatch] = []
+    if not ambiguous:
+        library_matches = _match_library_to_entity(agent, user_id, entity, style_tags)
+
     dossier = MusicDossier(
         entity=entity,
         summary=summary,
@@ -1040,19 +1468,90 @@ def build_dossier(
         style_tags=style_tags,
         critical_consensus=consensus,
         audience_reception=_audience_reception(citations),
-        key_tracks=tracks[:8],
+        key_tracks=key_tracks,
         listening_guide=guide,
         career_phases=career_phases,
         related_albums=(albums or [])[:6],
         related_entities=related,
+        library_matches=library_matches,
         citations=citations,
         review_opinions=opinions[:settings.knowledge_max_review_sources],
         uncertainties=[*partial_reasons, *evidence_pack.disagreements[:2]][:4],
-        partial=bool(partial_reasons) or ambiguous or not report.ok,
+        partial=bool(partial_reasons) or ambiguous or (not report.ok and not is_parametric),
         degraded_reason="；".join(partial_reasons) if partial_reasons else None,
+        summary_is_narrative=summary_is_narrative,
+        is_parametric=is_parametric,
     )
-    write_cached_dossier(agent, dossier)
+    write_cached_dossier(agent, dossier, intent=intent)
     return dossier
+
+
+def _polish_narrative(text: str) -> str:
+    """清洗 DeepSeek 直答正文，去掉与卡片重复/冗余的尾巴，归一 markdown 排版。
+
+    模型即便被要求只写正文，仍常自带这些尾巴：资料声明（"资料状态：…未联网核实"）、
+    风格标签行、空的"乐评共识：本轮没有拿到足够乐评来源"。这些信息卡片已用结构化字段
+    （degraded_reason / style_tags / critical_consensus）承载，留在正文里就是重复。
+    这里按行级保守剔除——只删整行匹配「元信息标签：…」的行，不动正文叙述。
+    """
+    if not text:
+        return ""
+    # 元信息行前缀：整行以这些标签开头时视为机械尾巴，删除（值可在冒号后任意）。
+    meta_prefixes = (
+        "资料状态", "资料来源状态", "风格标签", "风格定位", "乐评/资料共识", "乐评共识",
+        "免责声明", "声明", "注：本", "备注：", "数据来源", "信息来源",
+    )
+    # 这些是模型自带的"没拿到来源/未联网"句式，整行命中即删（避免与卡片声明重复）。
+    meta_substrings = (
+        "未联网核实", "没有拿到足够乐评", "不硬凑专业评价", "基于模型先验",
+        "以上内容基于", "仅供参考", "请以官方", "请另行确认",
+    )
+    kept: list[str] = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        stripped = line.lstrip("#*->•　 \t").strip()
+        head = stripped.split("：", 1)[0].split(":", 1)[0].strip()
+        if head in meta_prefixes:
+            continue
+        if any(sub in stripped for sub in meta_substrings):
+            continue
+        kept.append(line)
+    cleaned = "\n".join(kept)
+    # 归一：最多保留一个空行；去掉行尾空白；统一全角/裸标题层级到 markdown。
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    return cleaned.strip()
+
+
+def _library_match_lines(dossier: MusicDossier) -> list[str]:
+    """渲染「结合你的库」段落：把档案与用户曲库的命中接进回答，体现真正的个性化。
+
+    artist 精确命中和 genre 同曲风扩展分开表述；口味契合（taste_aligned）的加标记。
+    无命中返回空（不硬凑「你库里没有」这种负面话术）。
+    """
+    matches = dossier.library_matches or []
+    if not matches:
+        return []
+    artist_hits = [m for m in matches if m.relation == "artist"]
+    genre_hits = [m for m in matches if m.relation == "genre"]
+    lines = ["\n结合你的曲库："]
+    if artist_hits:
+        names = "、".join(f"《{m.title}》" for m in artist_hits[:5] if m.title)
+        aligned = any(m.taste_aligned for m in artist_hits)
+        tail = "，正合你的口味" if aligned else ""
+        lines.append(f"- 你库里已有 TA 的 {names}{tail}，可以直接对照着听。")
+    if genre_hits:
+        names = "、".join(f"《{m.title}》" for m in genre_hits[:4] if m.title)
+        # 取命中曲风里更细的标签做说明（如"中文说唱/英伦摇滚"），无则泛称同风格。
+        style = "、".join(dict.fromkeys(g for m in genre_hits[:4] for g in m.genre))[:40]
+        style_hint = f"（{style}）" if style else ""
+        lines.append(f"- 同风格{style_hint}你还听过 {names}，可作延伸。")
+    return lines
+
+
+# parametric 直答的诚实标注（气泡末尾一行短声明）。卡片层面由前端柔和徽标承载，
+# 气泡保留这一行让"未联网核实"在正文上下文里也可见——用短句、不复读免责长文。
+_PARAMETRIC_NOTE = "以上由 AI 知识库生成，未联网核实；具体来源/评分请另行确认。"
 
 
 def _artist_career_answer(dossier: MusicDossier) -> str:
@@ -1080,25 +1579,30 @@ def _artist_career_answer(dossier: MusicDossier) -> str:
             lines.append("\n入门聆听路线：先听 " + names + "，再按上面的代表作扩展。")
     if dossier.critical_consensus:
         lines.append("\n乐评/资料共识：" + dossier.critical_consensus)
+    lines.extend(_library_match_lines(dossier))
     if dossier.citations:
         lines.append("\n参考来源：")
         for c in dossier.citations[:3]:
             label = c.title or c.source
             lines.append(f"- {label}：{c.url}" if c.url else f"- {label}")
+    if dossier.is_parametric:
+        lines.append("\n" + _PARAMETRIC_NOTE)
     return "\n".join(lines)
 
 
 def dossier_answer(dossier: MusicDossier) -> str:
     if dossier.related_entities:
         other = dossier.related_entities[0]
+        profiled = _artist_compare_profile(dossier.entity, other)
         lines = [f"{dossier.entity.name} 和 {other.name} 的区别：{dossier.summary}"]
         if dossier.partial and dossier.degraded_reason:
             lines.append(f"\n资料状态：{dossier.degraded_reason}。")
         lines.extend(_compare_detail_lines(dossier.entity, other))
-        if dossier.key_tracks:
+        if dossier.key_tracks and not profiled:
             names = "、".join(f"《{t.title}》" for t in dossier.key_tracks[:5] if t.title)
             if names:
                 lines.append("\n本轮抓到的可听入口：" + names)
+        lines.extend(_library_match_lines(dossier))
         if dossier.citations:
             lines.append("\n参考来源：")
             for c in dossier.citations[:3]:
@@ -1107,6 +1611,18 @@ def dossier_answer(dossier: MusicDossier) -> str:
         return "\n".join(lines)
     if dossier.entity.type == "artist" and dossier.career_phases:
         return _artist_career_answer(dossier)
+    if dossier.summary_is_narrative:
+        # DeepSeek 直答：summary 本身就是一篇成文的 markdown 深度解读，正文已含曲目/口碑。
+        # 气泡只出这篇正文，不再追加风格标签/资料状态/可以先听等机械尾巴——这些由前端
+        # dossier 卡片用结构化字段承载，避免气泡与卡片重复整段内容。
+        # 追加「结合你的曲库」（个性化信号）+ parametric 短声明（未联网核实的诚实标注）。
+        parts = [dossier.summary]
+        match_lines = _library_match_lines(dossier)
+        if match_lines:
+            parts.append("\n".join(match_lines))
+        if dossier.is_parametric:
+            parts.append(_PARAMETRIC_NOTE)
+        return "\n".join(parts)
     lines = [f"{dossier.entity.name}：{dossier.summary}"]
     if dossier.partial and dossier.degraded_reason:
         lines.append(f"\n资料状态：{dossier.degraded_reason}。")
@@ -1120,6 +1636,7 @@ def dossier_answer(dossier: MusicDossier) -> str:
     if dossier.listening_guide:
         lines.append("\n聆听路线：")
         lines.extend(f"- {item}" for item in dossier.listening_guide[:4])
+    lines.extend(_library_match_lines(dossier))
     if dossier.citations:
         lines.append("\n参考来源：")
         for c in dossier.citations[:3]:
@@ -1754,17 +2271,29 @@ def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None 
 def _guess_entity_name(query: str) -> str:
     text = re.sub(r"[《》“”\"']", " ", query or "")
     text = _strip_entity_noise(text)
-    text = re.sub(r"(区别在哪|有什么区别|区别|不同|系统|音乐路线|是什么|怎么样|如何)", " ", text, flags=re.I)
-    text = re.sub(r"的\s*$", "", text.strip())
+    text = re.sub(r"(区别在哪|有什么区别|区别|不同|系统|音乐路线|是什么|怎么样|如何|风格差异|差异在哪)", " ", text, flags=re.I)
+    text = re.sub(r"(并给我|给我|顺便给我|再给我|分别给我|各自的).*$", " ", text, flags=re.I)
+    text = re.sub(r"(入门歌|入门曲|代表作|代表歌|推荐歌单|推荐歌曲).*$", " ", text, flags=re.I)
+    text = text.strip(" ？?，,。.")
+    text = re.sub(r"\s*的\s*$", "", text.strip())
     text = re.sub(r"\s+", " ", text).strip(" ？?，,。.")
     return _canonical_music_name(text or (query or "未知音乐实体").strip())
 
 
 def _compare_names(query: str) -> list[str]:
     raw = re.sub(r"[《》“”\"']", " ", query or "")
+    raw = re.sub(r"^\s*(比较一下|比较|对比一下|对比)\s*", "", raw, flags=re.I)
     parts = re.split(r"\s+(?:vs|VS|Vs)\s+|\s+和\s+|和|对比|比较", raw)
-    names = [_guess_entity_name(part) for part in parts]
-    return [n for n in names if n][:2]
+    names: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        cleaned = _guess_entity_name(part)
+        normalized = cleaned.strip().lower()
+        if not cleaned or normalized in seen or normalized == "未知音乐实体":
+            continue
+        seen.add(normalized)
+        names.append(cleaned)
+    return names[:2]
 
 
 def _canonical_music_name(name: str) -> str:
@@ -1782,6 +2311,9 @@ def _canonical_music_name(name: str) -> str:
 
 def _compare_summary(left: MusicEntity, right: MusicEntity) -> str:
     pair = {left.name.lower(), right.name.lower()}
+    profiled = _artist_compare_profile(left, right)
+    if profiled:
+        return profiled["summary"]
     if {"kid a", "ok computer"} <= pair:
         return (
             "《OK Computer》仍站在吉他摇滚和戏剧化歌曲结构里讨论现代焦虑；"
@@ -1797,6 +2329,9 @@ def _compare_summary(left: MusicEntity, right: MusicEntity) -> str:
 
 def _compare_detail_lines(left: MusicEntity, right: MusicEntity) -> list[str]:
     pair = {left.name.lower(), right.name.lower()}
+    profiled = _artist_compare_profile(left, right)
+    if profiled:
+        return list(profiled["lines"])
     if {"kid a", "ok computer"} <= pair:
         return [
             "\n1. 声音/制作：\n- 《OK Computer》核心仍是吉他、鼓、贝斯和 Thom Yorke 的旋律线，只是编曲更宏大、更偏 art rock。\n- 《Kid A》把乐队声响打散，更多使用电子纹理、合成器、采样式剪辑、冷感鼓机和爵士铜管。",
@@ -1819,10 +2354,173 @@ def _compare_detail_lines(left: MusicEntity, right: MusicEntity) -> list[str]:
     ]
 
 
+def _build_artist_compare_profile(
+    left: MusicEntity,
+    right: MusicEntity,
+    *,
+    summary: str,
+    sides: dict[str, dict[str, Any]],
+    shared_ground: list[str],
+    intersection_summary: str,
+    collaboration_tracks: list[str],
+) -> dict[str, Any]:
+    left_key = left.name.lower()
+    right_key = right.name.lower()
+    left_side = sides[left_key]
+    right_side = sides[right_key]
+    return {
+        "summary": summary,
+        "axes": [
+            {
+                "axis": "声音重心",
+                "left": left_side["sound_focus"],
+                "right": right_side["sound_focus"],
+                "summary": "两边的核心吸引力不在同一个维度。",
+            },
+            {
+                "axis": "叙事方式",
+                "left": left_side["narrative"],
+                "right": right_side["narrative"],
+                "summary": "一个更靠可引用的表达，一个更靠整体状态与氛围。",
+            },
+            {
+                "axis": "入门路径",
+                "left": left_side["entry_path"],
+                "right": right_side["entry_path"],
+                "summary": "入门时最好先顺着各自最强的场景切。",
+            },
+        ],
+        "shared_ground": shared_ground,
+        "intersection_summary": intersection_summary,
+        "collaboration_tracks": collaboration_tracks,
+        "lines": [
+            f"\n1. 声音重心：\n- {left.name}：{left_side['sound_focus']}\n- {right.name}：{right_side['sound_focus']}",
+            f"\n2. 叙事方式：\n- {left.name}：{left_side['narrative']}\n- {right.name}：{right_side['narrative']}",
+            f"\n3. 节奏与场景：\n- {left.name}：{left_side['entry_path']}\n- {right.name}：{right_side['entry_path']}",
+            (
+                f"\n4. 入门歌：\n- {left.name}：先听"
+                f"{''.join(f'《{title}》' for title in left_side['entry_tracks'][:5])}。\n"
+                f"- {right.name}：先听"
+                f"{''.join(f'《{title}》' for title in right_side['entry_tracks'][:5])}。"
+            ),
+            (
+                f"\n5. 怎么判断你更吃哪边：\n- 如果你更在意 {left_side['preference_test']}，先从 {left.name} 走。\n"
+                f"- 如果你更在意 {right_side['preference_test']}，先从 {right.name} 走。"
+            ),
+        ],
+        "entry_tracks": {
+            left_key: list(left_side["entry_tracks"]),
+            right_key: list(right_side["entry_tracks"]),
+        },
+        "artist_cards": [
+            {
+                "name": left.name,
+                "reason": left_side["card_reason"],
+                "representative_tracks": list(left_side["entry_tracks"][:3]),
+            },
+            {
+                "name": right.name,
+                "reason": right_side["card_reason"],
+                "representative_tracks": list(right_side["entry_tracks"][:3]),
+            },
+        ],
+    }
+
+
+def _artist_compare_profile(left: MusicEntity, right: MusicEntity) -> dict[str, Any] | None:
+    """High-confidence artist comparison profiles for common interview/demo pairs."""
+    if left.type != "artist" or right.type != "artist":
+        return None
+    names = {left.name.lower(), right.name.lower()}
+    if {"drake", "future"} <= names:
+        return _build_artist_compare_profile(
+            left,
+            right,
+            summary=(
+                "Drake 更像把说唱、R&B 旋律和流行歌曲结构打通的主流叙事者；"
+                "Future 更偏 trap 氛围、Auto-Tune 质感和情绪化的重复律动，核心魅力在声音状态和黑暗能量。"
+            ),
+            sides={
+                "drake": {
+                    "sound_focus": "hook、旋律化 rap、人声亲近感，容易进入流行语境。",
+                    "narrative": "把关系、成功焦虑、城市夜生活写成可引用的个人独白。",
+                    "entry_path": "适合从旋律说唱、R&B crossover、俱乐部单曲进入。",
+                    "entry_tracks": ["Headlines", "Hold On, We're Going Home", "Marvins Room", "Passionfruit", "Nonstop"],
+                    "preference_test": "旋律、歌词可引用度和 pop 结构",
+                    "card_reason": "旋律说唱、R&B crossover、hook 感和流行结构更强。",
+                },
+                "future": {
+                    "sound_focus": "低频、808、迷幻合成器和 Auto-Tune 人声纹理，听感更黏、更暗。",
+                    "narrative": "把情绪压进重复短句和 ad-lib，叙事不一定完整但状态非常强。",
+                    "entry_path": "适合从 trap banger、mixtape 气质和夜晚驾驶感进入。",
+                    "entry_tracks": ["March Madness", "Mask Off", "Codeine Crazy", "Thought It Was a Drought", "Low Life"],
+                    "preference_test": "氛围、低频冲击和情绪沉浸",
+                    "card_reason": "808、Auto-Tune、trap 氛围和夜晚驾驶感更强。",
+                },
+            },
+            shared_ground=[
+                "都站在 2010s 主流 rap/R&B 核心地带。",
+                "都大量使用旋律化说唱，而不是纯技术型密集 spit。",
+                "都擅长把夜生活、成功后的空心感和关系拉扯写进热门单曲。",
+            ],
+            intersection_summary=(
+                "两人的交集不在“唱得像不像”，而在于都把旋律说唱、俱乐部能量和夜晚情绪"
+                "推到了主流 rap 的中心，只是 Drake 更亮、更会写流行句子，Future 更暗、更会做状态。"
+            ),
+            collaboration_tracks=["Jumpman", "Digital Dash", "Big Rings", "Scholarships", "Live From the Gutter"],
+        )
+    if {"drake", "the weeknd"} <= names:
+        return _build_artist_compare_profile(
+            left,
+            right,
+            summary=(
+                "Drake 更像把 rap、R&B 和流行单曲结构熔在一起的城市叙事者；"
+                "The Weeknd 更偏暗色 synth-pop / alternative R&B 的氛围导演，强项是欲望、孤独和夜生活的电影感。"
+            ),
+            sides={
+                "drake": {
+                    "sound_focus": "hook、旋律化 rap、R&B 过门和更贴近主流流行的歌曲结构。",
+                    "narrative": "把关系、虚荣、成功焦虑和城市夜生活写成第一人称独白，句子感很强。",
+                    "entry_path": "适合从旋律说唱、情歌向 rap、俱乐部 crossover 单曲进入。",
+                    "entry_tracks": ["Headlines", "Hold On, We're Going Home", "Marvins Room", "Passionfruit", "One Dance"],
+                    "preference_test": "旋律说唱、歌词可引用度和流行结构",
+                    "card_reason": "旋律 rap 与 R&B 过门自然，最强项是可引用的人称叙事与单曲感。",
+                },
+                "the weeknd": {
+                    "sound_focus": "假声、暗色合成器、80s synth-pop 光泽和更强的夜色氛围包裹感。",
+                    "narrative": "更少直接讲完整故事，更擅长把欲望、空虚、堕落和自毁写成一整片情绪场。",
+                    "entry_path": "适合从 dark R&B 代表作、流行爆单和电影感长线作品三条线切入。",
+                    "entry_tracks": ["Wicked Games", "The Hills", "Can't Feel My Face", "Blinding Lights", "After Hours"],
+                    "preference_test": "氛围、假声质感、夜色电影感和 synth-pop 包裹感",
+                    "card_reason": "暗色 alt-R&B 与 synth-pop 气质更浓，最强项是夜色氛围和人声质感。",
+                },
+            },
+            shared_ground=[
+                "两人都把 Toronto 气质、夜生活主题和旋律性推到 2010s 主流中心。",
+                "都擅长把脆弱、自我放大和关系拉扯写进高度流行化的作品里。",
+                "都不是纯技术炫技型路线，真正吸引人的点在情绪表达和声音世界。",
+            ],
+            intersection_summary=(
+                "两人的交集在于都能把夜晚、欲望和情绪空洞做成主流流行语境里的大歌，"
+                "但 Drake 更像把这些写成可引用的日记，The Weeknd 更像把这些拍成霓虹色的夜间电影。"
+            ),
+            collaboration_tracks=["Crew Love", "Live For", "The Zone"],
+        )
+    return None
+
+
 def _infer_entity_type(query: str, intent: str) -> str:
     q = (query or "").lower()
     if intent == "sample_lookup":
         return "track"
+    if intent == "music_compare":
+        if any(k in q for k in ["专辑", "album", "这张", "唱片"]):
+            return "album"
+        if any(k in q for k in ["这首", "歌曲", "track", "single", "单曲"]):
+            return "track"
+        if any(k in q for k in ["歌手", "艺人", "乐队", "artist", "风格", "路线", "入门歌", "代表作", "各自"]):
+            return "artist"
+        return "album"
     if intent == "artist_deep_dive" or any(k in q for k in ["歌手", "艺人", "乐队", "音乐路线", "artist"]):
         return "artist"
     if intent in {"album_deep_dive", "review_summary"} or any(k in q for k in ["专辑", "album", "这张"]):

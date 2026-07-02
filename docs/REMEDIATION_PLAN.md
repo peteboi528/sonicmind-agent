@@ -183,6 +183,25 @@
 
 **问题**：reflect 硬上限「最多重试一次」（`nodes.py:1382`）；无 orchestrator 全局延迟预算（超时是逐工具打补丁）；启发式关键词换说法就漏。
 
+**进展（2026-06-28，P4v1 已完成）**：
+1. `app/config.py` 已把 `enable_empty_result_recovery` 的默认恢复阶梯真正放开：`empty_result_recovery_max_attempts` 默认从 `1` 调到 `2`，并在注释里明确 `attempt0=正向词/变体重搜，attempt1=切本地召回/诚实空`。现有测试里显式写死 `1` 的 case 不受影响。
+2. `app/graph/nodes.py` 的 `load_context()` 已为通用路径注入 `context.turn_deadline_at = time.monotonic() + settings.turn_budget_seconds`；知识链路继续单独使用 `deadline_at=knowledge_deadline()`，两套预算彼此隔离。
+3. `reflect_async()` 入口现已增加 `_turn_budget_exceeded()` / `_finalize_due_to_budget()`：非 knowledge intent 一旦超出 turn budget，就直接停止 refine/recovery 回环，交给 finalize 的 shortfall 逻辑诚实说明，不再继续累加 execute_tools/web_fallback/reflect 往返导致“卡死”。
+4. 这次预算拦截放在 reflect 收口点，而不是每个工具入口：第一版只解决“多轮累加超时”，不和现有单工具 `spec.timeout` 机制冲突；P4v2 再细化成 PLAN 里那套更精细的 degrade table（关 CF 锚/关 LLM 候选/dense recall 等）。
+5. `tests/eval/cases.py` 已新增两条 paraphrase 用例：`recommend_pure_discovery_paraphrase`（“别用我库里的，给我纯发现的新歌”）和 `recommend_no_library_paraphrase`（“别推荐我库里已经有的，来点新鲜的”），并接入 `_CASE_EXPECTED_INTENT`，用于持续度量“换说法不丢 recommend/no-local 意图”。
+6. `tests/test_turn_budget.py` 已补齐第一版关键覆盖：通用路径预算耗尽直接 finalize、knowledge intent 跳过通用预算、旧 state 无 `turn_deadline_at` 仍向后兼容、预算可阻断 recovery、`max_attempts=2` 允许 second attempt 恢复阶梯生效。
+7. 本轮验证已通过：
+   - `pytest -q tests/test_empty_result_recovery.py tests/test_reflect_loop.py tests/test_music_knowledge_agent.py tests/test_turn_budget.py` → `33 passed, 2 skipped`
+   - `pytest -q` → `766 passed, 2 skipped`
+   - `python -m tests.eval.regress` → `15/15` case 通过（含 2 条 paraphrase 子集）
+8. `P4v2` 第一版渐进降级也已落地：`app/config.py` 新增 `turn_budget_soft_degrade_seconds` / `turn_budget_hard_degrade_seconds`，`app/graph/nodes.py` 新增 `_remaining_turn_budget_seconds()`、`_turn_budget_degrade_level()` 与 `_apply_turn_budget_degradation()`；reflect 入口现在会在真正超时前先分两级降级。
+9. `soft` 级（默认剩余预算 ≤ 6s）会清空 `retrieval_plan.search_variants`，并跳过 `_llm_recovery_decision_async()`，只保留确定性 recovery；`hard` 级（默认剩余预算 ≤ 3s）会让 empty-result recovery 直接切到 `_local_recovery_calls()`，不再继续新的在线重搜。这样就把“超时前的渐进收缩”补上了，而不是只在最后一刻直接 finalize。
+10. `tests/test_turn_budget.py` 已继续补两条 P4v2 回归：`test_soft_budget_degrades_variants_and_skips_llm_recovery` 与 `test_hard_budget_recovery_switches_directly_to_local`，分别锁定 soft/hard 两级行为；对应专项 `pytest -q tests/test_turn_budget.py tests/test_empty_result_recovery.py tests/test_reflect_loop.py` 已通过 `17 passed`。
+11. 本轮进一步验证已通过：
+   - `pytest -q` → `768 passed, 2 skipped`
+   - `python -m tests.eval.regress` → `15/15` case 继续通过
+   - 新增渐进降级后，recommend paraphrase / no-local / similar-artists 等离线 case 继续稳定，无行为回退
+
 **动作**：
 1. **reflect 策略阶梯**：retry 上限 1→2~3，按「重搜正向词 → 补变体 → 切本地召回 → 诚实空」阶梯，每步带预算。
 2. **全局延迟预算**：orchestrator 每轮墙钟上限 + 降级表（关 CF 锚 → 关 LLM 候选生成 → dense 召回 → 诚实空）。替换散落的 `_SEARCH_DEADLINE`。
@@ -222,7 +241,7 @@
 - [x] `eval/baseline.json` 入库，precision@k + junk_rate 可 diff。 *(P1)*
 - [~] `agent.py` < 1000 行，服务化拆分完成。 *(P2：4647→1432，已是「核心编排+薄委托」健康态；剩余核心编排/入口不宜强拆，<1000 作为放弃的软目标)*
 - [x] `reasoning_content` 不出 provider 实现。 *(P3：特判封在 `app/llm/client.py` 内，业务层零泄漏；Protocol/DeepSeek/Mock/thinking 默认关均已就位)*
-- [ ] 单轮延迟有预算 + 降级表；超时不再卡死。 *(P4：未开始，是唯一剩余缺口)*
+- [~] 单轮延迟有预算 + 降级表；超时不再卡死。 *(P4v1/P4v2 已完成：turn budget + reflect 阶梯 + soft/hard 渐进降级 + paraphrase eval 已落地，且 `768 passed, 2 skipped` / `eval 15/15`；若继续做，只剩更细业务级 degrade table，如关 CF 锚/关 LLM 候选/dense recall 顺序化)*
 - [x] 魔法数全进 config，关键参数有 ablation 依据。 *(P5：rerank/local_ratio 进 config + `regress --set` ablation)*
 
 ---

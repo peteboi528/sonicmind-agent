@@ -1,5 +1,5 @@
 <script setup>
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import { store } from "../store.js";
 import { api } from "../api.js";
 import SongCard from "./SongCard.vue";
@@ -19,15 +19,45 @@ const SLOTS = [
   { v: "night", label: "深夜" },
 ];
 
-async function load() {
+// 当日缓存 key：每个 userId 每天独立一份
+function cacheKey() {
+  const today = new Date().toISOString().slice(0, 10); // "2026-07-01"
+  return `daily_rec_${store.userId}_${today}`;
+}
+
+function saveCache(data) {
+  try { localStorage.setItem(cacheKey(), JSON.stringify(data)); } catch {}
+}
+
+function loadCache() {
+  try {
+    const raw = localStorage.getItem(cacheKey());
+    return raw ? JSON.parse(raw) : null;
+  } catch { return null; }
+}
+
+async function load(forceRefresh = false) {
+  if (!forceRefresh) {
+    const cached = loadCache();
+    if (cached) {
+      rec.value = cached;
+      hasRequested.value = true;
+      return;
+    }
+  }
   loading.value = true;
   msg.value = "";
   hasRequested.value = true;
   try {
-    rec.value = await api.dailyRecommend(store.userId, timeOfDay.value || undefined);
+    const result = await api.dailyRecommend(store.userId, timeOfDay.value || undefined);
+    rec.value = result;
+    saveCache(result);
   } catch { msg.value = "生成推荐失败，请稍后重试。"; }
   finally { loading.value = false; }
 }
+
+// 页面挂载时自动恢复当天缓存（不发请求）
+onMounted(() => load(false));
 
 function toCard(item) {
   const t = item.asset;
@@ -44,7 +74,7 @@ function toCard(item) {
     <div class="section-title">今日推荐</div>
     <div class="section-sub">结合你的口味、行为与记忆生成的可追溯候选。</div>
 
-    <!-- 初始空状态 -->
+    <!-- 初始空状态（今天还没有缓存且未加载） -->
     <div v-if="!hasRequested && !loading" class="empty-state">
       <div class="empty-rings">
         <div class="ring r1"></div>
@@ -53,7 +83,7 @@ function toCard(item) {
         <div class="ring-icon">🎵</div>
       </div>
       <div class="empty-text">点击下方按钮，为你生成今日推荐</div>
-      <button class="btn-recommend" @click="load">
+      <button class="btn-recommend" @click="load(true)">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>
         获取今日推荐
       </button>
@@ -65,9 +95,10 @@ function toCard(item) {
         v-for="(s, i) in SLOTS" :key="s.v"
         class="slot" :class="{ active: timeOfDay === s.v }"
         :style="{ animationDelay: `${i * 40}ms` }"
-        @click="timeOfDay = s.v; load()"
+        @click="timeOfDay = s.v; load(true)"
       >{{ s.label }}</button>
-      <button class="btn-ghost refresh-btn" :disabled="loading" @click="load">
+      <!-- 手动刷新按钮：强制重新生成，不用缓存 -->
+      <button class="btn-ghost refresh-btn" :disabled="loading" @click="load(true)" title="重新生成今日推荐">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
       </button>
     </div>

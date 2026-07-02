@@ -54,12 +54,16 @@ class _FakeAgent:
         search_variants=None,
         seed_tracks=None,
         search_query_override=None,
+        budget_degrade_level=None,
+        entities=None,
     ):
         self.last_rec = dict(
             goal=goal,
             excluded_tracks=excluded_tracks,
             search_variants=search_variants,
             search_query_override=search_query_override,
+            budget_degrade_level=budget_degrade_level,
+            entities=entities,
         )
         return SimpleNamespace(tracks=[])
 
@@ -76,7 +80,7 @@ def _track(title: str, source_id: str = "1", source: str = "netease", artist: st
     return ExternalTrack(external_id=source_id, title=title, artist=artist, source=source)
 
 
-def _plan(*, excluded=None, variants=None, search_query="", language="", target=None) -> dict:
+def _plan(*, excluded=None, variants=None, search_query="", language="", target=None, entities=None) -> dict:
     """模拟 graph V2 分支传入的 plan_payload（plan.model_dump 后的 dict）。"""
     return {
         "_excluded_tracks": excluded or [],
@@ -85,7 +89,7 @@ def _plan(*, excluded=None, variants=None, search_query="", language="", target=
             "search_query": search_query,
             "search_variants": variants,
             "language_filter": language,
-            "entities": [],
+            "entities": entities or [],
         },
     }
 
@@ -143,6 +147,29 @@ def test_recommend_passes_excluded_and_variants():
     assert agent.last_rec["search_variants"] == ["synonym"]
     assert agent.last_rec["search_query_override"] == "chill r&b"
     assert result.status.value == "empty"
+
+
+def test_recommend_forwards_llm_entities_as_anchors():
+    """回归：plan.retrieval_plan.entities 必须传给 recommend_for_query，
+    才能让长尾歌手（不在硬编码名单里的 The Weeknd）触发艺人锚点过滤。"""
+    agent = _FakeAgent()
+    ctx = _ctx(agent, _plan(search_query="The Weeknd", entities=["The Weeknd"]))
+    _exec("recommend", {"query": "music", "top_k": 5}, ctx)
+    assert agent.last_rec["entities"] == ["The Weeknd"]
+
+
+def test_recommend_passes_budget_degrade_level():
+    agent = _FakeAgent()
+    ctx = ToolContext(
+        thread_id="t1",
+        user_id="u1",
+        query="music",
+        plan=_plan(search_query="chill r&b"),
+        agent=agent,
+        latency_budget={"budget_degrade_level": "soft"},
+    )
+    _exec("recommend", {"query": "music", "top_k": 5}, ctx)
+    assert agent.last_rec["budget_degrade_level"] == "soft"
 
 
 def test_search_filters_external_by_excluded():

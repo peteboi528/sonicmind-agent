@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -7,6 +8,8 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
+
+logger = logging.getLogger(__name__)
 
 
 def _absolute_path(raw: str) -> Path:
@@ -22,12 +25,24 @@ def _default_store_root() -> Path:
     move or merge user data automatically: among the two known locations, keep
     using the one containing the most assets.  An explicit STORE_ROOT always
     wins.
+
+    When BOTH locations hold assets we must guess by count — that ambiguity is
+    exactly what makes data look like it "vanished" after a restart from a
+    different cwd.  Loudly warn so the operator pins STORE_ROOT.
     """
     candidates = [PROJECT_ROOT / "data/store", PROJECT_ROOT / "frontend/data/store"]
-    return max(
-        candidates,
-        key=lambda path: len(list((path / "assets").glob("*.json"))) if (path / "assets").exists() else 0,
-    )
+    counts = {
+        path: len(list((path / "assets").glob("*.json"))) if (path / "assets").exists() else 0
+        for path in candidates
+    }
+    populated = [p for p, n in counts.items() if n > 0]
+    if len(populated) > 1:
+        logger.warning(
+            "检测到多个曲库目录都有数据 %s——正按文件数量挑选，重启/换启动目录可能读到不同库。"
+            "请在 .env 显式设置 STORE_ROOT 锁定，避免曲库'忽然消失'。",
+            {str(p): n for p, n in counts.items()},
+        )
+    return max(candidates, key=lambda path: counts[path])
 
 
 class Settings:
@@ -79,6 +94,11 @@ class Settings:
         self.agent_checkpoint_path: str = str((data_root / "agent_checkpoints.sqlite").resolve())
         self.agent_trace_path: str = str((data_root / "agent_traces.sqlite").resolve())
         self.agent_retention_days: int = int(os.getenv("AGENT_RETENTION_DAYS", "30"))
+        # Web 历史持久化：完整对话用于跨重启恢复；推荐历史带 TTL，避免旧推荐长期污染演示。
+        self.chat_history_max_threads: int = int(os.getenv("CHAT_HISTORY_MAX_THREADS", "30"))
+        self.chat_history_max_messages_per_thread: int = int(os.getenv("CHAT_HISTORY_MAX_MESSAGES_PER_THREAD", "80"))
+        self.recommendation_history_ttl_days: int = int(os.getenv("RECOMMENDATION_HISTORY_TTL_DAYS", "14"))
+        self.recommendation_history_max_items: int = int(os.getenv("RECOMMENDATION_HISTORY_MAX_ITEMS", "120"))
         self.agent_checkpoints: bool = _bool_env("AGENT_CHECKPOINTS", True)
         self.local_tracing: bool = _bool_env("LOCAL_TRACING", True)
         self.llm_json_mode: str = os.getenv("LLM_JSON_MODE", "auto").strip().lower()
@@ -119,21 +139,41 @@ class Settings:
         self.dense_recall_min_score: float = float(os.getenv("DENSE_RECALL_MIN_SCORE", "0.55"))
         self.enable_rerank: bool = os.getenv("ENABLE_RERANK", "true").lower() == "true"
         self.enable_parallel_tools: bool = os.getenv("ENABLE_PARALLEL_TOOLS", "true").lower() == "true"
+        # 多意图并行：一句话同时含两类意图（"推几首 X 顺便讲讲他"）时，除 primary 外
+        # 再挂 ≤1 个 secondary 子计划，两条工具链并行跑、一条 message 出两段结果。
+        # 默认关闭 → 即使 LLM 填了 secondary，planner 也丢弃，行为字节级等于单意图今天。
+        self.enable_multi_intent: bool = os.getenv("ENABLE_MULTI_INTENT", "false").lower() == "true"
         # reflect 候选补量回环：reflect 剔除违规候选后若不足，回 execute_tools+reflect 再补一轮。
         # 默认关闭——这会引入第 4/5 次串行往返（含联网搜索）。reflect 本身仍跑（thinking-off 后很快），
         # 不足时由 _compose_intro 如实说明 shortfall，不阻塞主流程。
         self.enable_reflect_refine: bool = os.getenv("ENABLE_REFLECT_REFINE", "false").lower() == "true"
-        # 零候选/工具错误恢复与候选质检补量分开控制；默认只允许一次恢复。
+        # 零候选/工具错误恢复（P4 阶梯）：attempt0=正向词变体重搜，attempt1=变体耗尽切本地召回，
+        # 再超则诚实空。LLM 恢复单趟（recovery_llm_used），第二 attempt 走纯确定性，不增 LLM 成本。
         self.enable_empty_result_recovery: bool = os.getenv("ENABLE_EMPTY_RESULT_RECOVERY", "true").lower() == "true"
+        # 知识意图自省（Reflexion）：reflect 里对知识链路做确定性核对（resolve 是否空 / 档案是否降级）
+        # ——核对本身零 LLM、零延迟、默认始终跑（只出 trace 可观测）。仅当档案真正降级时，开此开关才会
+        # 回 execute_tools 用清洗后的实体名重试一次 resolve（重跑知识链路 ~20-40s，故默认关，对比手感用）。
+        self.enable_knowledge_refine: bool = os.getenv("ENABLE_KNOWLEDGE_REFINE", "false").lower() == "true"
         self.empty_result_recovery_max_attempts: int = max(
-            0, int(os.getenv("EMPTY_RESULT_RECOVERY_MAX_ATTEMPTS", "1"))
+            0, int(os.getenv("EMPTY_RESULT_RECOVERY_MAX_ATTEMPTS", "2"))
         )
+        # P4 全局单轮墙钟预算（通用路径 recommend/search/playlist）。超预算则 reflect 停止
+        # refine/recovery 回环，由 finalize 的 shortfall 兜底诚实说明（治"超时卡死"）。
+        # knowledge 路径走自己的 knowledge_turn_budget_seconds（36s），不在此列。
+        self.turn_budget_seconds: float = float(os.getenv("TURN_BUDGET_SECONDS", "15"))
+        # P4v2：在真正耗尽 turn budget 之前，先按剩余预算做渐进降级：
+        # soft = 关 search_variants / 禁用 LLM recovery；hard = recovery 直接切本地。
+        self.turn_budget_soft_degrade_seconds: float = float(os.getenv("TURN_BUDGET_SOFT_DEGRADE_SECONDS", "6"))
+        self.turn_budget_hard_degrade_seconds: float = float(os.getenv("TURN_BUDGET_HARD_DEGRADE_SECONDS", "3"))
         # Music knowledge agent latency budget. 这些链路会并行查资料/乐评，
         # 必须有全链路墙钟上限，避免单个请求因为搜索链条过长而崩掉。
-        self.knowledge_turn_budget_seconds: float = float(os.getenv("KNOWLEDGE_TURN_BUDGET_SECONDS", "36"))
-        self.knowledge_quick_budget_seconds: float = float(os.getenv("KNOWLEDGE_QUICK_BUDGET_SECONDS", "6"))
-        self.knowledge_source_timeout_seconds: float = float(os.getenv("KNOWLEDGE_SOURCE_TIMEOUT_SECONDS", "3"))
-        self.knowledge_review_timeout_seconds: float = float(os.getenv("KNOWLEDGE_REVIEW_TIMEOUT_SECONDS", "8"))
+        # 注意：默认值按「慢网络」校准——从国内访问 MusicBrainz/last.fm/Discogs 等
+        # 西方 API 单次常 5–8s（实测）。源超时给不到就会全员超时→实体 unresolved→档案降级。
+        # 快网络不受影响（源 <1s 返回，不会真等满超时）。需要更激进可在 .env 调小。
+        self.knowledge_turn_budget_seconds: float = float(os.getenv("KNOWLEDGE_TURN_BUDGET_SECONDS", "50"))
+        self.knowledge_quick_budget_seconds: float = float(os.getenv("KNOWLEDGE_QUICK_BUDGET_SECONDS", "12"))
+        self.knowledge_source_timeout_seconds: float = float(os.getenv("KNOWLEDGE_SOURCE_TIMEOUT_SECONDS", "10"))
+        self.knowledge_review_timeout_seconds: float = float(os.getenv("KNOWLEDGE_REVIEW_TIMEOUT_SECONDS", "12"))
         self.knowledge_llm_timeout_seconds: float = float(os.getenv("KNOWLEDGE_LLM_TIMEOUT_SECONDS", "5"))
         self.knowledge_max_review_sources: int = max(1, int(os.getenv("KNOWLEDGE_MAX_REVIEW_SOURCES", "5")))
         self.knowledge_max_search_queries: int = max(1, int(os.getenv("KNOWLEDGE_MAX_SEARCH_QUERIES", "3")))
@@ -147,8 +187,8 @@ class Settings:
         # dossier 工具外层超时：要装得下「抓 N 个正文 + 1 次合成 LLM（开思考模式）」，给难抓的专辑留余地。
         self.knowledge_dossier_timeout_seconds: float = float(os.getenv("KNOWLEDGE_DOSSIER_TIMEOUT_SECONDS", "24"))
         # 元数据波(MB/Spotify/Discogs/web) 内部预算封顶——它是 bonus 内容，不能让它吃光整轮预算饿死合成。
-        # 旧实现会用到 ~20s，难抓专辑时把 dossier/synth 挤没。封 7s（略低于 review 8s，不拖长 stage2）。
-        self.knowledge_metadata_timeout_seconds: float = float(os.getenv("KNOWLEDGE_METADATA_TIMEOUT_SECONDS", "7"))
+        # 慢网络下单源要 ~7s，故提到 15s；快网络仍随源返回即结束，不真等满。
+        self.knowledge_metadata_timeout_seconds: float = float(os.getenv("KNOWLEDGE_METADATA_TIMEOUT_SECONDS", "15"))
         # 知识合成这一处开 LLM 思考模式（只此一处，不全局开以免拖慢规划/对话/反思）。
         self.knowledge_synth_thinking_enabled: bool = os.getenv("KNOWLEDGE_SYNTH_THINKING_ENABLED", "true").lower() == "true"
         # MusicBrainz 结构化知识层（免费、无 key）：实体消歧 + 权威元数据。
@@ -164,6 +204,42 @@ class Settings:
         self.memory_consolidation_interval: int = int(os.getenv("MEMORY_CONSOLIDATION_INTERVAL", "5"))
         self.memory_recall_top_k: int = int(os.getenv("MEMORY_RECALL_TOP_K", "3"))
         self.episodic_memory_cap: int = int(os.getenv("EPISODIC_MEMORY_CAP", "120"))
+
+        # ---- 专辑封面视觉识别（上传封面 → 识别专辑 → 复用知识链路）----
+        # DeepSeek API 无视觉能力（仅文本模型），封面识别走独立 OpenAI 兼容视觉模型。
+        # 默认阿里百炼 DashScope Qwen-VL（中英文封面 OCR 最强，CN/国际双端点）。
+        # VISION_LLM_API_KEY 留空则禁用视觉，降级到本地 OCR（rapidocr，需单独装）→
+        # 再读不出文字则提示用户直接输入专辑名/歌手。
+        # 端点：国内 https://dashscope.aliyuncs.com/compatible-mode/v1；
+        #       国际 https://dashscope-intl.aliyuncs.com/compatible-mode/v1。
+        self.vision_llm_base_url: str = os.getenv("VISION_LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.vision_llm_api_key: str = os.getenv("VISION_LLM_API_KEY", "")
+        self.vision_llm_model: str = os.getenv("VISION_LLM_MODEL", "qwen-vl-max-latest")
+        self.vision_llm_timeout_seconds: float = float(os.getenv("VISION_LLM_TIMEOUT_SECONDS", "20"))
+        self.vision_llm_connect_timeout: float = float(os.getenv("VISION_LLM_CONNECT_TIMEOUT", "8"))
+        self.vision_llm_max_tokens: int = int(os.getenv("VISION_LLM_MAX_TOKENS", "512"))
+        # 视觉识别置信阈值：低于此值视为不可信，回退 OCR / 提示输入。
+        self.vision_confidence_threshold: float = float(os.getenv("VISION_CONFIDENCE_THRESHOLD", "0.5"))
+        # 上传封面体积上限（字节）；超出 413 拒绝。送视觉前先用 Pillow 降到长边 ≤ 下值（省 token、避尺寸限制）。
+        self.album_cover_max_bytes: int = int(os.getenv("ALBUM_COVER_MAX_BYTES", str(10 * 1024 * 1024)))
+        self.vision_image_max_side: int = int(os.getenv("VISION_IMAGE_MAX_SIDE", "1024"))
+        # OCR 兜底引擎开关（需装 rapidocr-onnxruntime；未装自动降级，不报错）。
+        self.cover_ocr_enabled: bool = os.getenv("COVER_OCR_ENABLED", "true").lower() == "true"
+
+        # ---- 强搜索 provider 化（知识类问答统一走 web_knowledge_search）----
+        # auto 顺序：web(openai/tavily 若配置) → deepseek_parametric → duckduckgo → none。
+        self.knowledge_search_provider: str = os.getenv("KNOWLEDGE_SEARCH_PROVIDER", "auto").strip().lower()
+        # DeepSeek 直答要生成一整篇中文长文（参考裸 chat 效果），产出几百~上千 token，
+        # 20s 不够会被 wait_for 砍掉→掉到稀疏 web→回到"资料不足"。给到 40s；turn budget 同步放宽。
+        self.web_knowledge_timeout_seconds: float = float(os.getenv("WEB_KNOWLEDGE_TIMEOUT_SECONDS", "40"))
+        self.web_knowledge_cache_ttl_hours: int = int(os.getenv("WEB_KNOWLEDGE_CACHE_TTL_HOURS", "24"))
+        self.web_knowledge_max_sources: int = int(os.getenv("WEB_KNOWLEDGE_MAX_SOURCES", "8"))
+        self.web_knowledge_direct_answer: bool = os.getenv("WEB_KNOWLEDGE_DIRECT_ANSWER", "false").lower() == "true"
+        # DeepSeek 先验 provider：DeepSeek API 无 web-search 工具，只能召回训练知识。
+        # 作为 web 不可用时的兜底——claim 全标 unverified/tier C/置信封顶，且 concert/fact_check
+        # 等时效/精确性意图禁用（必须真来源或诚实拒答，否则就是幻觉）。
+        self.deepseek_parametric_enabled: bool = os.getenv("DEEPSEEK_PARAMETRIC_ENABLED", "true").lower() == "true"
+        self.deepseek_parametric_confidence_cap: float = float(os.getenv("DEEPSEEK_PARAMETRIC_CONFIDENCE_CAP", "0.45"))
 
         # ---- Bot 适配器配置（留空禁用） ----
         self.feishu_app_id: str = os.getenv("FEISHU_APP_ID", "")
@@ -192,6 +268,11 @@ class Settings:
     @property
     def mock_mode(self) -> bool:
         return not self.llm_api_key
+
+    @property
+    def vision_enabled(self) -> bool:
+        """视觉识别是否可用：配置了视觉模型 API key 才算开。"""
+        return bool(self.vision_llm_api_key)
 
 
 def _csv_env(name: str, default: str) -> list[str]:

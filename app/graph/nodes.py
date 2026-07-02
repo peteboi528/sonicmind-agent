@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -31,6 +32,7 @@ from app.intents import (
     expand_content_negation,
     extract_content_negations,
     get_intent,
+    is_allowed_multi_intent_pair,
     is_continuation,
     match_intent_by_keywords,
 )
@@ -110,6 +112,7 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         "runtime_metrics": empty_runtime_metrics(),
         "semantic_recall_pending": True,
         "started_at_monotonic": time.monotonic(),
+        "turn_deadline_at": time.monotonic() + settings.turn_budget_seconds,
     }
     return {
         **state,
@@ -178,8 +181,15 @@ def _finish_plan_intent(
     context = state.get("context") or {}
     plan, memory_seeds = _inject_preference_seeds(plan, query, context)
     plan = _materialize_tool_stages(plan, query, state.get("top_k", 5))
+    if settings.enable_multi_intent and plan.is_multi_intent:
+        plan = _merge_multi_intent_stages(plan, query, state.get("top_k", 5))
     context = dict(state.get("context") or {})
-    if _is_knowledge_intent(plan.intent):
+    # primary 是知识意图，或（多意图下）某个 sub_plan 是知识意图，都要挂知识延迟预算，
+    # 让 build_music_dossier / web_knowledge_search 拿到 deadline，避免跑满无界。
+    _has_knowledge = _is_knowledge_intent(plan.intent) or any(
+        _is_knowledge_intent(sp.intent) for sp in plan.sub_plans
+    )
+    if _has_knowledge:
         from app.knowledge import knowledge_deadline
 
         context["deadline_at"] = knowledge_deadline()
@@ -321,13 +331,14 @@ def _materialize_tool_stages(plan: AgentPlan, query: str, top_k: int) -> AgentPl
     if _is_knowledge_intent(plan.intent):
         resolve = ToolCall(name="resolve_music_entity", arguments=_planned_arguments("resolve_music_entity", query, plan, top_k))
         metadata = ToolCall(name="music_metadata_lookup", arguments=_planned_arguments("music_metadata_lookup", query, plan, top_k))
-        reviews = ToolCall(name="review_search", arguments=_planned_arguments("review_search", query, plan, top_k))
+        # 强搜索 provider 取代 review_search 作主检索：claims+sources+citations，web 空时内部回退 review_search。
+        web_knowledge = ToolCall(name="web_knowledge_search", arguments=_planned_arguments("web_knowledge_search", query, plan, top_k))
         build = ToolCall(name="build_music_dossier", arguments=_planned_arguments("build_music_dossier", query, plan, top_k))
         return plan.model_copy(update={
-            "tools_needed": ["resolve_music_entity", "music_metadata_lookup", "review_search", "build_music_dossier"],
+            "tools_needed": ["resolve_music_entity", "music_metadata_lookup", "web_knowledge_search", "build_music_dossier"],
             "stages": [
                 ToolStage(calls=[resolve], parallel=False),
-                ToolStage(calls=[metadata, reviews], parallel=True),
+                ToolStage(calls=[metadata, web_knowledge], parallel=True),
                 ToolStage(calls=[build], parallel=False),
             ],
         })
@@ -353,6 +364,46 @@ def _materialize_tool_stages(plan: AgentPlan, query: str, top_k: int) -> AgentPl
     return plan.model_copy(update={"stages": stages})
 
 
+def _merge_multi_intent_stages(plan: AgentPlan, query: str, top_k: int) -> AgentPlan:
+    """把 primary 与各 sub_plan 的工具链合并成一组并行 stages（wall-time ≈ max）。
+
+    做法：先给每个 sub_plan 各自 materialize stages，再按「深度」把各链同层 stage
+    压进同一个合并 stage——第 N 层合并 stage 只依赖第 <N 层的结果（各链内部依赖天然满足），
+    于是两条链在墙钟上并行推进，总耗时 ≈ 最长单链，而非各链之和。
+
+    共享工具去重：同一合并层里若出现 (name, arguments) 完全一致的调用（典型
+    resolve_music_entity），只保留一个；arguments 不一致则各跑各的（正确但多一次廉价调用）。
+    plan.intent 保持 primary（让 composer 的 track ladder 继续走）；tools_needed 取并集。
+    """
+    sub_materialized = [_materialize_tool_stages(sp, query, top_k) for sp in plan.sub_plans]
+    chains: list[list[ToolStage]] = [list(plan.stages or []), *[list(sp.stages or []) for sp in sub_materialized]]
+    depth = max((len(chain) for chain in chains), default=0)
+
+    merged_stages: list[ToolStage] = []
+    for level in range(depth):
+        calls: list[ToolCall] = []
+        seen: set[tuple[str, str]] = set()
+        for chain in chains:
+            if level >= len(chain):
+                continue
+            for call in chain[level].calls:
+                key = (call.name, json.dumps(call.arguments, sort_keys=True, ensure_ascii=False, default=str))
+                if key in seen:
+                    continue
+                seen.add(key)
+                calls.append(call)
+        if calls:
+            merged_stages.append(ToolStage(calls=calls, parallel=len(calls) > 1))
+
+    tools_union: list[str] = []
+    for stage in merged_stages:
+        for call in stage.calls:
+            if call.name not in tools_union:
+                tools_union.append(call.name)
+    # sub_plans 更新为已 materialize 的版本，供后续 composition 读取其 stages/retrieval。
+    return plan.model_copy(update={"stages": merged_stages, "tools_needed": tools_union, "sub_plans": sub_materialized})
+
+
 def _planned_arguments(name: str, query: str, plan: AgentPlan, top_k: int) -> dict[str, Any]:
     handler = get_handler(name) or name
     count = plan.target_count or top_k
@@ -368,10 +419,18 @@ def _planned_arguments(name: str, query: str, plan: AgentPlan, top_k: int) -> di
         if plan.target_count is not None:
             args["target_count"] = plan.target_count
         return args
+    if handler == "playlist_repair":
+        return {"instruction": query, "target": "上一轮歌单或推荐"}
     if handler == "taste_experiment":
         return {"prompt": query, "total": plan.target_count or 12}
+    if handler == "taste_shift_detector":
+        return {"window_recent_days": 30, "window_baseline_days": 90}
+    if handler == "music_fact_check":
+        return {"query": query}
+    if handler == "recommend_explainer":
+        return {"query": query}
     if handler in {
-        "resolve_music_entity", "music_metadata_lookup", "review_search", "build_music_dossier",
+        "resolve_music_entity", "music_metadata_lookup", "review_search", "web_knowledge_search", "build_music_dossier",
         "sample_relation_search", "locate_sample_sources", "build_sample_dossier",
     }:
         # 知识/对比工具必须保留用户原句；LLM 改写后的 search_query 可能把
@@ -773,6 +832,8 @@ def _record_runtime_result(
             content=runtime_result.data.get("answer", "已生成音乐档案。"),
             payload={"dossier": runtime_result.data.get("dossier")},
         ))
+        for artist in runtime_result.data.get("artist_cards", []) or []:
+            events.append(StreamEvent(type="artist_card", content=artist.get("name", ""), payload=artist))
         dossier = runtime_result.data.get("dossier") or {}
         entity = dossier.get("entity") or {}
         # 专辑解读：把这张专辑本身作为卡片下发（封面/曲目/风格），出现在乐评下方。
@@ -955,8 +1016,8 @@ async def _run_tool_async(
     if handler is None:
         raise ValueError(f"Unknown tool: {call.name}")
     spec = get_tool_spec(handler)
-    from app.tools.contracts import ToolContext
     from app.services.tools import checkpoint_store, tool_runtime
+    from app.tools.contracts import ToolContext
 
     arguments = call.arguments or _planned_arguments(handler, query, plan, top_k)
     call = call.model_copy(update={"name": handler, "arguments": arguments})
@@ -1008,12 +1069,16 @@ async def _run_tool_async(
                     call = call.model_copy(update={"arguments": arguments})
     context_kwargs = {"run_id": run_id} if run_id else {}
     state_context = state_context or {}
+    latency_budget = dict(state_context.get("latency_budget") or {})
+    budget_degrade_level = state_context.get("budget_degrade_level")
+    if budget_degrade_level:
+        latency_budget["budget_degrade_level"] = budget_degrade_level
     if runtime_result is None:
         runtime_result = await tool_runtime.execute(call, ToolContext(
             thread_id=thread_id, user_id=user_id, query=query, plan=plan_payload,
             prior_results=prior_results, confirmation=confirmation, agent=agent,
             deadline_at=state_context.get("deadline_at"),
-            latency_budget=state_context.get("latency_budget") or {},
+            latency_budget=latency_budget,
             **context_kwargs,
         ))
     return _record_runtime_result(
@@ -1093,15 +1158,90 @@ def _ensure_evaluated_state(state: AgentState) -> AgentState:
     }
 
 
+def _turn_budget_exceeded(state: AgentState) -> bool:
+    """通用路径单轮墙钟预算是否耗尽。
+
+    knowledge intent 走自己的 tool 层 deadline_at，不在此卡；context 无 turn_deadline_at
+    （旧 checkpoint state）时返回 False，向后兼容。
+    """
+    deadline = (state.get("context") or {}).get("turn_deadline_at")
+    if not deadline or _is_knowledge_intent(state["plan"].intent):
+        return False
+    return time.monotonic() >= float(deadline)
+
+
+def _remaining_turn_budget_seconds(state: AgentState) -> float | None:
+    deadline = (state.get("context") or {}).get("turn_deadline_at")
+    if not deadline or _is_knowledge_intent(state["plan"].intent):
+        return None
+    return max(0.0, float(deadline) - time.monotonic())
+
+
+def _turn_budget_degrade_level(state: AgentState) -> str | None:
+    remaining = _remaining_turn_budget_seconds(state)
+    if remaining is None:
+        return None
+    if remaining <= settings.turn_budget_hard_degrade_seconds:
+        return "hard"
+    if remaining <= settings.turn_budget_soft_degrade_seconds:
+        return "soft"
+    return None
+
+
+def _apply_turn_budget_degradation(state: AgentState) -> AgentState:
+    """在真正耗尽 budget 前先收缩高成本扩展路径。"""
+    level = _turn_budget_degrade_level(state)
+    if not level:
+        return state
+    context = dict(state.get("context") or {})
+    if context.get("budget_degrade_level") == level:
+        return state
+    plan = state["plan"]
+    retrieval = plan.retrieval_plan
+    trace = list(state.get("trace", []))
+    events = list(state.get("events", []))
+
+    updates: dict[str, Any] = {}
+    if retrieval.search_variants:
+        updates["search_variants"] = []
+    revised = plan.model_copy(update={
+        "retrieval_plan": retrieval.model_copy(update=updates) if updates else retrieval,
+    })
+    context["budget_degrade_level"] = level
+
+    if level == "soft":
+        note = "[budget] 剩余预算偏紧，关闭 search_variants 与 LLM recovery，优先走确定性主路径。"
+    else:
+        note = "[budget] 剩余预算很紧，recovery 将直接切本地，避免继续在线扩展。"
+    trace.append(note)
+    events.append(StreamEvent(type="eval", content=note, payload={"budget_degrade_level": level}))
+    return {**state, "plan": revised, "context": context, "trace": trace, "events": events}
+
+
+def _finalize_due_to_budget(state: AgentState) -> AgentState:
+    """超预算：停止一切 refine/recovery，由 finalize 的 shortfall 兜底诚实说明。"""
+    return {
+        **state,
+        "_need_refine": False,
+        "trace": [*state.get("trace", []), "[reflect] 单轮墙钟预算耗尽，停止补量，由 finalize 诚实说明 shortfall。"],
+        "events": [*state.get("events", []), StreamEvent(
+            type="eval", content="单轮时间预算耗尽，已停止补量。", payload={"budget_exceeded": True},
+        )],
+    }
+
+
 async def reflect_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     state = _ensure_evaluated_state(state)
+    state = _apply_turn_budget_degradation(state)
+    if _turn_budget_exceeded(state):
+        return _finalize_due_to_budget(state)
     try:
         recovery = await _prepare_empty_result_recovery_async(agent, state)
         if recovery is not None:
             return recovery
         plan = state["plan"]
         if _is_knowledge_intent(plan.intent):
-            return {**state, "_need_refine": False}
+            return await _knowledge_reflect_async(agent, state)
         if plan.intent not in {"recommend", "search", "playlist", "video"} or settings.mock_mode:
             return {**state, "_need_refine": False}
         tracks = _collect_tracks(state.get("results", []))
@@ -1171,6 +1311,82 @@ def _apply_reflection_result(
     return {**state, "results": results, "trace": trace, "events": events, "context": context, "_need_refine": need_refine}
 
 
+async def _knowledge_reflect_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
+    """知识意图自省（Reflexion）：确定性核对工具结果，决定是否补量重试。
+
+    知识链路此前在 reflect 里被直接短路（passthrough），工具失败（resolve 空 / 档案降级）一路带到
+    finalize。这里补一步**确定性核对**——零 LLM、零延迟——产出可观测判定：
+      - resolve 空、档案靠 parametric 兜底 → 标注「已兜底」（答案可用，仅缺实体富化）；
+      - 档案真正降级（partial 且非 parametric、正文是机械兜底/空）→ 若开 ``enable_knowledge_refine`` 且有
+        预算，回 execute_tools 用清洗后的实体名重试一次 resolve（治「resolve 首轮空、原句带'的音乐路线'
+        搜不到实体」）。重试有界（≤1 次）且受单轮预算墙约束。
+    """
+    plan = state["plan"]
+    attempt = int(state.get("_refine_count", 0))
+    outcomes = [o for o in state.get("tool_outcomes", []) if int(o.get("attempt", 0)) == attempt]
+    by_tool = {str(o.get("tool") or ""): o for o in outcomes}
+    resolve_outcome = by_tool.get("resolve_music_entity")
+    resolve_empty = bool(resolve_outcome and resolve_outcome.get("status") == ToolStatus.EMPTY.value)
+
+    dossier_result = next(
+        (r for r in state.get("results", []) if r.get("type") in {"music_dossier", "music_compare"}),
+        None,
+    )
+    dossier = (dossier_result or {}).get("dossier") or {}
+    is_parametric = bool(dossier.get("is_parametric"))
+    summary = str(dossier.get("summary") or "")
+    # 真正降级：partial 且非 parametric（parametric 是完整直答，不算降级），正文为机械兜底/空。
+    degraded = bool(dossier.get("partial")) and not is_parametric and (
+        not summary or "未能合成" in summary or "证据归属不一致" in summary
+    )
+
+    if degraded:
+        verdict = "[reflect][knowledge] 知识结果不足：档案降级、无可用正文"
+    elif resolve_empty and is_parametric:
+        verdict = "[reflect][knowledge] resolve 本轮空，已由 parametric 直答兜底（缺实体富化：career/library 命中弱）"
+    elif resolve_empty:
+        verdict = "[reflect][knowledge] resolve 本轮空，无实体可用"
+    else:
+        verdict = "[reflect][knowledge] 结果充分"
+
+    trace = [*state.get("trace", []), verdict]
+    events = [*state.get("events", []), StreamEvent(type="eval", content=verdict)]
+
+    # 补量重试：仅档案真正降级 + 开关开 + 没重试过 + 有预算。重跑知识链路较重（~20-40s），故默认关。
+    if (
+        degraded
+        and settings.enable_knowledge_refine
+        and attempt < 1
+        and not _turn_budget_exceeded(state)
+    ):
+        entities = list(getattr(plan.retrieval_plan, "entities", []) or [])
+        cleaned = next((e.strip() for e in entities if e and e.strip()), state["query"])
+        revised = _revise_knowledge_plan_for_retry(plan, cleaned, state.get("top_k", 5))
+        note = f"{verdict}；回环重试 resolve（query={cleaned}）"
+        return {
+            **state,
+            "plan": revised,
+            "trace": [*state.get("trace", []), note],
+            "events": [*events, StreamEvent(
+                type="refine",
+                content="知识结果不足，用清洗后的实体名重试 resolve。",
+                payload={"search_query": cleaned, "attempt": attempt + 1},
+            )],
+            "_need_refine": True,
+        }
+    return {**state, "trace": trace, "events": events, "_need_refine": False}
+
+
+def _revise_knowledge_plan_for_retry(plan: AgentPlan, cleaned_query: str, top_k: int) -> AgentPlan:
+    """重试知识链路：把检索词换成清洗后的实体名，重建 [resolve→metadata→web_knowledge→build] stages。"""
+    retrieval = plan.retrieval_plan.model_copy(update={"search_query": cleaned_query})
+    revised = plan.model_copy(update={
+        "retrieval_plan": retrieval,
+        "reasoning_summary": f"{plan.reasoning_summary}；知识自省：resolve 首轮空，用实体名「{cleaned_query}」重试。",
+    })
+    return _materialize_tool_stages(revised, cleaned_query, top_k)
+
+
 _RECOVERY_INTENTS = {"recommend", "search", "playlist"}
 _NO_AUTO_RECOVERY = {
     ToolStatus.AUTH_REQUIRED.value,
@@ -1203,7 +1419,12 @@ async def _prepare_empty_result_recovery_async(
         return None
     decision = _deterministic_recovery_decision(state, current)
     context = dict(state.get("context") or {})
-    if decision is None and not context.get("recovery_llm_used"):
+    if (
+        decision is None
+        and not context.get("recovery_llm_used")
+        and context.get("budget_degrade_level") != "soft"
+        and context.get("budget_degrade_level") != "hard"
+    ):
         decision = await _llm_recovery_decision_async(agent, state, current)
         context["recovery_llm_used"] = True
     if decision is None or decision.action != "retry" or not decision.calls:
@@ -1267,6 +1488,7 @@ def _deterministic_recovery_decision(
     outcomes: list[dict[str, Any]],
 ) -> RecoveryDecision | None:
     plan = state["plan"]
+    degrade_level = ((state.get("context") or {}).get("budget_degrade_level") or "").lower()
     tracks = _collect_tracks(state.get("results", []))
     by_tool = {str(item.get("tool")): item for item in outcomes}
     recommend_outcome = by_tool.get("recommend")
@@ -1296,6 +1518,13 @@ def _deterministic_recovery_decision(
     )
     all_empty = not tracks and any(item.get("status") == ToolStatus.EMPTY.value for item in outcomes)
     if web_empty or all_empty:
+        if degrade_level == "hard":
+            return RecoveryDecision(
+                action="retry",
+                reason="剩余预算不足，跳过在线重搜，直接切到可追溯的本地检索。",
+                search_query=_positive_recovery_query(state),
+                calls=_local_recovery_calls(plan.intent),
+            )
         attempted = {
             str((item.get("arguments") or {}).get("query") or "").strip().lower()
             for item in state.get("tool_outcomes", []) if item.get("tool") == "web_music_search"
@@ -1565,7 +1794,22 @@ async def _finalize_tail_async(
     流式与非流式共用，副作用只跑一次。
     """
     known = collect_known_titles(state.get("results", []))
-    answer_text, removed = guard_answer(answer_text, known)
+    # 知识类档案（album/artist/review/compare/sample/fact_check/concert）的答案是叙述性正文，
+    # 里面的《Channel Orange》/ **《Nikes》** / 引用句是内容本身、不是待核实的幻觉歌名——
+    # guard 会把它们误删（→ "****"、"称其为，"、"ll always be there"）。只对产 track 卡片的
+    # 意图（recommend/search/playlist 等）跑 guard。
+    # 多意图：primary 是 track 类、但某个 sub_plan 是知识类时，答案里同时含 track 段与叙述段。
+    # 两段拼在一个字符串里无法可靠切开，叙述段的《》引用又不在 known_titles → 整体 guard 会误删。
+    # track 段的曲目清单本就确定性 grounded（来自真实候选），故此场景整体跳过 guard，
+    # 与今天纯知识意图不 guard 的取舍一致。
+    plan = state["plan"]
+    _skip_guard = _is_knowledge_intent(plan.intent) or (
+        plan.is_multi_intent and any(_is_knowledge_intent(sp.intent) for sp in plan.sub_plans)
+    )
+    if _skip_guard:
+        removed = []
+    else:
+        answer_text, removed = guard_answer(answer_text, known)
     memory_updated = await agent.memory.auto_learn_from_turn_async(
         state["user_id"], state["query"], state.get("results", []),
     )
@@ -1611,6 +1855,18 @@ async def _finalize_tail_async(
     sample_payload = _sample_dossier_payload(state.get("results", []))
     if sample_payload:
         final_payload["sample_dossier"] = sample_payload
+    playlist_repair_payload = _playlist_repair_payload(state.get("results", []))
+    if playlist_repair_payload:
+        final_payload["playlist_repair"] = playlist_repair_payload
+    taste_shift_payload = _taste_shift_payload(state.get("results", []))
+    if taste_shift_payload:
+        final_payload["taste_shift"] = taste_shift_payload
+    fact_check_payload = _fact_check_payload(state.get("results", []))
+    if fact_check_payload:
+        final_payload["fact_check"] = fact_check_payload
+    recommend_explainer_payload = _recommend_explainer_payload(state.get("results", []))
+    if recommend_explainer_payload:
+        final_payload["recommend_explainer"] = recommend_explainer_payload
         final_payload["sample_relations"] = sample_payload.get("relations") or []
         source_cards = sample_payload.get("source_track_cards") or []
         if source_cards:
@@ -1702,7 +1958,22 @@ def _select_listed_tracks(results: list[dict[str, Any]], plan: AgentPlan) -> lis
     仅对会渲染确定性曲目清单的意图返回非空（recommend/search/playlist/journey）；
     chat/discuss/taste 的文本不是一行行歌名，返回 [] 表示不接管卡片，
     让前端保留流式预览卡片。
+
+    多意图：primary 可能是知识类（返 []），但某个 sub_plan 是 track 类——此时按
+    track 型 sub_plan 取卡片，让答案底部仍出 song cards。primary 本身是 track 类时
+    走 primary（sub_plan 是知识 dossier，不产 track 卡片）。
     """
+    tracks = _select_listed_tracks_single(results, plan)
+    if tracks or not plan.is_multi_intent:
+        return tracks
+    for sp in plan.sub_plans:
+        sub_tracks = _select_listed_tracks_single(results, sp)
+        if sub_tracks:
+            return sub_tracks
+    return []
+
+
+def _select_listed_tracks_single(results: list[dict[str, Any]], plan: AgentPlan) -> list[Any]:
     if plan.intent == "playlist":
         pl = next((r["playlist"] for r in results if r.get("type") == "playlist"), None)
         tracks = list(pl.tracks) if pl and pl.tracks else _collect_tracks(results)
@@ -1884,7 +2155,13 @@ async def plan_with_llm_with_meta_async(
         raw = await llm.agenerate(
             "\n\n".join(sections), system=QUERY_PLAN_SYSTEM, temperature=0.1,
         )
-    except Exception:
+    except Exception as _plan_exc:
+        import httpx as _httpx
+        if isinstance(_plan_exc, _httpx.HTTPStatusError) and _plan_exc.response.status_code in (401, 403):
+            logger.error(
+                "[LLM_AUTH_ERROR] LLM API key 无效或无权限（%s %s）——检查 .env 的 LLM_API_KEY",
+                _plan_exc.response.status_code, _plan_exc.response.text[:120],
+            )
         return None, {}, empty_runtime_metrics()
     payload = _parse_query_plan_payload(raw)
     metrics = capture_llm_stats(llm)
@@ -1921,7 +2198,39 @@ def _plan_from_query_payload(payload: QueryPlanPayload, query: str) -> AgentPlan
         online_required=retrieval.use_web,
         reasoning_summary=payload.reasoning.strip() or spec.summary,
         retrieval_plan=retrieval,
+        sub_plans=_build_secondary_sub_plans(payload, intent, query),
     )
+
+
+def _build_secondary_sub_plans(payload: QueryPlanPayload, primary_intent: str, query: str) -> list[AgentPlan]:
+    """把 LLM 检测到的 secondary 意图转成一个 sub AgentPlan（≤1 个）。
+
+    三重闸门：flag 关 / 无 secondary / pair 不在白名单 → 返回空列表（=单意图今天行为）。
+    sub_plan 自己不再递归带 secondary（双意图上限）。
+    """
+    secondary = payload.secondary
+    if not settings.enable_multi_intent or secondary is None or not secondary.intent:
+        return []
+    if not is_allowed_multi_intent_pair(primary_intent, secondary.intent):
+        return []
+    spec = get_intent(secondary.intent)
+    entities = list(secondary.entities) or list(payload.entities)
+    search_query = secondary.search_query.strip() or (entities[0] if entities else query)
+    retrieval = RetrievalPlan(
+        use_local=False,
+        use_vector=False,
+        use_web=spec.online_default,
+        entities=entities,
+        search_query=search_query,
+    )
+    return [AgentPlan(
+        intent=secondary.intent,
+        strategy=spec.strategy_for(retrieval.use_web),
+        tools_needed=spec.tools_for(retrieval.use_web),
+        online_required=retrieval.use_web,
+        reasoning_summary=spec.summary,
+        retrieval_plan=retrieval,
+    )]
 
 
 def _merge_prompt_versions(existing: Any, incoming: dict[str, str] | None) -> dict[str, str]:
@@ -2070,6 +2379,7 @@ def _trace_summary(
     album_cards = 0
     artist_cards = 0
     sample_cards = 0
+    compare_cards = 0
     for result in results:
         if result.get("type") == "taste_experiment":
             exp = result.get("experiment")
@@ -2084,9 +2394,25 @@ def _trace_summary(
             artist_cards += len(result.get("artists") or [])
             if result.get("artists"):
                 sources.add("local_library")
-        elif result.get("type") == "music_dossier":
+        elif result.get("type") == "music_compare":
+            artist_cards += len(result.get("artist_cards") or [])
+            compare_cards = max(compare_cards, len(result.get("cards_payload") or []))
+            if result.get("cards_payload"):
+                sources.update(
+                    str(card.get("source") or "")
+                    for card in (result.get("cards_payload") or [])
+                    if str(card.get("source") or "").strip()
+                )
+        elif result.get("type") in {"music_dossier", "music_compare"}:
             dossier = result.get("dossier") or {}
             for citation in dossier.get("citations") or []:
+                if citation.get("source"):
+                    sources.add(citation.get("source"))
+        elif result.get("type") == "concert_events":
+            if result.get("events"):
+                sources.add("web")
+        elif result.get("type") == "music_fact_check":
+            for citation in result.get("citations") or []:
                 if citation.get("source"):
                     sources.add(citation.get("source"))
         elif result.get("type") == "sample_dossier":
@@ -2153,7 +2479,7 @@ def _trace_summary(
         "guard_removed": sum(1 for line in trace if line.startswith("[guard]")),
         "reflection": any("[reflect]" in line for line in trace),
         "recovery": any("[refine]" in line for line in trace),
-        "final_cards": len(cards) or experiment_cards or album_cards or artist_cards or sample_cards,
+        "final_cards": len(cards) or compare_cards or experiment_cards or album_cards or artist_cards or sample_cards,
         "latency_budget": latency_budget,
     }
 
@@ -2165,7 +2491,7 @@ def _latency_budget_summary(
 ) -> dict[str, Any] | None:
     if not _is_knowledge_intent(str(context.get("intent") or "")) and not context.get("latency_budget"):
         # context may not carry intent; infer from knowledge result payloads.
-        if not any(r.get("type") in {"music_dossier", "sample_dossier"} for r in results):
+        if not any(r.get("type") in {"music_dossier", "music_compare", "sample_dossier"} for r in results):
             return None
     started = context.get("started_at_monotonic")
     elapsed = round(max(0.0, time.monotonic() - float(started)), 3) if started else 0
@@ -2179,7 +2505,7 @@ def _latency_budget_summary(
         metrics = item.get("metrics") or {}
         if metrics.get("deadline_skipped"):
             skipped.append(str(item.get("tool") or ""))
-    partial = any((r.get("dossier") or {}).get("partial") for r in results if r.get("type") == "music_dossier")
+    partial = any((r.get("dossier") or {}).get("partial") for r in results if r.get("type") in {"music_dossier", "music_compare"})
     partial = partial or any((r.get("sample_dossier") or {}).get("partial") for r in results if r.get("type") == "sample_dossier")
     budget = context.get("latency_budget") or {}
     return {
@@ -2193,7 +2519,7 @@ def _latency_budget_summary(
 
 def _music_dossier_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
     for result in reversed(results):
-        if result.get("type") == "music_dossier" and result.get("dossier"):
+        if result.get("type") in {"music_dossier", "music_compare"} and result.get("dossier"):
             return result.get("dossier")
     return None
 
@@ -2223,7 +2549,29 @@ def _similar_artists_payload(results: list[dict[str, Any]]) -> list[dict[str, An
     return []
 
 
+def _playlist_repair_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((result for result in results if result.get("type") == "playlist_repair"), None)
+
+
+def _taste_shift_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((result for result in results if result.get("type") == "taste_shift_detector"), None)
+
+
+def _fact_check_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((result for result in results if result.get("type") == "music_fact_check"), None)
+
+
+def _recommend_explainer_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next((result for result in results if result.get("type") == "recommend_explainer"), None)
+
+
 def _compose_deterministic_answer(results: list[dict[str, Any]], plan: AgentPlan) -> str:
+    if plan.intent == "music_compare":
+        compare_result = next((r for r in reversed(results) if r.get("type") == "music_compare"), None)
+        if compare_result and compare_result.get("message") and not compare_result.get("dossier"):
+            return str(compare_result.get("message"))
+        if compare_result and compare_result.get("answer"):
+            return str(compare_result.get("answer"))
     if plan.intent == "sample_lookup":
         dossier = _sample_dossier_payload(results)
         if dossier:
@@ -2263,7 +2611,68 @@ def _compose_deterministic_answer(results: list[dict[str, Any]], plan: AgentPlan
             titles = "、".join(f"《{t['title']}》" for t in phase["tracks"])
             lines.append(f"- 阶段 {idx}｜{phase['name']}：{phase['goal']}。{titles or '暂无候选'}")
         return "\n".join(lines)
+    if plan.intent == "concert_events":
+        return _compose_concert_events_answer(results)
+    if plan.intent == "playlist_repair":
+        return _compose_playlist_repair_answer(results)
+    if plan.intent == "taste_shift_detector":
+        return _compose_taste_shift_answer(results)
+    if plan.intent == "music_fact_check":
+        return _compose_fact_check_answer(results)
+    if plan.intent == "recommend_explainer":
+        return _compose_recommend_explainer_answer(results)
     return "这轮没有拿到可交付的结构化结果。"
+
+
+def _chunk_for_stream(text: str, *, max_chunk: int = 60) -> list[str]:
+    """把已算好的整段答案切成渐进 yield 的小块，营造流式观感（不调用 LLM）。
+
+    优先按行切（保住 markdown 标题/列表的换行），过长的行再按句末标点二次切。
+    纯本地字符串处理，确定可复现——离线测试也稳定。
+    """
+    if not text:
+        return []
+    chunks: list[str] = []
+    for line in text.splitlines(keepends=True):
+        if len(line) <= max_chunk:
+            chunks.append(line)
+            continue
+        buf = ""
+        for ch in line:
+            buf += ch
+            if len(buf) >= max_chunk and ch in "。！？；，、.!?;,":
+                chunks.append(buf)
+                buf = ""
+        if buf:
+            chunks.append(buf)
+    return chunks
+
+
+async def _compose_multi_intent_stream(
+    query: str,
+    results: list[dict[str, Any]],
+    plan: AgentPlan,
+    agent: AudioVisualAgent | None = None,
+    memory_query: str = "",
+    history_text: str = "",
+    user_id: str = "",
+):
+    """多意图：按 [primary, *sub_plans] 顺序各自复用现有 renderer，段间插分隔。
+
+    每个子计划构造一个「单意图视图」（sub_plans 清空）再回调
+    compose_answer_stream_async——于是每段都走它本来的意图渲染分支（track ladder /
+    dossier 直答 / artist_info 等），零新增渲染逻辑。视图无 sub_plans → 不会再递归进本函数。
+    冲突兜底：v1 白名单已保证 primary(track) + secondary(knowledge) 不产同型 section。
+    """
+    views = [plan.model_copy(update={"sub_plans": []}), *plan.sub_plans]
+    for idx, view in enumerate(views):
+        if idx > 0:
+            yield "\n\n"
+        async for piece in compose_answer_stream_async(
+            query, results, view, agent=agent,
+            memory_query=memory_query, history_text=history_text, user_id=user_id,
+        ):
+            yield piece
 
 
 async def compose_answer_stream_async(
@@ -2291,6 +2700,13 @@ async def compose_answer_stream_async(
             yield fallback
 
     intent = plan.intent
+    if settings.enable_multi_intent and plan.is_multi_intent:
+        async for piece in _compose_multi_intent_stream(
+            query, results, plan, agent=agent,
+            memory_query=memory_query, history_text=history_text, user_id=user_id,
+        ):
+            yield piece
+        return
     if intent == "chat":
         async for piece in stream_llm(
             _chat_prompt(query, agent, history_text, user_id),
@@ -2326,8 +2742,16 @@ async def compose_answer_stream_async(
         if source_urls:
             yield "\n\n📎 参考来源：\n" + "\n".join(f"- {url}" for url in source_urls[:3])
         return
-    if intent in {"artist_albums", "similar_artists", "taste_experiment", "taste", "journey"} or _is_knowledge_intent(intent):
-        yield _compose_deterministic_answer(results, plan)
+    if intent in {
+        "artist_albums", "similar_artists", "taste_experiment", "taste", "journey",
+        "concert_events", "playlist_repair", "taste_shift_detector", "music_fact_check", "recommend_explainer",
+    } or _is_knowledge_intent(intent):
+        # 知识档案正文在 dossier 构建阶段已算好（直答/合成），这里不再调 LLM。
+        # 但整段一次性 yield 会让前端"先空白、后整段刷出"；按段落切块渐进 yield，
+        # 给出流式观感（成本为零，不重复调用模型）。
+        full = _compose_deterministic_answer(results, plan)
+        for chunk in _chunk_for_stream(full):
+            yield chunk
         return
 
     tracks = _select_listed_tracks(results, plan) or _collect_tracks(results)
@@ -2545,6 +2969,136 @@ def _compose_taste_experiment_answer(results: list[dict[str, Any]]) -> str:
     result_summary = getattr(exp, "result_summary", "")
     if result_summary:
         lines.append(result_summary)
+    return "\n".join(lines)
+
+
+def _compose_concert_events_answer(results: list[dict[str, Any]]) -> str:
+    result = next((item for item in results if item.get("type") == "concert_events"), None)
+    payload = result or {}
+    artist = payload.get("artist") or "这位歌手"
+    city = payload.get("city") or ""
+    events = list(payload.get("events") or [])
+    weak_sources = list(payload.get("unverified_sources") or [])
+    if not events:
+        scope = f"{artist} 在 {city} 的" if city else f"{artist} 的"
+        if weak_sources:
+            leads = "；".join(
+                f"{item.get('title', '线索页')}（{item.get('source_name', 'web')}）"
+                for item in weak_sources[:3]
+            )
+            return f"这轮还没找到 {scope}可核实巡演场次；目前只有弱线索页：{leads}。我不会凭这些页面硬编演出安排。"
+        return f"这轮暂时没找到 {scope}可核实巡演信息；我不会凭印象编演出安排。"
+    concrete = [
+        event for event in events
+        if event.get("kind") == "event" or any(event.get(k) for k in ("date_text", "city", "venue"))
+    ]
+    pages = [event for event in events if event not in concrete]
+    lines = [f"{artist} 的公开巡演/演出信息如下："]
+    if concrete:
+        lines.append("可核实场次：")
+    for idx, event in enumerate(concrete[:5], start=1):
+        tail = "｜".join(part for part in [event.get("date_text", ""), event.get("city", ""), event.get("venue", "")] if part)
+        suffix = f"（{tail}）" if tail else ""
+        source = event.get("source_url") or event.get("url") or ""
+        label = event.get("source_name") or "web"
+        lines.append(f"{idx}. {event.get('title', '未命名演出')}{suffix}")
+        if source:
+            lines.append(f"   来源：{label} · {source}")
+    if pages:
+        lines.append("巡演/票务页：")
+        for idx, event in enumerate(pages[:3], start=1):
+            source = event.get("source_url") or event.get("url") or ""
+            label = event.get("source_name") or "web"
+            lines.append(f"{idx}. {event.get('title', '巡演信息页')}")
+            if source:
+                lines.append(f"   来源：{label} · {source}")
+    if weak_sources:
+        leads = "；".join(
+            f"{item.get('title', '线索页')}（{item.get('source_name', 'web')}）"
+            for item in weak_sources[:2]
+        )
+        lines.append(f"补充线索：以下页面只作辅助参考，未纳入已确认场次：{leads}")
+    return "\n".join(lines)
+
+
+def _compose_playlist_repair_answer(results: list[dict[str, Any]]) -> str:
+    payload = _playlist_repair_payload(results) or {}
+    if payload.get("missing_context"):
+        return str(payload.get("message") or "缺少待修复的歌单上下文。")
+    issues = list(payload.get("issues") or [])
+    actions = list(payload.get("repair_actions") or [])
+    suggestions = list(payload.get("suggested_replacements") or [])
+    lines = [f"我检查了这轮候选，发现 {len(issues)} 个主要问题："]
+    for idx, issue in enumerate(issues[:6], start=1):
+        lines.append(f"{idx}. {issue.get('summary', issue.get('kind', '未知问题'))}")
+    if actions:
+        lines.append("\n建议修法：")
+        for action in actions[:6]:
+            lines.append(f"- {action.get('reason', action.get('action', ''))}")
+    if suggestions:
+        titles = "、".join(f"《{item.title}》" for item in suggestions[:5] if getattr(item, "title", ""))
+        if titles:
+            lines.append(f"\n可补位候选：{titles}")
+    return "\n".join(lines)
+
+
+def _compose_taste_shift_answer(results: list[dict[str, Any]]) -> str:
+    payload = _taste_shift_payload(results) or {}
+    if payload.get("message"):
+        return str(payload["message"])
+    signals = list(payload.get("shift_signals") or [])
+    if not signals:
+        return "最近和历史口味相比，没有看到特别明显的迁移信号。"
+    lines = ["最近这段时间，你的口味变化主要体现在："]
+    for signal in signals[:6]:
+        lines.append(
+            f"- {signal.get('dimension')}：{signal.get('name')} 上升（近期 {signal.get('recent_count')} 次，历史 {signal.get('baseline_count')} 次）"
+        )
+    emerging = list(payload.get("emerging_genres") or [])[:3]
+    if emerging:
+        lines.append("\n最近新冒头的风格：" + "、".join(emerging))
+    return "\n".join(lines)
+
+
+def _compose_fact_check_answer(results: list[dict[str, Any]]) -> str:
+    payload = _fact_check_payload(results) or {}
+    claims = list(payload.get("claims") or [])
+    verified = list(payload.get("verified_claims") or [])
+    uncertain = list(payload.get("uncertain_claims") or [])
+    if not claims:
+        return "这轮没有抽取到明确可核验的音乐陈述。"
+    lines = [f"我核验了 {len(claims)} 条音乐陈述："]
+    if verified:
+        lines.append("已确认：")
+        for item in verified[:5]:
+            lines.append(f"- {item.get('text')}；{item.get('rationale')}")
+    if uncertain:
+        lines.append("证据不足：")
+        for item in uncertain[:5]:
+            lines.append(f"- {item.get('text')}；{item.get('rationale')}")
+    citations = list(payload.get("citations") or [])
+    if citations:
+        lines.append("\n参考来源：")
+        for citation in citations[:3]:
+            label = citation.get("title") or citation.get("source") or "来源"
+            url = citation.get("url") or ""
+            lines.append(f"- {label}：{url}" if url else f"- {label}")
+    return "\n".join(lines)
+
+
+def _compose_recommend_explainer_answer(results: list[dict[str, Any]]) -> str:
+    payload = _recommend_explainer_payload(results) or {}
+    if payload.get("missing_context"):
+        return str(payload.get("message") or "还没有最近推荐结果可解释。")
+    lines = ["这轮推荐主要是这样决定的："]
+    for reason in list(payload.get("global_reasons") or [])[:4]:
+        lines.append(f"- {reason}")
+    per_track = list(payload.get("per_track_reasons") or [])
+    if per_track:
+        lines.append("\n逐首解释：")
+        for item in per_track[:5]:
+            reasons = "；".join(item.get("reasons") or [])
+            lines.append(f"- 《{item.get('title', '')}》 - {item.get('artist', '')}：{reasons}")
     return "\n".join(lines)
 
 

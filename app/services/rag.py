@@ -121,5 +121,7 @@ class RagService:
                 "mood": asset.mood,
                 "tempo_bpm": asset.tempo_bpm,
                 "energy_level": asset.energy_level,
+                # 标注来源，避免报告把「基于标签估算」的 tempo/energy 当成真实测量。
+                "features_source": asset.features_source,
             },
         }

@@ -22,7 +22,9 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://musicbrainz.org/ws/2"
 # MusicBrainz 强制要求带联系方式/项目的 User-Agent，否则可能被拒。
 _HEADERS = {"User-Agent": "MusicAgent/1.0 (https://github.com/peteboi528/MusicAgent)"}
-_TIMEOUT = 6
+# 单次 MB 调用超时。从国内访问 musicbrainz.org 单次常 5–8s，6s 会刚好超时→实体 unresolved
+# →档案降级。提到 12s 留余量；快网络随响应即返回，不会真等满。
+_TIMEOUT = 12
 
 # 进程级响应缓存：MB 建议 ≤1 req/s，而知识链路对同一实体会调两次——消歧阶段
 # (canonicalize_entities) 和元数据阶段 (_metadata_for_entity) 各一次。缓存让第二次

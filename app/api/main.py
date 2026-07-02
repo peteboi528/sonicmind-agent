@@ -24,6 +24,7 @@ from app.models import (
     ArtistInfoRequest,
     ArtistInfoResponse,
     BrowseRequest,
+    ChatHistoryTurnRequest,
     ChatRequest,
     DailyRequest,
     DiscoverQueryClassification,
@@ -36,9 +37,11 @@ from app.models import (
     ListenRequest,
     LyricsRequest,
     MemoryUpdateRequest,
+    PlaylistFromAssetsRequest,
     PlaylistRequest,
     ProfileInsightFeedbackRequest,
     RatingRequest,
+    RecommendationHistoryRequest,
     SaveAlbumRequest,
     SearchRequest,
     SearchResponse,
@@ -114,8 +117,10 @@ agent = AudioVisualAgent()
 
 # 用户画像服务（计划 §16.4）：复用 agent 的 store/memory，无独立状态。
 from app.services.profile import UserProfileService
+from app.services.history import HistoryService
 
 profile_service = UserProfileService(agent.store, agent.memory)
+history_service = HistoryService(agent.store)
 
 
 def _effective_user_id(request: Request, provided_user_id: str | None) -> str:
@@ -354,6 +359,14 @@ def ingest_full(request: IngestRequest):
         asset = enriched.asset
     except Exception:
         logger.warning("enrich step failed during ingest_full for %s", asset.asset_id, exc_info=True)
+    # 分类（enrich 拿到真实歌名/歌手后）：补 genre/mood + 估算 tempo/energy。
+    # 否则入库的歌只剩 DemoAnalyzer 的「未分类」，没标签、进不了推荐/品味。
+    try:
+        classified = agent.classify_asset(asset.asset_id)
+        if classified is not None:
+            asset = classified
+    except Exception:
+        logger.warning("classify step failed during ingest_full for %s", asset.asset_id, exc_info=True)
     try:
         asset, _ = agent.analyze_media(asset.asset_id, force_refresh=request.force_refresh)
     except Exception:
@@ -376,6 +389,34 @@ def analyze(asset_id: str, force_refresh: bool = Query(default=False)):
         return {"asset": asset, "segments": segments}
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/assets/backfill_features")
+def backfill_features(user_id: str | None = Query(default=None)):
+    """一次性回填：为 tempo/energy 为 None 的资产按 genre/mood 标签估算填充。
+
+    现网全部为 None（网易云无音频可分析，DemoAnalyzer 保持 None）。回填后推荐 energy/tempo
+    锚与 tempo_range 才有真实信号。估算值用 features_source='estimated' 标注，非 measured。
+    """
+    result = agent.backfill_estimated_features()
+    if user_id:
+        # 可选：立即刷新品味档案，让 preferred_energy/tempo_range 马上吃上估算值；
+        # 不传则在下次推荐时按当前资产懒重算。
+        try:
+            library = [a for a in agent.list_assets() if a.status == "analyzed"]
+            agent.memory.refresh_taste_profile(user_id, library)
+        except Exception:
+            logger.warning("taste refresh after backfill failed for user=%s", user_id, exc_info=True)
+    return {"backfilled": True, **result}
+
+
+@app.post("/assets/cleanup_play_pollution")
+def cleanup_play_pollution(user_id: str | None = Query(default=None)):
+    """一次性清理：删除 source=external 且无标签的「播放自动入库」垃圾，并把 local 未分类
+    重新分类。修旧 bug（play 曾把每首播过的歌入库且无标签）。保守：只动无标签条目。
+    """
+    result = agent.cleanup_play_pollution(user_id=user_id)
+    return {"cleaned": True, **result}
 
 
 @app.delete("/assets/{asset_id}")
@@ -455,8 +496,49 @@ def listen(payload: ListenRequest, request: Request):
         payload.duration,
         payload.completed,
         payload.context,
+        title=payload.title,
+        artist=payload.artist,
+        cover_url=payload.cover_url,
+        source=payload.source,
+        source_id=payload.source_id,
     )
     return {"memory_updated": True, "history_count": len(memory.listening_history)}
+
+
+@app.get("/history/listening/{user_id}")
+def list_listening_history(user_id: str, request: Request, limit: int = Query(default=100, ge=1, le=200)):
+    """听歌记录（最近在前）。每条回填展示元数据：
+    - 新格式事件（写入时已带 title）直接用；
+    - 旧格式事件（只有 asset_id）用曲库回查补 title/artist/cover；
+    - 在线曲/已删曲目（asset_id 不在库里）标 available=False，前端展示「已移除/在线曲目」。
+    """
+    uid = _effective_user_id(request, user_id)
+    memory = agent.memory.get_memory(uid)
+    by_id = {a.asset_id: a for a in agent.list_assets()}
+    events = list(reversed(memory.listening_history))[:limit]
+    items = []
+    for ev in events:
+        title, artist, cover, available = ev.title, ev.artist, ev.cover_url, bool(ev.title)
+        if not available:
+            asset = by_id.get(ev.asset_id)
+            if asset is not None:
+                title = asset.title or ev.asset_id
+                artist = asset.artist or ""
+                cover = asset.cover_url or ""
+                available = True
+        items.append({
+            "asset_id": ev.asset_id,
+            "title": title,
+            "artist": artist,
+            "cover_url": cover,
+            "source": ev.source,
+            "source_id": ev.source_id,
+            "timestamp": ev.timestamp,
+            "duration_listened": ev.duration_listened,
+            "completed": ev.completed,
+            "available": available,
+        })
+    return {"items": items}
 
 
 @app.post("/chat")
@@ -511,6 +593,81 @@ async def agent_stream(payload: ChatRequest, request: Request):
             trace_store.finish_run(run_id, status, (time.monotonic() - started) * 1000)
 
     return StreamingResponse(events(), media_type="text/event-stream")
+
+
+@app.get("/history/chat/{user_id}")
+def list_chat_history(user_id: str, request: Request):
+    uid = _effective_user_id(request, user_id)
+    threads = history_service.list_chat_threads(uid)
+    return {"threads": [thread.model_dump(mode="json") for thread in threads]}
+
+
+@app.get("/history/chat/{user_id}/{thread_id}")
+def get_chat_history_thread(user_id: str, thread_id: str, request: Request):
+    uid = _effective_user_id(request, user_id)
+    thread = history_service.get_chat_thread(uid, thread_id)
+    if thread is None:
+        raise HTTPException(status_code=404, detail="chat thread not found")
+    return thread
+
+
+@app.post("/history/chat/turn")
+def save_chat_history_turn(payload: ChatHistoryTurnRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    thread = history_service.append_chat_turn(
+        uid,
+        payload.thread_id,
+        payload.user_message,
+        payload.assistant_message,
+        cards=payload.cards,
+        trace_summary=payload.trace_summary,
+    )
+    return {"saved": True, "thread": thread.model_dump(mode="json")}
+
+
+@app.delete("/history/chat/{user_id}")
+def clear_chat_history(user_id: str, request: Request):
+    uid = _effective_user_id(request, user_id)
+    return {"deleted": history_service.clear_chat_threads(uid)}
+
+
+@app.delete("/history/chat/{user_id}/{thread_id}")
+def delete_chat_history_thread(user_id: str, thread_id: str, request: Request):
+    uid = _effective_user_id(request, user_id)
+    deleted = history_service.delete_chat_thread(uid, thread_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="chat thread not found")
+    return {"deleted": True}
+
+
+@app.get("/history/recommendations/{user_id}")
+def list_recommendation_history(user_id: str, request: Request):
+    uid = _effective_user_id(request, user_id)
+    items = history_service.list_recommendations(uid)
+    return {"recommendations": [item.model_dump(mode="json") for item in items]}
+
+
+@app.post("/history/recommendations")
+def save_recommendation_history(payload: RecommendationHistoryRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    item = history_service.save_recommendation(
+        uid,
+        payload.query,
+        answer=payload.answer,
+        cards=payload.cards,
+        thread_id=payload.thread_id,
+        ttl_days=payload.ttl_days,
+    )
+    return {"saved": True, "recommendation": item.model_dump(mode="json")}
+
+
+@app.delete("/history/recommendations/{user_id}/{record_id}")
+def delete_recommendation_history(user_id: str, record_id: str, request: Request):
+    uid = _effective_user_id(request, user_id)
+    deleted = history_service.delete_recommendation(uid, record_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="recommendation history not found")
+    return {"deleted": True}
 
 
 @app.post("/agent/resume")
@@ -1125,7 +1282,7 @@ def clear_profile(user_id: str, request: Request):
 @app.post("/taste/experiment/generate")
 def generate_taste_experiment(payload: TasteExperimentRequest, request: Request):
     uid = _effective_user_id(request, payload.user_id)
-    return agent.generate_taste_experiment(uid, payload.prompt, total=payload.total)
+    return agent.generate_taste_experiment(uid, payload.prompt, total=payload.total, online_only=payload.online_only)
 
 
 @app.get("/taste/experiments/{user_id}")
@@ -1241,6 +1398,15 @@ def library_tracks(limit: int = Query(default=100, ge=1, le=500)):
 def generate_playlist(payload: PlaylistRequest, request: Request):
     playlist = agent.generate_playlist(_effective_user_id(request, payload.user_id), payload.instruction)
     return playlist
+
+
+@app.post("/playlist/from_assets")
+def create_playlist_from_assets(payload: PlaylistFromAssetsRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    try:
+        return agent.create_playlist_from_assets(uid, payload.name, payload.asset_ids, payload.description)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/journey/generate")

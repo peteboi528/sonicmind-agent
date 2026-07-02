@@ -3,6 +3,7 @@ import { ref, reactive, nextTick, watch, onMounted } from "vue";
 import { store } from "../store.js";
 import { api } from "../api.js";
 import SongCard from "./SongCard.vue";
+import { renderMarkdown } from "../markdown.js";
 
 const STORAGE_KEY = `sonicmind_chat_${store.userId}`;
 const newThreadId = () => globalThis.crypto?.randomUUID?.() || `thread-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -95,6 +96,9 @@ function saveToStorage() {
         traceSummary: m.traceSummary || null,
         tasteExperiment: m.tasteExperiment || null,
         pendingActions: m.pendingActions || [],
+        // blob: 预览 URL reload 后即失效，不持久化（只存后端返回的 data: 缩略图）。
+        image: (m.image && !m.image.startsWith("blob:")) ? m.image : null,
+        recognition: m.recognition || null,
       })),
       history: history.slice(-20),
       msgId,
@@ -107,7 +111,7 @@ function saveToStorage() {
 function loadFromStorage() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
+    if (!raw) return false;
     const data = JSON.parse(raw);
     if (data.messages?.length) {
       messages.value = data.messages.map(m => ({
@@ -126,7 +130,49 @@ function loadFromStorage() {
       history.push(...data.history);
     }
     threadId = data.threadId || threadId;
+    return !!data.messages?.length;
   } catch { /* corrupt data */ }
+  return false;
+}
+
+function isRecommendationLike(traceSummary, cards) {
+  if (!Array.isArray(cards) || !cards.length) return false;
+  const intent = traceSummary?.intent || "";
+  return ["recommend", "playlist", "taste_experiment", "search"].includes(intent);
+}
+
+// 把后端线程对象载入当前会话视图。restoreLatestBackendThread（取最近一条）与
+// 历史 tab 点开任意历史会话（getChatThread）共用此逻辑。
+async function loadThread(thread) {
+  if (!thread?.messages?.length) return false;
+  messages.value = thread.messages.map(m => ({
+    id: ++msgId,
+    role: m.role === "user" ? "user" : "bot",
+    text: m.content || "",
+    cards: m.cards || [],
+    albums: [],
+    artists: [],
+    dossier: null,
+    sampleDossier: null,
+    traceSummary: m.trace_summary || null,
+    tasteExperiment: null,
+    pendingActions: [],
+  }));
+  history.length = 0;
+  history.push(...thread.messages.map(m => ({ role: m.role, content: m.content || "" })).slice(-20));
+  threadId = thread.thread_id || threadId;
+  saveToStorage();
+  scrollDown();
+  return true;
+}
+
+async function restoreLatestBackendThread() {
+  try {
+    const data = await api.listChatHistory(store.userId);
+    return await loadThread(data.threads?.[0]);
+  } catch {
+    return false;
+  }
 }
 
 function clearHistory() {
@@ -185,6 +231,20 @@ async function playAlbum(album) {
   toast(`播放《${album.name}》：${tracks.length} 首`);
 }
 
+// 把知识档案的「你的曲库命中」(LibraryMatch) 映射成 SongCard 卡片形状，
+// 复用 SongCard 的播放/MV/入库逻辑。source_id 给在线源取流用。
+function libMatchToCard(lm) {
+  return {
+    title: lm.title,
+    artist: lm.artist || "",
+    source: lm.source || "local",
+    source_id: lm.source_id || "",
+    asset_id: lm.asset_id || "",
+    cover_url: lm.cover_url || "",
+    genre: lm.genre || [],
+  };
+}
+
 async function toggleAlbumSave(album) {
   if (album.saving) return;
   album.saving = true;
@@ -226,32 +286,55 @@ async function toggleAlbumSave(album) {
 // Auto-save whenever messages change
 watch(messages, saveToStorage, { deep: true });
 
-onMounted(() => {
-  loadFromStorage();
+onMounted(async () => {
+  const restoredLocal = loadFromStorage();
+  if (!restoredLocal) await restoreLatestBackendThread();
   loadSavedAlbumIds();
   scrollDown();
 });
 
+// 历史 tab 点「最近对话」→ store.navigateTo('chat', threadId) → App 切到对话 tab + 这里载入该线程。
+// 若正好在 streaming，先 abort 再载入（abort 走 AbortError 分支，post-await 的 push 被跳过，无孤儿消息）。
+watch(() => store.navigate?.nonce, async () => {
+  const nav = store.navigate;
+  if (!nav || nav.tab !== "chat" || !nav.threadId) return;
+  if (isStreaming.value && abortController) abortController.abort();
+  try {
+    const thread = await api.getChatThread(store.userId, nav.threadId);
+    await loadThread(thread);
+  } catch { /* 线程读取失败：保持当前会话不动 */ }
+});
+
 // ── Send ──
+const fileInput = ref(null);
+
 async function send(text) {
   const msg = (text ?? input.value).trim();
   if (!msg || isStreaming.value) return;
   input.value = "";
   messages.value.push({ id: ++msgId, role: "user", text: msg, cards: [], albums: [], tasteExperiment: null });
   history.push({ role: "user", content: msg });
+  await streamTurn(msg);
+}
+
+// 流式一轮的核心：发 message → 收 SSE → 维护 botMsg → 存历史。
+// 从 send 里抽出来，让「上传封面识别」也能复用：识别拿到 query 后直接 streamTurn(query)，
+// 于是整条 album_deep_dive 知识链路原样复用，前端不必重复实现流式。
+async function streamTurn(message, opts = {}) {
   isStreaming.value = true;
-  thinking.value = "思考中...";
+  thinking.value = opts.thinking || "思考中...";
   scrollDown();
 
   // 必须用 reactive：后续 candidates/song_card/final 事件会持续 push/splice botMsg.cards，
   // 若是普通对象，这些改动绕过响应式代理、Vue 检测不到，导致流式阶段只显示第一个
   // candidates 批次（约 5 张），final 的完整列表不刷新——只能靠刷新页面从 storage 重建。
-  const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [], albums: [], artists: [], dossier: null, sampleDossier: null, traceSummary: null, tasteExperiment: null, pendingActions: [] });
+  const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [], albums: [], artists: [], dossier: null, sampleDossier: null, traceSummary: null, tasteExperiment: null, pendingActions: [], recognition: opts.recognition || null });
   let finalText = "";
+  let finalPayload = null;
   abortController = new AbortController();
 
   try {
-    await api.streamChat({ userId: store.userId, threadId, message: msg, history }, {
+    await api.streamChat({ userId: store.userId, threadId, message, history }, {
       onEvent: (event) => {
         if (event.type === "thinking" || event.type === "tool_start" || event.type === "plan") {
           thinking.value = event.content || "思考中...";
@@ -296,6 +379,7 @@ async function send(text) {
           scrollDown();
         } else if (event.type === "final") {
           finalText = event.content || "";
+          finalPayload = event.payload || {};
           const finalCards = event.payload?.cards;
           if (Array.isArray(finalCards)) {
             botMsg.cards.splice(0, botMsg.cards.length, ...finalCards);
@@ -318,7 +402,30 @@ async function send(text) {
     // final 事件是权威文本（可能经 guard_answer 清理过幻觉歌名），覆盖流式预览。
     botMsg.text = finalText || botMsg.text;
     if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
-    history.push({ role: "assistant", content: finalText });
+    history.push({ role: "assistant", content: botMsg.text });
+    try {
+      await api.saveChatTurn({
+        userId: store.userId,
+        threadId,
+        // 上传封面等场景：后端历史应记用户真实动作（如「[上传专辑封面]」），
+        // 而不是内部改写后的检索 query；普通对话 userLabel 缺省即等于 message。
+        userMessage: opts.userLabel || message,
+        assistantMessage: botMsg.text,
+        cards: botMsg.cards || [],
+        traceSummary: botMsg.traceSummary || {},
+      });
+      if (isRecommendationLike(finalPayload?.trace_summary, botMsg.cards)) {
+        await api.saveRecommendationHistory({
+          userId: store.userId,
+          threadId,
+          query: message,
+          answer: botMsg.text,
+          cards: botMsg.cards || [],
+        });
+      }
+    } catch {
+      // 后端历史保存失败不影响本轮对话；localStorage 仍会兜底保存当前窗口。
+    }
   } catch (err) {
     thinking.value = "";
     if (err.name !== "AbortError") {
@@ -328,6 +435,61 @@ async function send(text) {
     isStreaming.value = false;
     abortController = null;
     scrollDown();
+    saveToStorage();
+  }
+}
+
+// ── 上传专辑封面 → 识别 → 走知识链路 ──
+function pickImage() {
+  if (isStreaming.value) return;
+  fileInput.value?.click();
+}
+
+async function onImagePicked(e) {
+  const file = e.target.files?.[0];
+  // 重置 value，保证同一张图能再次触发 change。
+  if (e.target) e.target.value = "";
+  if (!file) return;
+  if (!file.type || !file.type.startsWith("image/")) { toast("请选择图片文件（PNG/JPEG/WebP）"); return; }
+  if (isStreaming.value) return;
+
+  // 即时本地预览；识别回来后替换成后端缩略图 data URI（可持久化进 localStorage）。
+  const previewUrl = URL.createObjectURL(file);
+  const userMsg = reactive({ id: ++msgId, role: "user", text: "", image: previewUrl, cards: [], albums: [], tasteExperiment: null });
+  messages.value.push(userMsg);
+  history.push({ role: "user", content: "[上传专辑封面]" });
+  scrollDown();
+
+  isStreaming.value = true;
+  thinking.value = "识别封面中…";
+  abortController = new AbortController();
+  try {
+    const data = await api.identifyAlbum(file, store.userId, threadId, abortController.signal);
+    // 后端缩略图替换临时预览；无缩略图则清空——绝不留下 blob: 死引用（reload 后失效且占内存）。
+    URL.revokeObjectURL(previewUrl);
+    userMsg.image = data.thumbnail_url || "";
+    thinking.value = "";
+    const rec = data.recognized || {};
+    if (data.query) {
+      // 识别成功 → 把改写好的 query 喂进现有流式，复用 album_deep_dive 知识链路；
+      // recognition 挂到 bot 气泡顶部做「已识别」chip；userLabel 让后端历史记「上传封面」而非内部 query。
+      await streamTurn(data.query, { recognition: rec, thinking: "正在整理专辑资料…", userLabel: "[上传专辑封面]" });
+    } else {
+      // 没认出来：提示用户直接输入专辑名/歌手（OCR 读到文字时把文字也带上）。
+      isStreaming.value = false;
+      abortController = null;
+      const hint = rec.method === "ocr" && rec.raw_text
+        ? `封面上读到「${rec.raw_text}」，但没把握是哪张专辑，麻烦直接告诉我专辑名或歌手～`
+        : "没认出这是哪张专辑，麻烦直接告诉我专辑名或歌手～";
+      toast(hint);
+      saveToStorage();
+    }
+  } catch (err) {
+    thinking.value = "";
+    isStreaming.value = false;
+    abortController = null;
+    URL.revokeObjectURL(previewUrl);
+    if (err.name !== "AbortError") toast("⚠️ 封面识别失败，请检查服务是否启动。");
     saveToStorage();
   }
 }
@@ -403,7 +565,21 @@ function onKey(e) {
               : `<svg width='16' height='16' viewBox='0 0 24 24' fill='currentColor'><path d='M12 3v10.55c-.59-.34-1.27-.55-2-.55C7.79 13 6 14.79 6 17s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z'/></svg>`
             "></div>
             <div class="body">
-              <div v-if="m.text" class="text">{{ m.text }}</div>
+              <div v-if="m.image" class="user-image-wrap">
+                <img class="user-image" :src="m.image" alt="专辑封面" loading="lazy" />
+              </div>
+              <div v-if="m.recognition && m.recognition.method && m.recognition.method !== 'none'" class="recognition-chip">
+                <span class="rec-icon">{{ m.recognition.method === 'vision' ? '🎵' : '🔍' }}</span>
+                <span class="rec-text">
+                  <template v-if="m.recognition.album">{{ m.recognition.album }}<em v-if="m.recognition.artist"> — {{ m.recognition.artist }}</em></template>
+                  <template v-else-if="m.recognition.raw_text">读到封面文字：{{ m.recognition.raw_text }}</template>
+                  <em class="rec-conf" v-if="m.recognition.confidence"> · {{ Math.round((m.recognition.confidence || 0) * 100) }}%</em>
+                </span>
+              </div>
+              <!-- bot 正文渲染 markdown（知识档案含 #/**/列表）；user 文本保持纯文本不解析。
+                   renderMarkdown 内部先 HTML 转义再做受控替换，v-html 安全。 -->
+              <div v-if="m.text && m.role === 'bot'" class="text markdown" v-html="renderMarkdown(m.text)"></div>
+              <div v-else-if="m.text" class="text">{{ m.text }}</div>
               <div v-for="action in m.pendingActions || []" :key="action.action_id" class="confirmation-card">
                 <span>{{ action.text || "需要确认账号操作" }}</span>
                 <div v-if="!action.resolved">
@@ -431,28 +607,70 @@ function onKey(e) {
                     <span class="dossier-kicker">{{ m.dossier.entity?.type || "music" }}</span>
                     <h3>{{ m.dossier.entity?.name || "音乐档案" }}</h3>
                     <p v-if="m.dossier.entity?.artist">{{ m.dossier.entity.artist }}</p>
+                    <span v-if="m.dossier.is_parametric" class="dossier-source-badge">AI 知识库·未联网核实</span>
                   </div>
                   <img v-if="m.dossier.entity?.image" :src="m.dossier.entity.image" alt="" loading="lazy" />
                   <div v-else class="dossier-disc">◎</div>
                 </div>
-                <div v-if="m.dossier.partial" class="dossier-warning">
+                <div v-if="m.dossier.compare" class="compare-panel">
+                  <p v-if="m.dossier.summary" class="dossier-summary">{{ m.dossier.summary }}</p>
+                  <div v-if="m.dossier.compare.shared_ground?.length" class="compare-shared">
+                    <strong>两人的交集</strong>
+                    <span v-for="item in m.dossier.compare.shared_ground.slice(0, 4)" :key="item">{{ item }}</span>
+                  </div>
+                  <div v-if="m.dossier.compare.comparison_axes?.length" class="compare-axes">
+                    <div v-for="axis in m.dossier.compare.comparison_axes" :key="axis.axis" class="compare-axis">
+                      <strong>{{ axis.axis }}</strong>
+                      <p><span>{{ m.dossier.entity?.name }}</span>{{ axis.left }}</p>
+                      <p><span>{{ m.dossier.related_entities?.[0]?.name || "对方" }}</span>{{ axis.right }}</p>
+                    </div>
+                  </div>
+                  <div v-if="m.dossier.compare.intersection_summary" class="compare-intersection">
+                    <strong>怎么理解他们的共同点</strong>
+                    <p>{{ m.dossier.compare.intersection_summary }}</p>
+                  </div>
+                  <div v-if="m.dossier.compare.collaboration_tracks?.length" class="compare-collabs">
+                    <strong>先听合作曲</strong>
+                    <p>{{ m.dossier.compare.collaboration_tracks.slice(0, 5).map(item => item.title).join(" / ") }}</p>
+                  </div>
+                  <div v-if="m.dossier.compare.evidence?.length" class="citation-list">
+                    <strong>这些来源主要支持什么</strong>
+                    <a v-for="(c, idx) in m.dossier.compare.evidence.slice(0, 4)" :key="(c.url || c.title || c.source || 'compare-citation') + '-' + idx" :href="c.url || '#'" target="_blank" rel="noreferrer">
+                      <span>{{ c.kind || c.source }}</span>{{ c.title }}<em v-if="c.why_it_matters"> · {{ c.why_it_matters }}</em>
+                    </a>
+                  </div>
+                </div>
+                <div v-else-if="m.dossier.partial" class="dossier-warning">
                   资料不完整：{{ m.dossier.degraded_reason || "部分来源在时间预算内未返回" }}
                 </div>
-                <p v-if="m.dossier.summary" class="dossier-summary">{{ m.dossier.summary }}</p>
-                <div v-if="m.dossier.style_tags?.length" class="dossier-tags">
+                <!-- 直答路径(summary_is_narrative)：正文已在聊天气泡完整呈现，卡片不再复述 summary，
+                     只保留结构化的标签/共识/来源，避免整段重复。 -->
+                <p v-else-if="m.dossier.summary && !m.dossier.summary_is_narrative" class="dossier-summary">{{ m.dossier.summary }}</p>
+                <div v-if="!m.dossier.compare && m.dossier.style_tags?.length" class="dossier-tags">
                   <span v-for="tag in m.dossier.style_tags.slice(0, 8)" :key="tag">{{ tag }}</span>
                 </div>
-                <div v-if="m.dossier.critical_consensus" class="review-consensus">
+                <div v-if="!m.dossier.compare && m.dossier.critical_consensus" class="review-consensus">
                   <strong>乐评/资料共识</strong>
                   <p>{{ m.dossier.critical_consensus }}</p>
                 </div>
-                <div v-if="m.dossier.listening_guide?.length" class="listening-guide">
+                <div v-if="!m.dossier.compare && m.dossier.listening_guide?.length" class="listening-guide">
                   <strong>聆听路线</strong>
                   <ol>
                     <li v-for="item in m.dossier.listening_guide.slice(0, 4)" :key="item">{{ item }}</li>
                   </ol>
                 </div>
-                <div v-if="m.dossier.citations?.length" class="citation-list">
+                <div v-if="!m.dossier.compare && m.dossier.library_matches?.length" class="library-matches">
+                  <strong>🎧 你的曲库里有 <span class="reco-tag">推荐</span></strong>
+                  <p class="lib-match-hint">结合你听过的歌——介绍的这位歌手/风格，你库里已经有了，可以直接对照着听。</p>
+                  <SongCard
+                    v-for="(lm, idx) in m.dossier.library_matches.slice(0, 8)"
+                    :key="(lm.asset_id || lm.title) + '-' + idx"
+                    :card="libMatchToCard(lm)"
+                    :show-reason="false"
+                    @toast="(t) => store.showToast(t)"
+                  />
+                </div>
+                <div v-if="!m.dossier.compare && m.dossier.citations?.length" class="citation-list">
                   <strong>来源</strong>
                   <a v-for="(c, idx) in m.dossier.citations.slice(0, 6)" :key="(c.url || c.title || c.source || 'citation') + '-' + idx" :href="c.url || '#'" target="_blank" rel="noreferrer">
                     <span>{{ c.kind }}</span>{{ c.title || c.source || c.url }}
@@ -573,8 +791,12 @@ function onKey(e) {
           placeholder="描述你想听的音乐…"
           @keydown="onKey" :disabled="isStreaming"
         ></textarea>
+        <input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden-file" @change="onImagePicked" />
         <div class="composer-actions">
           <span class="composer-hint">Ctrl+Enter</span>
+          <button v-if="!isStreaming" class="upload-btn" title="上传专辑封面识别" @click="pickImage">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
+          </button>
           <button v-if="!isStreaming" class="send-btn" :disabled="!input.trim()" @click="send()">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
           </button>
@@ -728,6 +950,28 @@ function onKey(e) {
   font-size: 0.95rem; line-height: 1.7;
   white-space: pre-wrap; color: var(--text);
 }
+/* markdown 正文：已渲成块级元素，关掉 pre-wrap 以免换行被叠加成双倍空行 */
+.text.markdown { white-space: normal; }
+.text.markdown h1, .text.markdown h2, .text.markdown h3,
+.text.markdown h4, .text.markdown h5, .text.markdown h6 {
+  margin: 0.9em 0 0.4em; line-height: 1.35; font-weight: 600;
+}
+.text.markdown h1 { font-size: 1.25rem; }
+.text.markdown h2 { font-size: 1.12rem; }
+.text.markdown h3 { font-size: 1.02rem; color: var(--accent); }
+.text.markdown h4, .text.markdown h5, .text.markdown h6 { font-size: 0.96rem; opacity: 0.9; }
+.text.markdown p { margin: 0.5em 0; }
+.text.markdown ul, .text.markdown ol { margin: 0.5em 0; padding-left: 1.4em; }
+.text.markdown li { margin: 0.25em 0; }
+.text.markdown strong { font-weight: 600; color: var(--text); }
+.text.markdown code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.88em; background: rgba(255,255,255,0.07);
+  padding: 0.1em 0.35em; border-radius: 4px;
+}
+.text.markdown hr { border: none; border-top: 1px solid var(--border); margin: 0.9em 0; }
+.text.markdown > :first-child { margin-top: 0; }
+.text.markdown > :last-child { margin-bottom: 0; }
 .msg-user .text {
   background: var(--accent-dim);
   padding: 11px 15px;
@@ -878,11 +1122,93 @@ function onKey(e) {
   line-height: 1.45;
 }
 
+/* parametric 直答的来源标注：完整但未联网核实——用中性徽标，不用琥珀色"资料不完整"警告。 */
+.dossier-source-badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  background: rgba(130, 150, 210, 0.14);
+  color: var(--text-sub);
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
 .dossier-summary,
 .review-consensus p {
   color: var(--text-sub);
   font-size: 0.86rem;
   line-height: 1.55;
+}
+
+.compare-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.compare-shared {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.compare-shared strong,
+.compare-intersection strong,
+.compare-collabs strong {
+  width: 100%;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 0.83rem;
+}
+
+.compare-shared span {
+  padding: 6px 10px;
+  border-radius: var(--radius-pill);
+  background: rgba(29, 185, 84, 0.1);
+  color: #8fe6b2;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.compare-axes {
+  display: grid;
+  gap: 10px;
+}
+
+.compare-axis {
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.03);
+  padding: 10px 12px;
+}
+
+.compare-axis strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 0.84rem;
+}
+
+.compare-axis p,
+.compare-intersection p,
+.compare-collabs p {
+  margin: 0;
+  color: var(--text-sub);
+  font-size: 0.84rem;
+  line-height: 1.55;
+}
+
+.compare-axis p + p {
+  margin-top: 6px;
+}
+
+.compare-axis span {
+  display: inline-block;
+  min-width: 72px;
+  margin-right: 8px;
+  color: var(--text);
+  font-weight: 700;
 }
 
 .dossier-tags {
@@ -905,6 +1231,36 @@ function onKey(e) {
 .listening-guide,
 .citation-list {
   margin-top: 12px;
+}
+
+.library-matches {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+.library-matches > strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-size: 0.86rem;
+}
+.library-matches .reco-tag {
+  font-size: 0.66rem;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  letter-spacing: 0.04em;
+}
+.library-matches .lib-match-hint {
+  margin: 0 0 8px;
+  color: var(--text-sub);
+  font-size: 0.8rem;
+  line-height: 1.5;
 }
 
 .review-consensus strong,
@@ -1372,6 +1728,47 @@ function onKey(e) {
   text-align: center; font-size: 0.7rem;
   color: var(--text-muted); opacity: 0.4; margin-top: 8px;
 }
+
+/* ── 封面识别：上传按钮 / 用户图片气泡 / 识别 chip ── */
+.hidden-file { display: none; }
+
+.upload-btn {
+  width: 36px; height: 36px; border-radius: 50%;
+  background: transparent; color: var(--text-sub);
+  display: flex; align-items: center; justify-content: center;
+  transition: all var(--dur-norm) var(--ease-out); flex-shrink: 0;
+}
+.upload-btn:hover { background: var(--bg-hover); color: var(--accent); transform: scale(1.06); }
+
+.user-image-wrap {
+  display: flex; justify-content: flex-end;
+  margin-bottom: 6px; max-width: 220px; align-self: flex-end;
+}
+.msg-user .body { align-items: flex-end; }
+.user-image {
+  max-width: 180px; max-height: 180px; border-radius: var(--radius);
+  border: 1px solid var(--border); object-fit: cover; display: block;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+}
+
+.recognition-chip {
+  display: inline-flex; align-items: center; gap: 7px;
+  margin-bottom: 8px; padding: 5px 11px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-dim);
+  border: 1px solid rgba(29,185,84,0.22);
+  color: var(--accent);
+  font-size: 0.8rem; font-weight: 600;
+  max-width: 100%; overflow: hidden;
+}
+.recognition-chip .rec-icon { flex-shrink: 0; }
+.recognition-chip .rec-text {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.recognition-chip .rec-text em {
+  font-style: normal; color: var(--text-sub); font-weight: 500;
+}
+.recognition-chip .rec-conf { color: var(--text-muted) !important; font-weight: 500; }
 
 /* ── Responsive ── */
 @media (max-width: 768px) {

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import re
 from typing import Any
 
 from app.answer import song_card
+from app.recommend.hygiene import is_valid_music_track
 from app.intents import expand_content_negation, extract_content_negations, normalize_content_negation
-from app.models import ExternalTrack, ResultHygieneReport
+from app.models import ExternalTrack, ResultHygieneReport, TrackRef
 from app.recommend.hygiene import filter_music_tracks
 from app.tools.actions import AUX_TOOL_NAMES, execute_aux_tool
 from app.tools.contracts import ToolContext, ToolResult, ToolStatus
@@ -53,7 +56,9 @@ def _status_for(result: dict[str, Any]) -> ToolStatus:
         return ToolStatus.CONFIRMATION_REQUIRED
     if result_type == "unsupported_write":
         return ToolStatus.UNSUPPORTED
-    if not result.get("tracks") and result_type in {"find_on_platform", "lyrics", "concert_events"}:
+    if result_type == "concert_events":
+        return ToolStatus.EMPTY if not result.get("events") else ToolStatus.OK
+    if not result.get("tracks") and result_type in {"find_on_platform", "lyrics"}:
         return ToolStatus.EMPTY
     return ToolStatus.OK
 
@@ -143,51 +148,9 @@ def _filter_content_exclusions(tracks: list[Any], exclusions: list[str]) -> list
     return [track for track in tracks if not blocked(track)]
 
 
-# ── Track Hygiene：把教程/合集/歌单/节目/新闻/vlog 等非歌曲实体挡在结果与资源库之外 ──
-# candidate_kind 七分类里明确不是单曲的实体（搜索阶段已标注）。
-_NON_TRACK_KINDS = {"playlist", "compilation", "long_mix", "lyrics_video"}
-# 脏标题黑名单：candidate_kind 漏网的教程/解说/合集/歌单/广播剧/BGM/新闻类文案。
-_BAD_TITLE_KEYWORDS = (
-    "教程", "教学", "怎么做", "怎么唱", "编曲技巧", "合集", "全集", "精选集",
-    "歌单", "playlist", "节目", "电台", "混剪", "串烧", "连播", "纯音乐合集",
-    "现场合集", "翻唱合集", "cover合集", "cover 合集", "dj mix", "reaction",
-    "真的好难做", "弹跳全集", "音乐制作", "编曲", "乐理",
-    # 广播剧/OST/BGM/同人/新闻/vlog 类（非歌曲）
-    "广播剧", "原声带", "ost", "bgm", "同人", "警示录", "日记", "纪实", "监控",
-    "录像", "现场实录", "车祸", "事故", "实录", "解说", "旁白", "字幕",
-)
-# 句子/新闻/节目型标题的强标点——歌曲几乎不用：句号/感叹号/问号/方括号。
-# 出现这些基本可断定是新闻稿、vlog、节目片段而非单曲。
-_SENTENCE_PUNCT = ("。", "！", "？", "【", "】", "」", "」")
-
-
-def is_valid_music_track(track: Any) -> bool:
-    """判断一条结果是否是「真正的歌曲」——拦截教程/合集/歌单/节目/新闻/vlog 等脏数据。
-
-    判定顺序：必要条件(title/artist 非空) → candidate_kind 非歌曲实体拦截 →
-    句子型标题(。！？【】)拦截 → 脏标题黑名单 → source 特殊规则(bilibili 高风险)。
-    真实歌曲（Ditto/ETA/Firework/深夜（Night）等）不受影响。
-    """
-    if track is None:
-        return False
-    title = str(getattr(track, "title", "") or "").strip()
-    artist = str(getattr(track, "artist", "") or "").strip()
-    if not title or not artist:
-        return False
-    kind = str(getattr(track, "candidate_kind", "") or "").strip().lower()
-    if kind in _NON_TRACK_KINDS:
-        return False
-    # 句子/新闻/节目型标题：带句号/感叹/问号/方括号的基本不是单曲（车祸新闻/vlog/节目）。
-    if any(p in title for p in _SENTENCE_PUNCT):
-        return False
-    text = f"{title} {artist}".lower()
-    if any(kw in text for kw in _BAD_TITLE_KEYWORDS):
-        return False
-    source = str(getattr(track, "source", "") or "").strip().lower()
-    # bilibili 默认高风险：带逗号的长句标题（新闻/vlog）、问答/教学类一律拦。
-    if source == "bilibili" and any(w in title for w in ("，", "？", "?", "怎么", "为什么", "教你", "如何", "技巧", "！")):
-        return False
-    return True
+# Track Hygiene（教程/合集/歌单/节目/新闻/vlog 等非歌曲实体的结构性拦截）已统一到
+# app.recommend.hygiene.is_valid_music_track —— 与 is_structural_reject/classify_candidate 同源，
+# 单一事实来源。这里 re-export 保持旧导入路径（tests/test_track_hygiene 等）兼容。
 
 
 def _filter_invalid_tracks(tracks: list[Any]) -> list[Any]:
@@ -214,8 +177,12 @@ def install_default_handlers() -> None:
         "recommend": _recommend,
         "search": _search,
         "playlist": _playlist,
+        "playlist_repair": _playlist_repair,
         "taste": _taste,
         "taste_experiment": _taste_experiment,
+        "taste_shift_detector": _taste_shift_detector,
+        "music_fact_check": _music_fact_check,
+        "recommend_explainer": _recommend_explainer,
         "resolve_music_entity": _resolve_music_entity,
         "music_metadata_lookup": _music_metadata_lookup,
         "review_search": _review_search,
@@ -244,6 +211,7 @@ def install_default_handlers() -> None:
     bind_async_tool_handler("artist_albums", _artist_albums_async)
     bind_async_tool_handler("video_search", _video_search_async)
     bind_async_tool_handler("web_info_search", _web_info_search_async)
+    bind_async_tool_handler("web_knowledge_search", _web_knowledge_search_async)
     for name in AUX_TOOL_NAMES:
         bind_tool_handler(name, _aux_handler(name))
 
@@ -280,6 +248,184 @@ def _normalize_track_items(items: list[Any]) -> list[Any]:
     return normalized
 
 
+def _match_compare_track(candidate: Any, title: str, artist: str) -> bool:
+    cand_title = (getattr(candidate, "title", "") or "").lower().strip()
+    cand_artist = (getattr(candidate, "artist", "") or "").lower().strip()
+    want_title = (title or "").lower().strip()
+    want_artist = (artist or "").lower().strip()
+    if not cand_title or not want_title:
+        return False
+    title_ok = want_title in cand_title or cand_title in want_title
+    normalized_want = re.sub(r"\s*(?:/|&|,|feat\.?|ft\.?)\s*", " ", want_artist)
+    normalized_cand = re.sub(r"\s*(?:/|&|,|feat\.?|ft\.?)\s*", " ", cand_artist)
+    artist_ok = (
+        not want_artist
+        or want_artist in cand_artist
+        or cand_artist in want_artist
+        or normalized_want in normalized_cand
+        or normalized_cand in normalized_want
+    )
+    return title_ok and artist_ok
+
+
+def _guide_track(title: str, artist: str) -> TrackRef:
+    return TrackRef(title=title, artist=artist, source="guide")
+
+
+def _compare_search_queries(title: str, artist: str) -> list[str]:
+    raw_title = (title or "").strip()
+    raw_artist = (artist or "").strip()
+    if not raw_title:
+        return []
+    normalized_title = re.sub(r"[’`]", "'", raw_title)
+    def _collapse_spaces(value: str) -> str:
+        return re.sub(r"\s+", " ", value).strip()
+    title_variants = list(dict.fromkeys([
+        _collapse_spaces(raw_title),
+        _collapse_spaces(normalized_title),
+        _collapse_spaces(normalized_title.replace("'", "")),
+        _collapse_spaces(re.sub(r"[^\w\s]", " ", normalized_title)),
+    ]))
+    artist_variants = [raw_artist] if raw_artist else [""]
+    if raw_artist:
+        artist_variants.extend(part.strip() for part in re.split(r"\s*(?:/|&|,|feat\.?|ft\.?)\s*", raw_artist) if part.strip())
+    artist_variants = list(dict.fromkeys(artist_variants))
+    queries: list[str] = []
+    for title_item in title_variants:
+        if not title_item:
+            continue
+        queries.append(title_item)
+        for artist_item in artist_variants:
+            if artist_item:
+                queries.append(f"{artist_item} {title_item}")
+                queries.append(f"{title_item} {artist_item}")
+    return list(dict.fromkeys(query.strip() for query in queries if query.strip()))
+
+
+def _resolve_compare_cards(ctx: ToolContext, groups: list[dict[str, Any]], collabs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from app.search.verifier import verify_song
+    from app.sources.mock_source import MockSource
+    from app.sources.netease import search_netease_many
+
+    cards: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    mock_source = MockSource()
+
+    def add_card(track: Any, reason: str) -> None:
+        card = song_card(track, reason=reason)
+        key = (str(card.get("title", "")).lower(), str(card.get("artist", "")).lower())
+        if key in seen:
+            return
+        seen.add(key)
+        cards.append(card)
+
+    def resolve_track(title: str, artist: str) -> Any:
+        try:
+            verified = verify_song(title, artist)
+            if verified is not None:
+                return verified
+        except Exception:
+            pass
+        try:
+            for query in _compare_search_queries(title, artist):
+                try:
+                    metas = search_netease_many(query, limit=5)
+                except Exception:
+                    metas = []
+                for meta in metas:
+                    candidate = ExternalTrack(
+                        external_id=meta["song_id"],
+                        title=meta["title"],
+                        artist=meta.get("artist", ""),
+                        album=meta.get("album"),
+                        cover_url=meta.get("cover"),
+                        source="netease",
+                        playback_url=f"https://music.163.com/song?id={meta['song_id']}",
+                    )
+                    if _match_compare_track(candidate, title, artist):
+                        return candidate
+                online = ctx.agent.search_web_music(query, top_k=5, relevance_query=title)
+                matched = next((item for item in online if _match_compare_track(item, title, artist)), None)
+                if matched is not None:
+                    return matched
+        except Exception:
+            pass
+        mock_hit = next((item for item in mock_source.search(f"{artist} {title}", limit=5) if _match_compare_track(item, title, artist)), None)
+        return mock_hit or _guide_track(title, artist)
+
+    for group in groups:
+        for track in group.get("tracks", [])[:4]:
+            title = str(track.get("title", "")).strip()
+            artist = str(track.get("artist", "") or group.get("artist", "")).strip()
+            if title:
+                add_card(resolve_track(title, artist), reason=f"{group.get('artist', artist)} 入门曲")
+    for track in collabs[:3]:
+        title = str(track.get("title", "")).strip()
+        artist = str(track.get("artist", "")).strip()
+        if title:
+            add_card(resolve_track(title, artist), reason="两人合作/交集曲")
+    return cards
+
+
+def _fallback_compare_entry_groups(entities: list[Any], tracks: list[TrackRef]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    for entity in entities[:2]:
+        seen: set[str] = set()
+        picked: list[dict[str, Any]] = []
+        want_name = str(getattr(entity, "name", "") or "").strip().lower()
+        want_artist = str(getattr(entity, "artist", "") or "").strip().lower()
+        for track in tracks:
+            title = str(getattr(track, "title", "") or "").strip()
+            artist = str(getattr(track, "artist", "") or "").strip()
+            if not title:
+                continue
+            artist_lc = artist.lower()
+            match = False
+            if str(getattr(entity, "type", "")) == "artist":
+                match = bool(want_name and want_name in artist_lc)
+            elif want_artist:
+                match = want_artist in artist_lc
+            elif want_name:
+                match = want_name in title.lower()
+            if not match:
+                continue
+            key = title.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            picked.append(TrackRef(title=title, artist=artist, source=getattr(track, "source", "guide")).model_dump(mode="json"))
+            if len(picked) >= 4:
+                break
+        groups.append({"artist": getattr(entity, "name", ""), "tracks": picked})
+    return groups
+
+
+def _compare_evidence_rows(entities: list[Any], citations: list[Any]) -> list[dict[str, Any]]:
+    from app.knowledge import citation_entity_score
+
+    rows: list[dict[str, Any]] = []
+    for citation in citations[:6]:
+        supports = [
+            str(getattr(entity, "name", "") or "")
+            for entity in entities[:2]
+            if citation_entity_score(citation, entity) >= 0.5
+        ]
+        label = str(getattr(citation, "title", "") or getattr(citation, "source", "") or "").strip()
+        if not label:
+            continue
+        if not supports:
+            continue
+        rows.append({
+            "source": getattr(citation, "source", ""),
+            "title": label,
+            "url": getattr(citation, "url", ""),
+            "kind": getattr(citation, "kind", ""),
+            "supports": supports,
+            "why_it_matters": f"主要用来支撑 {' / '.join(supports)} 的风格定位。",
+        })
+    return rows
+
+
 def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if ctx.asset_id:
         answer = ctx.agent.recommend_with_memory(ctx.asset_id, ctx.user_id, args["query"], args.get("top_k", 5))
@@ -293,6 +439,8 @@ def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         seed_tracks=_collect_tracks(ctx.prior_results),
         excluded_tracks=plan.get("_excluded_tracks") or None,
         search_variants=retrieval.get("search_variants") or None,
+        budget_degrade_level=(ctx.latency_budget or {}).get("budget_degrade_level"),
+        entities=retrieval.get("entities") or None,
     )
     tracks = [item.asset for item in recommendation.tracks]
     raw = len(tracks)
@@ -419,6 +567,72 @@ def _taste(_args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return _result("taste", {"type": "taste", "summary": summary}, "已总结用户品味。")
 
 
+def _playlist_repair(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.services.playlist_repair import analyze_playlist_repair
+
+    payload = analyze_playlist_repair(
+        agent=ctx.agent,
+        user_id=ctx.user_id,
+        query=ctx.query,
+        instruction=args.get("instruction"),
+        target=args.get("target"),
+        prior_results=ctx.prior_results,
+    )
+    suggested = list(payload.pop("suggested_replacements", []) or [])
+    summary = payload.get("message") or f"诊断出 {len(payload.get('issues') or [])} 个歌单问题。"
+    return _result(
+        "playlist_repair",
+        {**payload, "suggested_replacements": suggested},
+        summary,
+        suggested,
+        expects_tracks=False,
+    )
+
+
+def _taste_shift_detector(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.services.profile_shift import detect_taste_shift
+
+    payload = detect_taste_shift(
+        agent=ctx.agent,
+        user_id=ctx.user_id,
+        recent_days=int(args.get("window_recent_days") or 30),
+        baseline_days=int(args.get("window_baseline_days") or 90),
+    )
+    summary = payload.get("message") or f"识别到 {len(payload.get('shift_signals') or [])} 条口味迁移信号。"
+    return _result("taste_shift_detector", payload, summary)
+
+
+def _music_fact_check(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.services.fact_check import run_music_fact_check
+
+    payload = run_music_fact_check(
+        agent=ctx.agent,
+        query=args.get("query") or ctx.query,
+        claims_text=args.get("claims_text"),
+        plan=ctx.plan,
+    )
+    summary = (
+        f"核验 {len(payload.get('claims') or [])} 条陈述："
+        f"{len(payload.get('verified_claims') or [])} 条已确认，"
+        f"{len(payload.get('uncertain_claims') or [])} 条证据不足。"
+    )
+    return _result("music_fact_check", payload, summary)
+
+
+def _recommend_explainer(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.services.recommend_explainer import build_recommend_explanation
+
+    payload = build_recommend_explanation(
+        agent=ctx.agent,
+        user_id=ctx.user_id,
+        query=args.get("query") or ctx.query,
+        prior_results=ctx.prior_results,
+    )
+    tracks = list(payload.pop("tracks", []) or [])
+    summary = payload.get("message") or f"已解释 {len(payload.get('per_track_reasons') or [])} 首推荐。"
+    return _result("recommend_explainer", {**payload, "tracks": tracks}, summary, tracks)
+
+
 def _taste_experiment(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     experiment = ctx.agent.generate_taste_experiment(ctx.user_id, args["prompt"], total=args.get("total", 12))
     from app.graph.nodes import _taste_experiment_card
@@ -481,7 +695,12 @@ def _review_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
     plan = ctx.plan or {}
     entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(args.get("query") or ctx.query, str(plan.get("intent") or ""), plan)
-    payload = search_reviews(entities, ctx.deadline_at)
+    payload = search_reviews(
+        entities,
+        ctx.deadline_at,
+        intent=str(plan.get("intent") or ""),
+        query=args.get("query") or ctx.query,
+    )
     data = {
         "type": "review_search",
         "entities": [entity.model_dump(mode="json") for entity in entities],
@@ -493,8 +712,66 @@ def _review_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(tool="review_search", status=status, data=data, summary=summary)
 
 
+async def _web_knowledge_search_async(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    """强搜索 provider 工具：取结构化 claims/sources/citations，web 空时回退 legacy review_search。
+
+    实体继承自上一轮 resolve_music_entity（_knowledge_entities_from_prior），与 metadata/review 同源，
+    避免各 provider 各自解析同名作品出不同实体。产出 ``type=web_knowledge``，build_music_dossier 据此融合。
+    """
+    from app.knowledge import resolve_music_entities, search_reviews
+    from app.services.web_knowledge import run_web_knowledge_search
+
+    plan = ctx.plan or {}
+    intent = str(args.get("intent") or plan.get("intent") or "")
+    query = args.get("query") or ctx.query
+    entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(query, intent, plan)
+    ent_labels = []
+    for e in entities:
+        label = (e.name + (f" {e.artist}" if e.artist else "")).strip()
+        if label:
+            ent_labels.append(label)
+
+    result = await run_web_knowledge_search(query=query, intent=intent, entities=ent_labels, mode=intent or "background")
+
+    # provider 链全空（无 web、先验被 intent 门控挡掉）→ 回退 legacy review_search 兜底，
+    # 把它的 citations 并进 result，保住下游 dossier 至少有可引用来源。
+    if not result.usable and entities:
+        try:
+            payload = await asyncio.to_thread(search_reviews, entities, ctx.deadline_at, intent=intent, query=query)
+        except Exception:
+            payload = {}
+        legacy_cits = payload.get("citations") or []
+        for c in legacy_cits:
+            result.citations.append(c)
+        if legacy_cits:
+            result.provider = result.provider or "legacy_review_search"
+            result.degraded_reason = result.degraded_reason or "web provider 空，回退 legacy review_search"
+
+    data = {
+        "type": "web_knowledge",
+        "entities": [e.model_dump(mode="json") for e in entities],
+        "claims": [c.model_dump() for c in result.claims],
+        "sources": [s.model_dump() for s in result.sources],
+        "citations": result.citations,
+        "provider": result.provider,
+        "confidence": result.confidence,
+        "degraded_reason": result.degraded_reason,
+        "answer_summary": result.answer_summary,
+        "style_tags": result.style_tags,
+    }
+    status = ToolStatus.OK if (result.usable or result.citations) else ToolStatus.EMPTY
+    summary = f"web_knowledge({result.provider})：{len(result.claims)} claims / {len(result.sources)} sources / {len(result.citations)} citations"
+    return ToolResult(tool="web_knowledge_search", status=status, data=data, summary=summary)
+
+
 def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    from app.knowledge import build_dossier, dossier_answer, resolve_music_entities
+    from app.knowledge import (
+        _artist_compare_profile,
+        _compare_names,
+        build_dossier,
+        dossier_answer,
+        resolve_music_entities,
+    )
     from app.models import MusicCitation, MusicEntity, ReviewOpinion, TrackRef
 
     plan = ctx.plan or {}
@@ -509,6 +786,10 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     albums: list[dict[str, Any]] = []
     skipped: list[str] = []
     timed_out: list[str] = []
+    web_knowledge_claims: list[str] = []
+    web_knowledge_provider: str = ""
+    web_knowledge_answer: str = ""
+    web_knowledge_style_tags: list[str] = []
     for result in ctx.prior_results or []:
         if result.get("type") == "music_metadata":
             metadata.extend(result.get("metadata") or [])
@@ -522,8 +803,50 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             opinions.extend(ReviewOpinion.model_validate(item) for item in result.get("opinions", []) or [])
             skipped.extend(result.get("skipped_due_to_deadline") or [])
             timed_out.extend(result.get("timed_out_tools") or [])
+        elif result.get("type") == "web_knowledge":
+            # 强搜索 provider：citations 并入 review_citations（已是 MusicCitation 形状），
+            # claims 收集起来交给 dossier 合成层；provider 用于标注先验/未联网核实。
+            review_citations.extend(MusicCitation.model_validate(item) for item in result.get("citations", []) or [])
+            for claim in result.get("claims", []) or []:
+                text = str((claim or {}).get("text") or "").strip()
+                if text:
+                    web_knowledge_claims.append(text)
+            if result.get("provider"):
+                web_knowledge_provider = str(result.get("provider"))
+            # DeepSeek 直答（answer_summary）：dossier 直接用作正文，跳过 lossy 再合成。
+            if result.get("answer_summary"):
+                web_knowledge_answer = str(result.get("answer_summary"))
+            web_knowledge_style_tags.extend(str(t) for t in (result.get("style_tags") or []) if str(t).strip())
         elif result.get("type") == "music_entity_resolution" and not entities:
             entities = [MusicEntity.model_validate(item) for item in result.get("entities", []) or []]
+    if intent == "music_compare":
+        requested = _compare_names(query)
+        compare_entities = [entity for entity in entities[:2] if (entity.name or "").strip() and entity.name != "未知音乐实体"]
+        if len(compare_entities) < 2:
+            left = requested[0] if requested else (compare_entities[0].name if compare_entities else "")
+            right = requested[1] if len(requested) > 1 else ""
+            if left and right:
+                message = f"我只稳定识别到《{left}》和《{right}》中的部分实体，这轮先不硬做比较；你可以直接说“比较 {left} 和 {right} 的风格差异”。"
+            elif left:
+                message = f"我只稳定识别到《{left}》，另一侧比较对象没有解析稳，这轮先不硬做比较。"
+            else:
+                message = "这轮没能把两个比较对象都识别清楚，所以我不会硬写风格差异。"
+            payload = {
+                "type": "music_compare",
+                "message": message,
+                "entities": [entity.model_dump(mode="json") for entity in compare_entities],
+                "comparison_axes": [],
+                "evidence": [],
+                "verdict_summary": "",
+                "entry_tracks": [],
+                "partial": True,
+            }
+            return ToolResult(
+                tool="build_music_dossier",
+                status=ToolStatus.EMPTY,
+                data=payload,
+                summary="比较对象解析不完整，已停止生成对比结论。",
+            )
     # 正文抓取（Tavily Extract + Discogs API）：把 MusicBrainz relations 里 last.fm/Discogs/Genius
     # 等来源的真实正文读回来填进 excerpt（之前只有 URL、excerpt 为空），喂给合成 LLM 写专业中文乐评。
     # _enrich_review_content 就地改写 citation，受保护预算、不拖垮整条链路。
@@ -543,21 +866,188 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             if op.source not in existing_sources:
                 opinions.append(op)
                 existing_sources.add(op.source)
+    # ── 根治兜底：web_knowledge_search 工具超时/空（长答案被工具墙杀）→ 这里直接补一次 DeepSeek 直答 ──
+    # 把"直连生成"从工具存活中解耦：工具失败后 dossier 自己再生成一次，不再因单个工具超时而落空。
+    # 成功则复用 dossier 既有的 parametric 渲染通路（is_parametric：直答正文 + 先验声明），build_dossier 无需改动。
+    if not web_knowledge_answer and not web_knowledge_claims:
+        from app.knowledge import remaining_seconds
+        from app.services.web_knowledge import maybe_parametric_rescue
+
+        ent_labels: list[str] = []
+        for _e in entities:
+            _label = (_e.name + (f" {_e.artist}" if _e.artist else "")).strip()
+            if _label:
+                ent_labels.append(_label)
+        rescued = maybe_parametric_rescue(
+            query=query,
+            intent=intent,
+            entities=ent_labels,
+            remaining=remaining_seconds(ctx.deadline_at),
+            mode=intent or "background",
+        )
+        if rescued and rescued.answer_summary:
+            web_knowledge_answer = rescued.answer_summary
+            web_knowledge_provider = "deepseek_parametric"
+            web_knowledge_style_tags.extend(rescued.style_tags or [])
     dossier = build_dossier(
         ctx.agent, query, intent, entities, metadata, metadata_citations,
         review_citations, opinions, tracks, ctx.deadline_at, skipped, albums,
         timed_out=timed_out,
+        web_knowledge_claims=web_knowledge_claims,
+        web_knowledge_provider=web_knowledge_provider,
+        web_knowledge_answer=web_knowledge_answer,
+        web_knowledge_style_tags=web_knowledge_style_tags,
+        user_id=ctx.user_id,
     )
+    result_type = "music_compare" if intent == "music_compare" else "music_dossier"
+    comparison_axes: list[dict[str, str]] = []
+    cards: list[dict[str, Any]] = []
+    compare_bundle: dict[str, Any] | None = None
+    artist_cards: list[dict[str, Any]] = []
+    answer_text = dossier_answer(dossier)
+    dossier_payload = dossier.model_dump(mode="json")
+    if intent == "music_compare":
+        left, right = entities[:2]
+        profiled = _artist_compare_profile(left, right)
+        if profiled:
+            comparison_axes = list(profiled.get("axes") or [])
+            entry_map = profiled.get("entry_tracks") or {}
+            entry_groups = []
+            for entity in (left, right):
+                key = entity.name.lower()
+                titles = list(entry_map.get(key) or [])
+                if not titles:
+                    continue
+                entry_groups.append({
+                    "artist": entity.name,
+                    "tracks": [
+                        TrackRef(title=title, artist=entity.name, source="guide").model_dump(mode="json")
+                        for title in titles
+                    ],
+                })
+            collab_tracks = [
+                TrackRef(title=title, artist=f"{left.name} / {right.name}", source="guide").model_dump(mode="json")
+                for title in (profiled.get("collaboration_tracks") or [])
+            ]
+            cards = _resolve_compare_cards(ctx, entry_groups, collab_tracks)
+            evidence = _compare_evidence_rows([left, right], dossier.citations)
+            artist_cards = list(profiled.get("artist_cards") or [])
+            compare_bundle = {
+                "entities": [entity.model_dump(mode="json") for entity in (left, right)],
+                "comparison_axes": comparison_axes,
+                "shared_ground": list(profiled.get("shared_ground") or []),
+                "intersection_summary": profiled.get("intersection_summary") or "",
+                "collaboration_tracks": collab_tracks,
+                "entry_tracks_by_artist": entry_groups,
+                "evidence": evidence,
+                "artist_cards": artist_cards,
+            }
+            dossier_payload["compare"] = compare_bundle
+            compare_lines = [
+                f"{left.name} 和 {right.name} 的区别：{dossier.summary}",
+                "",
+                "1. 声音重心：",
+                f"- {left.name}：{comparison_axes[0]['left']}" if len(comparison_axes) > 0 else "",
+                f"- {right.name}：{comparison_axes[0]['right']}" if len(comparison_axes) > 0 else "",
+                "",
+                "2. 叙事方式：",
+                f"- {left.name}：{comparison_axes[1]['left']}" if len(comparison_axes) > 1 else "",
+                f"- {right.name}：{comparison_axes[1]['right']}" if len(comparison_axes) > 1 else "",
+                "",
+                "3. 两人的交集：",
+                profiled.get("intersection_summary") or "",
+                "",
+                "4. 各自入门歌：",
+            ]
+            for group in entry_groups:
+                titles = " / ".join(track.get("title", "") for track in group["tracks"][:4] if track.get("title"))
+                compare_lines.append(f"- {group['artist']}：{titles}")
+            if collab_tracks:
+                compare_lines.extend([
+                    "",
+                    "5. 先听他们的合作曲：",
+                    "- " + " / ".join(track["title"] for track in collab_tracks[:5]),
+                ])
+            if evidence:
+                compare_lines.extend([
+                    "",
+                    "参考来源：",
+                    *[
+                        f"- {item['title']}：{item['url']}" if item.get("url") else f"- {item['title']}"
+                        for item in evidence[:3]
+                    ],
+                ])
+            answer_text = "\n".join(line for line in compare_lines if line is not None)
+        else:
+            entry_groups = _fallback_compare_entry_groups([left, right], dossier.key_tracks)
+            evidence = _compare_evidence_rows([left, right], dossier.citations)
+            for raw in answer_text.split("\n\n"):
+                line = raw.strip()
+                if not line or not re.match(r"^\d+\.", line):
+                    continue
+                head, _, tail = line.partition("：")
+                comparison_axes.append({
+                    "axis": head.split(".", 1)[-1].strip(),
+                    "summary": tail.strip() or head.strip(),
+                })
+            compare_lines = [f"{left.name} 和 {right.name} 的区别：{dossier.summary}"]
+            if comparison_axes:
+                compare_lines.append("")
+                for idx, axis in enumerate(comparison_axes[:3], start=1):
+                    compare_lines.append(f"{idx}. {axis['axis']}：{axis['summary']}")
+            compare_lines.extend(["", "4. 各自入门歌："])
+            for group in entry_groups:
+                titles = " / ".join(track.get("title", "") for track in group.get("tracks", [])[:4] if track.get("title"))
+                if titles:
+                    compare_lines.append(f"- {group['artist']}：{titles}")
+                else:
+                    compare_lines.append(f"- {group['artist']}：这轮没有稳定拿到可核实的入门曲名，我先不硬填。")
+            if evidence:
+                compare_lines.extend([
+                    "",
+                    "参考来源：",
+                    *[
+                        f"- {item['title']}（支撑：{' / '.join(item['supports'])}）：{item['url']}"
+                        if item.get("url") else
+                        f"- {item['title']}（支撑：{' / '.join(item['supports'])}）"
+                        for item in evidence[:4]
+                    ],
+                ])
+            answer_text = "\n".join(line for line in compare_lines if line is not None)
+            compare_bundle = {
+                "entities": [entity.model_dump(mode="json") for entity in (left, right)],
+                "comparison_axes": comparison_axes,
+                "shared_ground": [],
+                "intersection_summary": "",
+                "collaboration_tracks": [],
+                "entry_tracks_by_artist": entry_groups,
+                "evidence": evidence,
+                "artist_cards": [],
+            }
+            dossier_payload["compare"] = compare_bundle
     data = {
-        "type": "music_dossier",
-        "dossier": dossier.model_dump(mode="json"),
-        "answer": dossier_answer(dossier),
+        "type": result_type,
+        "dossier": dossier_payload,
+        "answer": answer_text,
     }
+    if intent == "music_compare":
+        data.update({
+            "entities": [entity.model_dump(mode="json") for entity in entities[:2]],
+            "comparison_axes": comparison_axes,
+            "evidence": (compare_bundle or {}).get("evidence") or [citation.model_dump(mode="json") for citation in dossier.citations[:6]],
+            "verdict_summary": dossier.summary,
+            "entry_tracks": (compare_bundle or {}).get("entry_tracks_by_artist") or [track.model_dump(mode="json") for track in dossier.key_tracks[:6]],
+            "collaboration_tracks": (compare_bundle or {}).get("collaboration_tracks") or [],
+            "intersection_summary": (compare_bundle or {}).get("intersection_summary") or "",
+            "artist_cards": artist_cards,
+            "cards_payload": cards,
+        })
     return ToolResult(
         tool="build_music_dossier",
         status=ToolStatus.OK,
         data=data,
         summary="生成音乐档案。" + ("（部分资料降级）" if dossier.partial else ""),
+        cards=cards,
         provenance=[{"source": c.source, "url": c.url, "kind": c.kind} for c in dossier.citations],
     )
 

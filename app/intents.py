@@ -43,7 +43,8 @@ class IntentDef:
 # recommend 之后、chat 之前。
 _INTENT_PRIORITY = (
     "feedback", "listening_history", "my_playlists", "lyrics", "audio_features",
-    "find_on_platform", "concert_events", "journey", "import", "playlist", "video",
+    "find_on_platform", "concert_events", "journey", "import", "playlist_repair",
+    "taste_shift_detector", "music_fact_check", "recommend_explainer", "playlist", "video",
     "sample_lookup",
     "music_compare", "review_summary", "album_deep_dive", "artist_deep_dive",
     "search", "taste_experiment", "taste", "artist_albums", "similar_artists", "recommend", "artist_info", "discuss",
@@ -108,7 +109,7 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         summary="查找带网页来源的公开演出或巡演信息。",
         prompt_desc="concert_events：查某歌手近期演出或巡演信息",
         base_tools=("concert_events",), prepend_web_search=False,
-        keyword_signals=("巡演信息", "近期演出", "演出日期", "演出安排", "tour dates"),
+        keyword_signals=("巡演信息", "近期演出", "演出日期", "演出安排", "tour dates", "巡演", "演唱会时间", "哪里演出"),
     ),
     "recommend": IntentDef(
         name="recommend",
@@ -165,7 +166,7 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         strategy_web="online_first",
         strategy_no_web="online_first",
         online_default=True,
-        keyword_signals=("区别在哪", "有什么区别", "怎么比", "对比", "比较", " vs ", " VS "),
+        keyword_signals=("区别在哪", "有什么区别", "怎么比", "对比", "比较", " vs ", " VS ", "谁更", "哪个更适合"),
     ),
     "sample_lookup": IntentDef(
         name="sample_lookup",
@@ -213,6 +214,50 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
             "推荐点不一样", "推荐一点不一样", "听腻了", "发现新风格",
             "帮我发现新风格", "做个品味实验", "探索边界", "大胆一点",
         ),
+    ),
+    "playlist_repair": IntentDef(
+        name="playlist_repair",
+        summary="用户想诊断并修复上一轮歌单或推荐结果，输出问题清单与修复建议。",
+        prompt_desc="playlist_repair：检查歌单/推荐哪里有问题、重复、跳风格、断层或需要修一修",
+        base_tools=("playlist_repair",),
+        prepend_web_search=False,
+        strategy_web="library_first",
+        strategy_no_web="library_first",
+        online_default=False,
+        keyword_signals=("修一下歌单", "修一下上一轮歌单", "歌单有问题", "检查歌单", "修复歌单", "这歌单怪怪的", "哪里不对"),
+    ),
+    "taste_shift_detector": IntentDef(
+        name="taste_shift_detector",
+        summary="用户想看近期与历史口味变化，分析迁移趋势和新冒头偏好。",
+        prompt_desc="taste_shift_detector：最近口味变了什么、近期和以前相比听歌偏好怎么变",
+        base_tools=("taste_shift_detector",),
+        prepend_web_search=False,
+        strategy_web="memory_only",
+        strategy_no_web="memory_only",
+        online_default=False,
+        keyword_signals=("最近口味变了", "口味变了吗", "口味变化", "最近和以前", "最近听歌变化", "taste shift"),
+    ),
+    "music_fact_check": IntentDef(
+        name="music_fact_check",
+        summary="用户想核验音乐事实陈述，必须基于可追溯资料做 verified / uncertain 判断。",
+        prompt_desc="music_fact_check：核验某个音乐事实、年份、归属、专辑信息是不是真的",
+        base_tools=("music_fact_check",),
+        prepend_web_search=False,
+        strategy_web="online_first",
+        strategy_no_web="online_first",
+        online_default=True,
+        keyword_signals=("是真的吗", "真的假的", "核实一下", "帮我核验", "fact check", "属实吗"),
+    ),
+    "recommend_explainer": IntentDef(
+        name="recommend_explainer",
+        summary="用户想知道上一轮推荐为什么这样给，从真实推荐证据中做 grounded 解释。",
+        prompt_desc="recommend_explainer：解释为什么推荐这些歌、推荐依据是什么",
+        base_tools=("recommend_explainer",),
+        prepend_web_search=False,
+        strategy_web="memory_only",
+        strategy_no_web="memory_only",
+        online_default=False,
+        keyword_signals=("为什么推荐这些", "推荐依据", "解释一下这些推荐", "为啥推这些", "why these songs"),
     ),
     "search": IntentDef(
         name="search",
@@ -307,6 +352,24 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
 
 def is_valid_intent(intent: str) -> bool:
     return intent in INTENT_REGISTRY
+
+
+# 多意图并行 v1 白名单：primary（产 track/aux 卡片）× secondary（产知识档案）的 coherent 组合。
+# 只有落在此集合的 (primary, secondary) 对才会真正建 sub_plans；其余组合丢弃 secondary
+# 退回单意图。限定 coherent 对可避开 composer 里的同型 section 冲突（如 recommend+playlist）。
+_MULTI_INTENT_PRIMARIES = frozenset({"recommend", "search"})
+_MULTI_INTENT_SECONDARIES = frozenset({
+    "artist_deep_dive", "album_deep_dive", "review_summary",
+    "artist_info", "lyrics", "find_on_platform",
+})
+_MULTI_INTENT_ALLOWED_PAIRS: frozenset[tuple[str, str]] = frozenset(
+    (p, s) for p in _MULTI_INTENT_PRIMARIES for s in _MULTI_INTENT_SECONDARIES
+)
+
+
+def is_allowed_multi_intent_pair(primary: str, secondary: str) -> bool:
+    """(primary, secondary) 是否为 v1 允许并行的 coherent 组合。"""
+    return (primary, secondary) in _MULTI_INTENT_ALLOWED_PAIRS
 
 
 def get_intent(intent: str) -> IntentDef:

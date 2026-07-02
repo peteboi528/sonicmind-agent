@@ -13,13 +13,17 @@ _ensure_track_tags）、资产读写与进程内缓存（list_assets / _invalida
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from app.config import settings
+from app.genres import NETEASE_TAG_TO_GENRE, VALID_GENRES, VALID_GENRE_SET
 from app.library import ResourceLibrary
+from app.recommend.features import estimate_features
+from app.recommend.hygiene import is_structural_reject
 from app.llm.protocol import LLMProvider
 from app.llm.structured import extract_json_list
-from app.media.pipeline import MediaPipeline
+from app.media.pipeline import MediaPipeline, stable_id
 from app.memory import MemoryManager
 from app.models import Asset, AssetStatus, EnrichResponse, utc_now_iso
 from app.prompts import IDENTIFY_FROM_URL_TEMPLATE
@@ -30,6 +34,17 @@ from app.sources import youtube as youtube_source
 from app.storage import JsonStore
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_llm_genres(raw: str, valid: set[str]) -> list[str]:
+    """LLM 自由文字风格 → 归一到 VALID_GENRES 词表（最多 3 个）。
+
+    LLM 有时返回描述性长句（如"R&B / 说唱（融合了…）"）而非短标签，
+    直接存入 asset.genre 会污染曲库筛选和品味画像。
+    过滤只保留精确命中词表的词；无命中则返回空列表（由上层 _ensure_track_tags 补 fallback）。
+    """
+    parts = [g.strip() for g in raw.replace("、", ",").split(",") if g.strip()]
+    return list(dict.fromkeys(g for g in parts if g in valid))[:3]
 
 
 class LibraryService:
@@ -64,6 +79,86 @@ class LibraryService:
 
     def ingest_video(self, url: str, force_refresh: bool = False) -> Asset:
         asset = self.media.ingest_video(url, force_refresh=force_refresh)
+        self._invalidate_assets_cache()
+        return asset
+
+    def _track_identity(self, track: Any) -> tuple[str | None, str, str, str, str, str, Any]:
+        """归一化 track 的身份字段并算出逻辑 asset_id（stable_id，不落盘）。
+
+        返回 (asset_id|None, title, artist, source, external_id, source_url, cover_url)。
+        抽出来是因为「播放回一个稳定 id 给收听采集」与「真入库拿 asset_id」必须用同一套算法，
+        否则同一首歌播过、将来入库后历史 listen 对不上。asset_id 为 None 表示该 track 无可识别身份。
+        """
+        title = str(getattr(track, "title", "") or "").strip()
+        artist = str(getattr(track, "artist", "") or "").strip()
+        source = str(getattr(track, "source", "") or "").strip().lower()
+        external_id = str(getattr(track, "external_id", "") or "").strip()
+        source_url = str(getattr(track, "source_url", "") or "").strip()
+        cover_url = getattr(track, "cover_url", None)
+        if not any((title, artist, external_id, source_url)):
+            return None, title, artist, source, external_id, source_url, cover_url
+        if not source_url and source == "netease" and external_id:
+            source_url = f"https://music.163.com/song?id={external_id}"
+        if not source_url and external_id:
+            source_url = f"{source or 'external'}:{external_id}"
+        stable_key = (
+            f"external:{source}:{external_id}"
+            if external_id else
+            source_url or f"{source}:{title}:{artist}"
+        )
+        return stable_id(stable_key), title, artist, source, external_id, source_url, cover_url
+
+    def asset_id_for_track(self, track: Any) -> str | None:
+        """计算 track 的逻辑 asset_id（不落盘）。供播放/收听采集用——play ≠ add，
+        播放只回一个稳定 id 给前端做 listen keying，绝不能因此把歌入库。"""
+        return self._track_identity(track)[0]
+
+    def ensure_asset_from_track(self, track: Any) -> Asset | None:
+        """Promote a web/external track card into a lightweight persisted asset.
+
+        仅用于「显式入库」路径（如歌单导入兜底）；**不要**在播放路径调用——播放不该入库
+        （见 asset_id_for_track）。保持诚实：不伪造分析，只持久化足够的规范元数据供后续
+        listen/rating 关联。
+        """
+        asset_id, title, artist, source, external_id, source_url, cover_url = self._track_identity(track)
+        if asset_id is None:
+            return None
+        existing = self.store.read_model("assets", asset_id, Asset)
+        if existing is not None:
+            updated = False
+            if title and existing.title != title:
+                existing.title = title
+                updated = True
+            if artist and existing.artist != artist:
+                existing.artist = artist
+                updated = True
+            if source_url and existing.source_url != source_url:
+                existing.source_url = source_url
+                updated = True
+            if cover_url and existing.cover_url != cover_url:
+                existing.cover_url = cover_url
+                updated = True
+            if external_id and existing.external_id != external_id:
+                existing.external_id = external_id
+                updated = True
+            if updated:
+                existing.updated_at = utc_now_iso()
+                self.store.write_model("assets", existing.asset_id, existing)
+                self._invalidate_assets_cache()
+            return existing
+
+        asset = Asset(
+            asset_id=asset_id,
+            source_url=source_url or stable_key,
+            title=title or artist or "外部歌曲",
+            duration_seconds=max(1, int(getattr(track, "duration_seconds", 180) or 180)),
+            status=AssetStatus.INGESTED,
+            artist=artist or None,
+            cover_url=cover_url,
+            source="external",
+            external_id=external_id or None,
+        )
+        self.store.write_model("assets", asset.asset_id, asset)
         self._invalidate_assets_cache()
         return asset
 
@@ -187,11 +282,11 @@ class LibraryService:
                         if "风格" in line and ":" in line:
                             genre = line.split(":", 1)[1].strip()
                             if genre and genre != "未知":
-                                asset.genre = [g.strip() for g in genre.replace("、", ",").split(",") if g.strip()]
+                                asset.genre = _normalize_llm_genres(genre, self._VALID_GENRES)
                         if "情绪" in line and ":" in line:
                             mood = line.split(":", 1)[1].strip()
                             if mood and mood != "未知":
-                                asset.mood = [m.strip() for m in mood.replace("、", ",").split(",") if m.strip()]
+                                asset.mood = [m.strip() for m in mood.replace("、", ",").split(",") if m.strip()][:2]
                 except Exception:
                     logger.debug("LLM genre/mood inference failed for song_id=%s", song_id, exc_info=True)
             return True
@@ -239,11 +334,11 @@ class LibraryService:
                 if "风格" in line and ":" in line:
                     genre = line.split(":", 1)[1].strip()
                     if genre and genre != "未知":
-                        asset.genre = [g.strip() for g in genre.replace("、", ",").split(",") if g.strip()]
+                        asset.genre = _normalize_llm_genres(genre, self._VALID_GENRES)
                 if "情绪" in line and ":" in line:
                     mood = line.split(":", 1)[1].strip()
                     if mood and mood != "未知":
-                        asset.mood = [m.strip() for m in mood.replace("、", ",").split(",") if m.strip()]
+                        asset.mood = [m.strip() for m in mood.replace("、", ",").split(",") if m.strip()][:2]
             self.store.write_model("assets", asset.asset_id, asset)
             self._invalidate_assets_cache()
         except Exception:
@@ -255,20 +350,97 @@ class LibraryService:
         self.library.upsert_asset(asset)
         return asset, segments
 
-    _VALID_GENRES = {"流行", "摇滚", "电子", "古典", "R&B", "说唱", "爵士", "民谣", "国风", "金属"}
+    def classify_asset(self, asset_id: str) -> Asset | None:
+        """对已入库但未分类的 asset 补 genre/mood + 估算 tempo/energy。
+
+        单曲入库（ingest_full）此前只 ingest→enrich→analyze，DemoAnalyzer 对空 genre 标
+        「未分类」、不做真实分类 → 入库的歌没标签。这里复用 import_netease_playlist 同一套
+        分类逻辑（_ensure_track_tags 三层兜底 + estimate_features 估算），让「显式入库」也
+        立即识别。只在 genre 为空/「未分类」时补标签，不覆盖已有真实标签；tempo/energy 仅填 None。
+        """
+        asset = self.store.read_model("assets", asset_id, Asset)
+        if asset is None:
+            return None
+        if not asset.genre or all(g == "未分类" for g in asset.genre):
+            genre, mood = self._ensure_track_tags(asset.title, asset.artist or "", [], [])
+            asset.genre = genre
+            asset.mood = mood
+        est_tempo, est_energy = estimate_features(asset.genre, asset.mood)
+        if asset.tempo_bpm is None and est_tempo is not None:
+            asset.tempo_bpm = est_tempo
+        if asset.energy_level is None and est_energy is not None:
+            asset.energy_level = est_energy
+        if (est_tempo is not None or est_energy is not None) and asset.features_source is None:
+            asset.features_source = "estimated"
+        asset.updated_at = utc_now_iso()
+        self.store.write_model("assets", asset.asset_id, asset)
+        self._invalidate_assets_cache()
+        return asset
+
+    def cleanup_play_pollution(self, user_id: str | None = None) -> dict[str, int]:
+        """一次性清理历史「播放自动入库」污染：
+
+        - source=external 且无标签（空/未分类）的 asset → **删除**（这是旧 playback 路径
+          ensure_asset_from_track 造成的播放垃圾，用户从没显式入库过；连引用一起清）。
+        - source=local 但标「未分类」的 asset（单曲 ingest_full 漏分类）→ **重新分类**（保留）。
+        返回 {deleted, reclassified}。保守：只动无标签条目，有真实标签的一律不碰。
+        """
+        deleted = reclassified = 0
+        for asset in self.list_assets():
+            tagless = not asset.genre or all(g == "未分类" for g in asset.genre)
+            if not tagless:
+                continue
+            if asset.source == "external":
+                self.store.delete_key("assets", asset.asset_id)
+                self.store.delete_key("segments", asset.asset_id)
+                self.memory.remove_asset_references(asset.asset_id, user_id=user_id)
+                deleted += 1
+            else:
+                self.classify_asset(asset.asset_id)
+                reclassified += 1
+        if deleted or reclassified:
+            self._invalidate_assets_cache()
+            if user_id:
+                library = [a for a in self.list_assets() if a.status == "analyzed"]
+                self.memory.refresh_taste_profile(user_id, library)
+        return {"deleted": deleted, "reclassified": reclassified}
+
+    def backfill_estimated_features(self) -> dict[str, int]:
+        """一次性回填：为 tempo_bpm/energy_level 当前为 None 的资产，按 genre/mood 标签
+        估算填充（features_source='estimated'），永不覆盖已有值。
+
+        现网 231 首全部为 None（网易云无音频可分析）；回填后推荐 energy/tempo 锚与 tempo_range
+        p25-p75 才有真实信号。循环结束后统一失效一次 assets 缓存（list_assets 是 O(库大小)
+        逐文件读，缓存是超时主因之一）。返回 updated/skipped/unchanged 计数。
+        """
+        updated = skipped = unchanged = 0
+        for asset in self.list_assets():
+            est_tempo, est_energy = estimate_features(asset.genre, asset.mood)
+            changed = False
+            if asset.tempo_bpm is None and est_tempo is not None:
+                asset.tempo_bpm = est_tempo
+                changed = True
+            if asset.energy_level is None and est_energy is not None:
+                asset.energy_level = est_energy
+                changed = True
+            if changed:
+                asset.features_source = "estimated"
+                asset.updated_at = utc_now_iso()
+                self.store.write_model("assets", asset.asset_id, asset)
+                updated += 1
+            elif asset.tempo_bpm is not None or asset.energy_level is not None:
+                skipped += 1  # 已有值（真实测量或已估算），不覆盖
+            else:
+                unchanged += 1  # 无可映射标签，保持 None
+        if updated:
+            self._invalidate_assets_cache()
+        return {"updated": updated, "skipped": skipped, "unchanged": unchanged}
+
+    # 曲风词表与 netease tag 映射统一从 app.genres 取（单一事实来源，避免多文件漂移）。
+    _VALID_GENRES = VALID_GENRE_SET
 
     # 网易云歌单 tags → 本系统曲风词表的映射（歌单级 tags 是导入时唯一可靠的曲风线索）
-    _NETEASE_TAG_TO_GENRE = {
-        "R&B/Soul": "R&B", "R&B": "R&B", "Soul": "R&B", "蓝调": "R&B",
-        "摇滚": "摇滚", "Rock": "摇滚", "金属": "金属", "Metal": "金属", "朋克": "摇滚",
-        "电子": "电子", "Electronic": "电子", "House": "电子", "Techno": "电子", "EDM": "电子",
-        "说唱": "说唱", "Rap": "说唱", "Hip-Hop": "说唱", "嘻哈": "说唱",
-        "爵士": "爵士", "Jazz": "爵士", "布鲁斯": "爵士",
-        "古典": "古典", "Classical": "古典", "纯音乐": "古典",
-        "民谣": "民谣", "Folk": "民谣", "乡村": "民谣",
-        "流行": "流行", "Pop": "流行",
-        "国风": "国风", "古风": "国风", "中国风": "国风",
-    }
+    _NETEASE_TAG_TO_GENRE = NETEASE_TAG_TO_GENRE
 
     def _playlist_tags_to_genres(self, tags: list[str]) -> list[str]:
         """把网易云歌单 tags 映射成本系统曲风（用作整单兜底）。无映射则返回空。"""
@@ -301,22 +473,23 @@ class LibraryService:
 
     def _classify_once(self, pairs: list[tuple[str, str]]) -> list[dict[str, list[str]]]:
         lines = "\n".join(f"{i}. 《{t}》- {a or '未知'}" for i, (t, a) in enumerate(pairs))
+        genre_vocab = "、".join(VALID_GENRES)
         prompt = (
             f"判断下面每首歌的风格（genre）和情绪（mood）。\n"
             f"歌手名是判断风格的重要线索：看歌手名是否包含或暗示特定风格。\n\n"
             f"{lines}\n\n"
-            f"严格输出 JSON 数组，每项对应一首（按序号），格式：\n"
-            f'[{{"genre":"说唱","mood":"激昂"}}]\n\n'
-            f"风格可选：流行、摇滚、电子、古典、R&B、说唱、爵士、民谣、国风、金属。\n"
+            f"严格输出 JSON 数组，每项对应一首（按序号）。genre 可给 1-3 个、由准到泛排列，"
+            f"逗号分隔（一首歌常跨多风格，如说唱+R&B、英伦摇滚+独立）；mood 给 1-2 个。格式：\n"
+            f'[{{"genre":"中文说唱,Trap","mood":"激昂"}}]\n\n'
+            f"风格可选（必须从中选，最多 3 个）：{genre_vocab}。\n"
             f"情绪可选：欢快、治愈、励志、伤感、放松、激昂、浪漫、孤独、律动、慵懒、热血、暗黑。\n\n"
             f"判断指南：\n"
-            f"- 歌手名含 Ft./feat./× 或多位歌手 → 可能是说唱/R&B 合作曲\n"
-            f"- 英文歌名 + 中文歌手 → 可能是 R&B/说唱/独立\n"
-            f"- 歌手名含 Gem/Trap/Lil/K/制作人代号 → 倾向说唱\n"
-            f"- 歌手名含 keshi/Dean/Crush/Zion.T/SZA/The Weeknd → R&B\n"
-            f"- 摇滚/金属/朋克相关关键词 → 摇滚\n"
-            f"- DJ/Remix/电音/Beat → 电子\n"
-            f"- 不确定的宁可标「流行」也不要瞎猜小众风格\n"
+            f"- 中文歌手/中文歌名的说唱 → 中文说唱；欧美歌手的说唱 → 欧美说唱；trap 节拍 → 加 Trap\n"
+            f"- 英伦/Britpop/Oasis 式 → 英伦摇滚；独立厂牌/lo-fi 制作的摇滚 → 独立摇滚\n"
+            f"- 歌手名含 keshi/Dean/Crush/Zion.T/SZA/The Weeknd → R&B 或 另类R&B/新灵魂\n"
+            f"- City Pop/和制都市流行（竹内玛利亚等）→ City Pop；合成器主导的复古电子 → synthwave\n"
+            f"- DJ/Remix/电音/Beat → 电子，再按 House/Techno/氛围电子 细分\n"
+            f"- 拿不准就给一级标签（流行/摇滚/说唱…），不要硬凑细分；都拿不准宁可标「流行」\n"
         )
         out: list[dict[str, list[str]]] = [{"genre": [], "mood": []} for _ in pairs]
         try:
@@ -327,11 +500,12 @@ class LibraryService:
                 g = str(item.get("genre", "")).strip()
                 m = str(item.get("mood", "")).strip()
                 genres = [x.strip() for x in g.replace("、", ",").split(",") if x.strip()]
-                # 只保留在合法集合内的风格，过滤 LLM 偶发的自由发挥
-                genres = [x for x in genres if x in self._VALID_GENRES]
+                # 只保留在合法集合内的风格，过滤 LLM 偶发的自由发挥；最多 3 个（主+次+跨界），
+                # 去重保序，避免一首歌挂一堆标签把品味画像冲淡。
+                genres = list(dict.fromkeys(x for x in genres if x in self._VALID_GENRES))[:3]
                 out[i] = {
                     "genre": genres,
-                    "mood": [x.strip() for x in m.replace("、", ",").split(",") if x.strip()],
+                    "mood": [x.strip() for x in m.replace("、", ",").split(",") if x.strip()][:2],
                 }
         except Exception:
             logger.debug("Track classification failed for %s tracks", len(pairs), exc_info=True)
@@ -401,6 +575,8 @@ class LibraryService:
             "name": data.get("name", ""),
             "imported": 0,
             "skipped": 0,
+            "disliked_skipped": 0,
+            "rejected": 0,
             "total": data.get("total", 0),
             "tracks": [],
         }
@@ -419,6 +595,29 @@ class LibraryService:
         for idx, t in enumerate(tracks):
             song_id = t.get("song_id")
             if not song_id:
+                continue
+            # 跳过用户已 × 不喜欢的歌（按 netease song id 命中 source_url，回退 title+artist）
+            if user_id:
+                stub = SimpleNamespace(
+                    title=t.get("title", ""), artist=t.get("artist", ""),
+                    source="netease", source_id=str(song_id), external_id=str(song_id),
+                )
+                if self.library.is_disliked(user_id, stub):
+                    result["disliked_skipped"] += 1
+                    continue
+            # 质量闸门（入库前）：网易云歌单常混入教程/合集/DJ串烧/功能音乐——挡在 ingest 之前，
+            # 否则脏数据进库后污染 compute_taste_profile 的长期画像。用 is_structural_reject
+            # （零 embedding）而非 filter_music_tracks/classify_candidate：source 固定为
+            # netease 且 query 为空时，语义层的结果永远被 source 兜底覆盖（见 hygiene.py
+            # classify_candidate 的 netease_with_artist 分支），算了也白算，只白白拖慢
+            # 100-200 首的大歌单导入。
+            gate_stub = SimpleNamespace(
+                title=t.get("title", ""), artist=t.get("artist", ""),
+                source="netease", source_url=f"https://music.163.com/song?id={song_id}",
+                external_id=str(song_id),
+            )
+            if is_structural_reject(gate_stub):
+                result["rejected"] += 1
                 continue
             song_url = f"https://music.163.com/song?id={song_id}"
             asset = self.media.ingest_video(song_url)
@@ -440,9 +639,17 @@ class LibraryService:
             )
             asset.genre = genre
             asset.mood = mood
-            # 诚实化：tempo/energy 无真实测量时保持 None（下游 score_track 用默认值兜底），
-            # 不再用 rng 随机伪造具体数值（与 pipeline.analyze_media 一致）。
-            # genre/mood 已由上方 _ensure_track_tags 基于真实曲名/歌手推断，这里不重复伪造。
+            # tempo/energy：网易云无音频可分析，这里基于上方已推断的 genre/mood 做确定性「估算」
+            # （见 app/recommend/features.py）填补推荐/品味所需信号——不是 rng 随机伪造，而是
+            # 可追溯的粗粒度区间，用 features_source='estimated' 显式标注（非 measured）。
+            # 仅在当前为 None 时填充，永不覆盖真实测量值。DemoAnalyzer 路径仍保持 None（诚实契约）。
+            est_tempo, est_energy = estimate_features(asset.genre, asset.mood)
+            if est_tempo is not None:
+                asset.tempo_bpm = est_tempo
+            if est_energy is not None:
+                asset.energy_level = est_energy
+            if est_tempo is not None or est_energy is not None:
+                asset.features_source = "estimated"
             # 关键：标记为已分析，否则推荐/歌单/品味会过滤掉这些歌
             asset.status = AssetStatus.ANALYZED
             asset.updated_at = utc_now_iso()
@@ -497,6 +704,25 @@ class LibraryService:
                 library = [a for a in self.list_assets() if a.status == "analyzed"]
                 self.memory.refresh_taste_profile(user_id, library)
         return deleted
+
+    def find_asset_id_for_dislike(self, title: str, artist: str, source: str, source_id: str) -> str | None:
+        """按 dislike 身份反查库内 asset_id：netease song id 命中 source_url，回退 title+artist。
+
+        供 × 移除库内条目用——is_disliked 是「dislike 表 ↔ 传入 track」，这里是「dislike 身份 ↔ 库 asset」。
+        """
+        sid = str(source_id or "").strip()
+        t = (title or "").strip().lower()
+        a = (artist or "").strip().lower()
+        if not (sid or t):
+            return None
+        for asset in self.list_assets():
+            if sid and f"id={sid}" in (asset.source_url or ""):
+                return asset.asset_id
+            at = (asset.title or "").strip().lower()
+            aa = (asset.artist or "").strip().lower()
+            if t and at == t and (not a or aa == a):
+                return asset.asset_id
+        return None
 
     def clear_cache(self, preserve_memory: bool = True) -> dict[str, int]:
         cleared = {

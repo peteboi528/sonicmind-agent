@@ -51,6 +51,7 @@ class TasteExperimentService:
         prompt: str,
         total: int = 12,
         *,
+        online_only: bool = False,
         taste_experiment_hypothesis: Any,
         taste_experiment_search_seeds: Any,
         collect_taste_candidates: Any,
@@ -66,7 +67,7 @@ class TasteExperimentService:
         memory = self.memory.get_memory(user_id)
         hypothesis = taste_experiment_hypothesis(memory)
         seeds = taste_experiment_search_seeds(memory, prompt)
-        candidates = collect_taste_candidates(user_id, seeds, total)
+        candidates = collect_taste_candidates(user_id, seeds, total, online_only=online_only)
         prompt_rules = taste_prompt_exclusions(prompt)
         candidates = filter_taste_experiment_candidates(
             user_id,
@@ -134,18 +135,28 @@ class TasteExperimentService:
         user_id: str,
         seeds: list[str],
         total: int,
+        *,
+        online_only: bool = False,
     ) -> list[tuple[Any, dict[str, float], str, float]]:
+        """收集候选曲目。
+
+        online_only=True（探索页用）：跳过库内推荐路径，只走 web 搜索拉库外新歌/新
+        歌手，并剔除本地曲与已在库/已听过的曲目——否则本地曲 personalize 分天然偏高，
+        三档会被库内歌占满，探索失去意义。默认 False 保持品味实验旧行为。
+        """
         raw_tracks: list[Asset | ExternalTrack] = []
-        if seeds:
+        if seeds and not online_only:
             try:
                 rec = self._recommend_for_query(user_id, seeds[0], top_k=max(total * 3, 18))
                 for item in rec.tracks:
                     raw_tracks.append(item.asset)
             except Exception:
                 logger.debug("taste_experiment recommend failed for %s", seeds[0], exc_info=True)
+        # 库外优先时多拉几路、每路多取几首，给去重/库内过滤留足冗余。
+        per_seed = 8 if online_only else 6
         for search_goal in seeds[:16]:
             try:
-                tracks = self._search_web_music(search_goal, top_k=6, relevance_query=search_goal)
+                tracks = self._search_web_music(search_goal, top_k=per_seed, relevance_query=search_goal)
             except Exception:
                 logger.debug("taste_experiment seed search failed for %s", search_goal, exc_info=True)
                 continue
@@ -154,6 +165,13 @@ class TasteExperimentService:
             track for track in self._dedupe_tracks(raw_tracks)
             if self._is_recommendation_quality_track(track)
         ]
+        if online_only:
+            known = self._known_track_keys(user_id)
+            raw_tracks = [
+                track for track in raw_tracks
+                if (getattr(track, "source", "") or "local") != "local"
+                and self._candidate_dedup_key(track) not in known
+            ]
         if not raw_tracks:
             return []
         unified_query = " ".join(seeds[:6])
@@ -162,6 +180,28 @@ class TasteExperimentService:
             (track, breakdown.components, breakdown.reason, breakdown.score)
             for track, breakdown in ranked
         ]
+
+    @staticmethod
+    def _candidate_dedup_key(track: Any) -> str:
+        """与 listening_history 的 asset_id（=source_id）同命名空间，能跨在线/本地比对。"""
+        ext = getattr(track, "external_id", "") or getattr(track, "source_id", "") or getattr(track, "asset_id", "")
+        if ext:
+            return str(ext)
+        title = (getattr(track, "title", "") or "").strip().lower()
+        artist = (getattr(track, "artist", "") or "").strip().lower()
+        return f"t:{title}:{artist}"
+
+    def _known_track_keys(self, user_id: str) -> set[str]:
+        """已听过的曲目 key，探索页据此剔除——避免把听过的曲当成"新发现"。"""
+        known: set[str] = set()
+        try:
+            memory = self.memory.get_memory(user_id)
+            for event in getattr(memory, "listening_history", []) or []:
+                if event.asset_id:
+                    known.add(str(event.asset_id))
+        except Exception:
+            logger.debug("taste_experiment online_only: listening_history failed", exc_info=True)
+        return known
 
     def regenerate_taste_experiment_bucket(
         self,

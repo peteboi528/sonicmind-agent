@@ -45,12 +45,54 @@ export const api = {
     streamSse("/agent/stream", {
       user_id: userId, thread_id: threadId, message, history: (history || []).slice(-10),
     }, handlers, signal),
+  // 上传专辑封面 → 识别专辑/歌手 → 返回可直接喂给 streamChat 的 query（null 则提示用户输入）。
+  // 注意：用 FormData，不要手动设 Content-Type（浏览器自动带 multipart boundary）。
+  identifyAlbum: (file, userId, threadId, signal) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("user_id", userId);
+    if (threadId) fd.append("thread_id", threadId);
+    return fetch("/api/identify-album", { method: "POST", body: fd, signal }).then(async (resp) => {
+      if (!resp.ok) {
+        let detail = `HTTP ${resp.status}`;
+        try { const j = await resp.json(); detail = j.detail || detail; } catch { /* keep status */ }
+        throw new Error(detail);
+      }
+      return resp.json();
+    });
+  },
   resumeAgent: ({ userId, threadId, actionId, approved }, handlers, signal) =>
     streamSse("/agent/resume", {
       user_id: userId, thread_id: threadId, action_id: actionId, approved,
     }, handlers, signal),
   chatSync: (userId, message, history) =>
     jsonFetch("/chat", { method: "POST", body: JSON.stringify({ user_id: userId, message, history }) }),
+  listChatHistory: (userId) =>
+    jsonFetch(`/history/chat/${encodeURIComponent(userId)}`),
+  getChatThread: (userId, threadId) =>
+    jsonFetch(`/history/chat/${encodeURIComponent(userId)}/${encodeURIComponent(threadId)}`),
+  deleteChatHistory: (userId) =>
+    jsonFetch(`/history/chat/${encodeURIComponent(userId)}`, { method: "DELETE" }),
+  saveChatTurn: ({ userId, threadId, userMessage, assistantMessage, cards = [], traceSummary = {} }) =>
+    jsonFetch("/history/chat/turn", { method: "POST", body: JSON.stringify({
+      user_id: userId,
+      thread_id: threadId,
+      user_message: userMessage,
+      assistant_message: assistantMessage,
+      cards,
+      trace_summary: traceSummary,
+    }) }),
+  listRecommendationHistory: (userId) =>
+    jsonFetch(`/history/recommendations/${encodeURIComponent(userId)}`),
+  saveRecommendationHistory: ({ userId, threadId, query, answer, cards = [], ttlDays = null }) =>
+    jsonFetch("/history/recommendations", { method: "POST", body: JSON.stringify({
+      user_id: userId,
+      thread_id: threadId,
+      query,
+      answer,
+      cards,
+      ttl_days: ttlDays,
+    }) }),
 
   // ---- 搜索 / 推荐 ----
   search: (userId, query) =>
@@ -70,6 +112,8 @@ export const api = {
   // ---- 歌单 ----
   generatePlaylist: (userId, instruction) =>
     jsonFetch("/playlist/generate", { method: "POST", body: JSON.stringify({ user_id: userId, instruction }) }),
+  createPlaylistFromAssets: (userId, name, assetIds, description = "") =>
+    jsonFetch("/playlist/from_assets", { method: "POST", body: JSON.stringify({ user_id: userId, name, asset_ids: assetIds, description }) }),
   autoPlaylists: (userId) =>
     jsonFetch(`/playlist/auto/${encodeURIComponent(userId)}`, { method: "POST" }),
   listPlaylists: (userId) => jsonFetch(`/playlists/${encodeURIComponent(userId)}`),
@@ -81,8 +125,8 @@ export const api = {
     jsonFetch("/memory/update", { method: "POST", body: JSON.stringify({ user_id: userId, event }) }),
   getMemory: (userId) => jsonFetch(`/memory/${encodeURIComponent(userId)}`),
   getTaste: (userId) => jsonFetch(`/taste/${encodeURIComponent(userId)}`),
-  generateTasteExperiment: (userId, prompt, total = 12) =>
-    jsonFetch("/taste/experiment/generate", { method: "POST", body: JSON.stringify({ user_id: userId, prompt, total }) }),
+  generateTasteExperiment: (userId, prompt, total = 12, onlineOnly = false) =>
+    jsonFetch("/taste/experiment/generate", { method: "POST", body: JSON.stringify({ user_id: userId, prompt, total, online_only: onlineOnly }) }),
   listTasteExperiments: (userId) =>
     jsonFetch(`/taste/experiments/${encodeURIComponent(userId)}`),
   getTasteExperiment: (userId, experimentId) =>
@@ -128,10 +172,16 @@ export const api = {
   playbackMv: (userId, track) =>
     jsonFetch("/api/playback/mv", { method: "POST", body: JSON.stringify({ track, user_id: userId }) }),
   // ---- 收听行为上报（喂行为锚：听完=completed，秒跳=skip）----
-  listen: (userId, assetId, duration, completed, context = "player") =>
+  // meta 透传展示元数据（标题/歌手/封面/来源），写入 ListeningEvent，让听歌记录能直接
+  // 显示歌名——否则在线曲 key=source_id 不在库里，事后回查解析不出。
+  listen: (userId, assetId, duration, completed, context = "player", meta = {}) =>
     jsonFetch("/listen", { method: "POST", body: JSON.stringify({
       user_id: userId, asset_id: assetId, duration, completed, context,
+      title: meta.title || "", artist: meta.artist || "",
+      cover_url: meta.cover || "", source: meta.source || "", source_id: meta.sourceId || "",
     }) }),
+  listListeningHistory: (userId, limit = 100) =>
+    jsonFetch(`/history/listening/${encodeURIComponent(userId)}?limit=${limit}`),
 
   // ---- 歌词 ----
   getLyrics: (userId, { title, artist, sourceId }) =>

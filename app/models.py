@@ -43,6 +43,10 @@ class Asset(BaseModel):
     mood: list[str] = Field(default_factory=list)
     tempo_bpm: int | None = None
     energy_level: float | None = None
+    # tempo/energy 的来源标注：None=未填充, "estimated"=基于曲风/情绪标签估算（见
+    # app/recommend/features.py，非真实测量）, "measured"=真实音频分析（未来扩展点）。
+    # 下游展示（_audio_features 工具等）据此刻意区分，绝不把估算值冒充测量值。
+    features_source: str | None = None
     artist: str | None = None
     album: str | None = None
     cover_url: str | None = None
@@ -116,6 +120,15 @@ class ListeningEvent(BaseModel):
     duration_listened: int = 0
     completed: bool = False
     context: str | None = None
+    # 展示元数据（与 RatingEntry 同模式：内联存标题/歌手/封面，而非只靠 asset_id 回查）。
+    # 原因：在线曲的 key 是 source_id（见 PlayerBar.playerKey），不在本地曲库里，
+    # 听歌记录若只存 asset_id 会解析不出歌名。全部可选+默认空，旧 listening_history
+    # 反序列化与既有 record_listen 调用点不传也照常工作。
+    title: str = ""
+    artist: str = ""
+    cover_url: str = ""
+    source: str = ""
+    source_id: str = ""
 
 
 class TasteProfile(BaseModel):
@@ -140,7 +153,12 @@ class UserMemory(BaseModel):
     exclusion_rules: list[str] = Field(default_factory=list)  # 用户明确排除的风格/类型，如 ["抖音热歌", "中文孟菲斯说唱"]
     taste_profile: TasteProfile | None = None
     # P1-G 记忆升级：情景记忆（跨会语义召回）+ 巩固画像（一句话稳定口味）。
-    episodic_memory: list[EpisodicMemory] = Field(default_factory=list)
+    # exclude=True：真正落盘在独立 collection "memory_episodic"（见 MemoryManager），
+    # 不随主 memory blob 一起序列化——否则每次 record_listen/record_rating 这类高频
+    # 小改动都要连带 cap(120) 条 embedding(384 维) 一起重写，是写放大的主因。
+    # 字段仍保留在模型上：MemoryManager.get_memory 读主 blob 后会把独立 collection
+    # 的内容合并进这个属性，下游（evidence.py 等）按属性读取的代码不用改。
+    episodic_memory: list[EpisodicMemory] = Field(default_factory=list, exclude=True)
     consolidated_profile: str = ""  # 每 N 轮由 LLM 把零散偏好巩固成一句话画像
     turns_since_consolidation: int = 0
     daily_rec_last_generated: str | None = None
@@ -310,6 +328,9 @@ class AgentPlan(BaseModel):
     retrieval_plan: RetrievalPlan = Field(default_factory=RetrievalPlan)
     _excluded_tracks: list[dict[str, str]] = PrivateAttr(default_factory=list)
     _excluded_artists: list[dict[str, str]] = PrivateAttr(default_factory=list)
+    # 多意图并行：primary 之外可挂 ≤1 个 secondary 子计划（同 shape 的 AgentPlan，递归引用）。
+    # 默认空 → 单意图，所有现有 plan.intent/stages 读取不变（全向后兼容）。
+    sub_plans: list["AgentPlan"] = Field(default_factory=list)
 
     @field_validator("intent", mode="before")
     @classmethod
@@ -326,6 +347,38 @@ class AgentPlan(BaseModel):
             self.stages = [ToolStage(calls=[ToolCall(name=name) for name in self.tools_needed], parallel=True)]
         return self
 
+    @property
+    def all_intents(self) -> list[str]:
+        """primary 在前，接 sub_plans 的 intent；去重保序。空 sub_plans → [self.intent]。"""
+        out: list[str] = []
+        for i in [self.intent, *(sp.intent for sp in self.sub_plans)]:
+            if i and i not in out:
+                out.append(i)
+        return out
+
+    @property
+    def is_multi_intent(self) -> bool:
+        return bool(self.sub_plans)
+
+
+class SecondaryIntent(BaseModel):
+    """多意图并行里 LLM 检测到的第二个意图（最多 1 个 = 双意图上限）。
+
+    intent 非法时归一为空串——由 QueryPlanPayload 的校验器丢弃整个 secondary，
+    绝不让一个坏 secondary 影响 primary 主意图（90% 单意图场景的回归保护）。
+    """
+    intent: str = ""
+    entities: list[str] = Field(default_factory=list)
+    search_query: str = ""
+
+    @field_validator("intent", mode="before")
+    @classmethod
+    def _normalize_intent(cls, v: object) -> str:
+        from app.intents import is_valid_intent
+
+        s = str(v or "").strip()
+        return s if is_valid_intent(s) else ""
+
 
 class QueryPlanPayload(BaseModel):
     intent: str
@@ -338,6 +391,8 @@ class QueryPlanPayload(BaseModel):
     language: str = ""
     target_count: int | None = None
     reasoning: str = ""
+    # 多意图：可选的第二个意图。None/缺省 → 单意图（默认行为不变）。
+    secondary: SecondaryIntent | None = None
 
     @field_validator("intent", mode="before")
     @classmethod
@@ -348,6 +403,13 @@ class QueryPlanPayload(BaseModel):
         if not is_valid_intent(s):
             raise ValueError(f"invalid intent: {s}")
         return s
+
+    @model_validator(mode="after")
+    def _drop_invalid_secondary(self) -> "QueryPlanPayload":
+        # secondary.intent 非法/空 → 整个 secondary 丢弃，绝不影响 primary。
+        if self.secondary is not None and not self.secondary.intent:
+            self.secondary = None
+        return self
 
     @field_validator("entities", mode="before")
     @classmethod
@@ -473,9 +535,39 @@ class CareerPhase(BaseModel):
     evidence_ids: list[int] = Field(default_factory=list)
 
 
+class LibraryMatch(BaseModel):
+    """知识档案与用户曲库的交叉命中：把「你库里其实有这位歌手/同风格的歌」接进知识回答，
+    让介绍歌手/专辑从「纯百科」变成「结合你的库与口味」的个性化解读。
+
+    relation 表明命中原因：
+      artist  = 库里就是这位歌手本人的歌（精确命中，最强信号）；
+      genre   = 库里同曲风的歌（扩展命中，弱一些——曲风是粗标签）。
+    taste_aligned 标记该命中是否同时落在用户 top 口味上（用于排序与文案加权）。
+    """
+
+    title: str
+    artist: str = ""
+    source: str = "local"
+    source_id: str = ""
+    asset_id: str = ""
+    cover_url: str = ""
+    genre: list[str] = Field(default_factory=list)
+    relation: Literal["artist", "genre"] = "artist"
+    taste_aligned: bool = False
+
+
 class MusicDossier(BaseModel):
     entity: MusicEntity
     summary: str = ""
+    # summary 是否为「自包含的完整叙事正文」（DeepSeek 直答路径）：为 True 时 summary 本身
+    # 已是一篇成文的 markdown 深度解读，正文里已含曲目/口碑讨论。渲染层据此去重——
+    # 聊天气泡只出正文、不再追加风格标签/资料状态等机械尾巴，前端卡片也不再复述 summary，
+    # 只承载结构化的标签/声明/来源。为 False 时是短机械摘要，沿用旧的「正文+尾巴+卡片复述」。
+    summary_is_narrative: bool = False
+    # 是否为 DeepSeek 直答（parametric）：summary 是模型先验生成的完整正文，未联网核实。
+    # 与 partial 解耦——parametric 是「完整但未联网核实」，不是「资料不完整」：前端据此显柔和徽标，
+    # 而非琥珀色"资料不完整"警告；气泡末尾追加一行短声明。partial 仍只表示真正缺资料。
+    is_parametric: bool = False
     background: str = ""
     style_tags: list[str] = Field(default_factory=list)
     critical_consensus: str = ""
@@ -486,6 +578,9 @@ class MusicDossier(BaseModel):
     career_phases: list[CareerPhase] = Field(default_factory=list)
     related_albums: list[dict[str, Any]] = Field(default_factory=list)
     related_entities: list[MusicEntity] = Field(default_factory=list)
+    # 与用户曲库/口味的交叉命中：让知识回答「结合你的库」。artist 精确命中优先，
+    # genre 同曲风扩展其次；taste_aligned 的排前。空列表＝库里没有相关歌（或未传 user）。
+    library_matches: list[LibraryMatch] = Field(default_factory=list)
     citations: list[MusicCitation] = Field(default_factory=list)
     review_opinions: list[ReviewOpinion] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
@@ -613,6 +708,7 @@ class TasteExperimentRequest(BaseModel):
     user_id: str = "demo-user"
     prompt: str = "探索我的口味"
     total: int = Field(default=12, ge=3, le=30)
+    online_only: bool = False  # 探索页：只拉库外新歌/新歌手，不用本地曲充数
 
 
 class TasteExperimentFeedbackRequest(BaseModel):
@@ -755,6 +851,13 @@ class ListenRequest(BaseModel):
     duration: int = 0
     completed: bool = False
     context: str | None = None
+    # 展示元数据：写入时一并落进 ListeningEvent，让听歌记录能直接显示歌名/歌手/封面，
+    # 不必事后用 asset_id 回查曲库（在线曲查不到）。全部可选，旧前端不传不破。
+    title: str = ""
+    artist: str = ""
+    cover_url: str = ""
+    source: str = ""
+    source_id: str = ""
 
 
 class RatingRequest(BaseModel):
@@ -811,6 +914,52 @@ class ChatRequest(BaseModel):
     history: list[ChatMessage] = Field(default_factory=list)
 
 
+class ChatHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: str = Field(default_factory=utc_now_iso)
+    cards: list[dict[str, Any]] = Field(default_factory=list)
+    trace_summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class ChatHistoryThread(BaseModel):
+    thread_id: str
+    user_id: str = "demo-user"
+    title: str = ""
+    messages: list[ChatHistoryMessage] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+    updated_at: str = Field(default_factory=utc_now_iso)
+
+
+class ChatHistoryTurnRequest(BaseModel):
+    user_id: str = "demo-user"
+    thread_id: str
+    user_message: str
+    assistant_message: str = ""
+    cards: list[dict[str, Any]] = Field(default_factory=list)
+    trace_summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class RecommendationHistoryItem(BaseModel):
+    record_id: str
+    user_id: str = "demo-user"
+    thread_id: str = ""
+    query: str
+    answer: str = ""
+    cards: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now_iso)
+    expires_at: str
+
+
+class RecommendationHistoryRequest(BaseModel):
+    user_id: str = "demo-user"
+    thread_id: str = ""
+    query: str
+    answer: str = ""
+    cards: list[dict[str, Any]] = Field(default_factory=list)
+    ttl_days: int | None = Field(default=None, ge=1, le=365)
+
+
 class AgentResumeRequest(BaseModel):
     user_id: str = "demo-user"
     thread_id: str
@@ -848,6 +997,13 @@ class Playlist(BaseModel):
 class PlaylistRequest(BaseModel):
     user_id: str = "demo-user"
     instruction: str
+
+
+class PlaylistFromAssetsRequest(BaseModel):
+    user_id: str = "demo-user"
+    name: str = "我的歌单"
+    asset_ids: list[str] = Field(default_factory=list)
+    description: str = ""
 
 
 class EnrichRequest(BaseModel):

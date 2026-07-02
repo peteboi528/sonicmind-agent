@@ -194,7 +194,7 @@ def collect_known_titles(results: list[dict[str, Any]]) -> set[str]:
                     title = getattr(getattr(item, "track", None), "title", "")
                     if title:
                         titles.add(title)
-        if r.get("type") == "music_dossier":
+        if r.get("type") in {"music_dossier", "music_compare"}:
             dossier = r.get("dossier") or {}
             name = ((dossier.get("entity") or {}).get("name") or "").strip() if isinstance(dossier, dict) else ""
             if name:
@@ -243,8 +243,9 @@ def song_card(
         "title": getattr(track, "title", ""),
         "artist": getattr(track, "artist", "") or "未知",
         "source": getattr(track, "source", "local"),
-        "source_id": getattr(track, "external_id", "") or getattr(track, "asset_id", ""),
+        "source_id": getattr(track, "source_id", "") or getattr(track, "external_id", "") or getattr(track, "asset_id", ""),
         "playback_url": playback_url,
+        "cover_url": getattr(track, "cover_url", None),
         "genre": getattr(track, "genre", []) or [],
         "mood": getattr(track, "mood", []) or [],
         "reason": reason,

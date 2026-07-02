@@ -5,9 +5,9 @@ import asyncio
 from app.agent import AudioVisualAgent
 from app.graph.nodes import _run_tool_async
 from app.models import AgentPlan, StreamEvent
+from app.services.tools import checkpoint_store, tool_runtime
 from app.storage import JsonStore
 from app.tools.contracts import ToolCall, ToolResult, ToolStatus
-from app.services.tools import checkpoint_store, tool_runtime
 
 
 def test_tool_context_receives_graph_thread_and_run_ids(tmp_path, monkeypatch):

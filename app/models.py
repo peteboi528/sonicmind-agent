@@ -330,7 +330,7 @@ class AgentPlan(BaseModel):
     _excluded_artists: list[dict[str, str]] = PrivateAttr(default_factory=list)
     # 多意图并行：primary 之外可挂 ≤1 个 secondary 子计划（同 shape 的 AgentPlan，递归引用）。
     # 默认空 → 单意图，所有现有 plan.intent/stages 读取不变（全向后兼容）。
-    sub_plans: list["AgentPlan"] = Field(default_factory=list)
+    sub_plans: list[AgentPlan] = Field(default_factory=list)
 
     @field_validator("intent", mode="before")
     @classmethod
@@ -405,7 +405,7 @@ class QueryPlanPayload(BaseModel):
         return s
 
     @model_validator(mode="after")
-    def _drop_invalid_secondary(self) -> "QueryPlanPayload":
+    def _drop_invalid_secondary(self) -> QueryPlanPayload:
         # secondary.intent 非法/空 → 整个 secondary 丢弃，绝不影响 primary。
         if self.secondary is not None and not self.secondary.intent:
             self.secondary = None

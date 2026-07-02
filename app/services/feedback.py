@@ -12,8 +12,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Callable
 
 from app.library import ResourceLibrary
 from app.memory import MemoryManager

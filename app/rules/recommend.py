@@ -5,9 +5,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
-from app.rules.discover import _normalize_match_text, _scene_playlist_queries
 from app.media.pipeline import netease_song_id
 from app.models import Asset, ExternalTrack
+from app.rules.discover import _normalize_match_text, _scene_playlist_queries
 
 
 def _netease_song_id(url: str) -> str | None:

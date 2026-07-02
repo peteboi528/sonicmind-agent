@@ -67,8 +67,8 @@ async def _lifespan(_app: FastAPI):
         yield
     finally:
         from app.llm.client import close_shared_async_client
-        from app.sources.http_transport import source_transport
         from app.services.tools import tool_runtime
+        from app.sources.http_transport import source_transport
 
         if agent.graph is not None:
             await agent.graph.close()
@@ -116,8 +116,8 @@ async def _enforce_api_key(request, call_next):
 agent = AudioVisualAgent()
 
 # 用户画像服务（计划 §16.4）：复用 agent 的 store/memory，无独立状态。
-from app.services.profile import UserProfileService
 from app.services.history import HistoryService
+from app.services.profile import UserProfileService
 
 profile_service = UserProfileService(agent.store, agent.memory)
 history_service = HistoryService(agent.store)
@@ -672,8 +672,8 @@ def delete_recommendation_history(user_id: str, record_id: str, request: Request
 
 @app.post("/agent/resume")
 async def agent_resume(payload: AgentResumeRequest, request: Request):
-    from app.tools.contracts import ToolCall, ToolContext
     from app.services.tools import checkpoint_store, tool_runtime
+    from app.tools.contracts import ToolCall, ToolContext
 
     uid = _effective_user_id(request, payload.user_id)
     resolved = checkpoint_store.resolve(payload.action_id, payload.thread_id, uid, payload.approved)

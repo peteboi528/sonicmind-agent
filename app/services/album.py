@@ -8,7 +8,7 @@ list_assets 回调；agent 保留同名薄委托。
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from app.memory import MemoryManager
 from app.models import Asset, SavedAlbum

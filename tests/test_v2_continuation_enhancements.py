@@ -14,8 +14,8 @@ import asyncio
 from types import SimpleNamespace
 
 from app.models import ExternalTrack
-from app.tools.contracts import ToolCall, ToolContext
 from app.services.tools import tool_runtime
+from app.tools.contracts import ToolCall, ToolContext
 
 
 class _Library:

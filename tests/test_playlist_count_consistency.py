@@ -5,8 +5,7 @@
 from __future__ import annotations
 
 from app.graph.nodes import _compose_deterministic_answer, _planned_arguments
-from app.models import AgentPlan
-from app.models import ExternalTrack, Playlist
+from app.models import AgentPlan, ExternalTrack, Playlist
 from app.tools.contracts import ToolContext
 from app.tools.handlers import _playlist
 

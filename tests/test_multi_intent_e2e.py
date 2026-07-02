@@ -64,10 +64,10 @@ def test_full_graph_multi_intent_yields_both_segments(offline, monkeypatch):
     # planner 用 fast tier，合成用 default——统一注入脚本化 LLM。
     monkeypatch.setattr(nodes, "select_llm", lambda *_a, **_k: scripted)
 
+    import tempfile
+
     from app.agent import AudioVisualAgent
     from app.storage import JsonStore
-
-    import tempfile
     with tempfile.TemporaryDirectory() as td:
         agent = AudioVisualAgent(JsonStore(td + "/store"))
         # 脚本化 planner 的实体解析走 fast LLM；把 agent 内的也换掉，保证 query_plan 走脚本。

@@ -10,7 +10,6 @@ from app.config import settings
 from app.graph.tag_rules import extract_tags
 from app.models import ExternalTrack, ResourceTrack
 from app.recommend.hygiene import is_structural_reject
-from app.sources import bilibili as bilibili_source
 from app.sources import youtube as youtube_source
 from app.sources.mock_source import MockSource
 

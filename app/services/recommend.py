@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.graph import nodes
 from app.models import Asset, ExternalTrack, ListeningEvent, TasteProfile, UserMemory
 from app.services.fact_check import run_music_fact_check
 from app.services.playlist_repair import analyze_playlist_repair
 from app.services.profile_shift import detect_taste_shift
 from app.services.recommend_explainer import build_recommend_explanation
-from app.graph import nodes
 
 
 class _Memory:

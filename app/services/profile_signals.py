@@ -9,7 +9,7 @@ profile_context_text（画像仪表盘 → query_plan 品位上下文）、profi
 from __future__ import annotations
 
 import logging
-from typing import Callable
+from collections.abc import Callable
 
 from app.memory import MemoryManager
 from app.models import Asset, TasteProfile, UserMemory

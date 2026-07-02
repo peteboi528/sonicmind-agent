@@ -7,8 +7,8 @@ agent 保留同名薄委托。
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
-from typing import Callable
 
 from app.memory import MemoryManager
 from app.models import Asset

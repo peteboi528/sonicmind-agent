@@ -12,7 +12,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from app.media.pipeline import MediaPipeline
 from app.memory import MemoryManager

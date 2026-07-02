@@ -134,7 +134,6 @@ async def fake_recommend_artist_albums_async(self: Any, user_id: str, artist: st
 
 
 def fake_playlist_extract(query: str, max_playlists: int = 3, tracks_per_playlist: int = 15):
-    from app.models import ExternalTrack
     from app.sources.mock_source import MockSource
 
     limit = max_playlists * tracks_per_playlist

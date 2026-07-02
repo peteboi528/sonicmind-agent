@@ -2,7 +2,6 @@
 
 离线隔离：AudioVisualAgent(JsonStore(tmp_path/"store"))，绝不触碰真实 data/store。
 """
-from types import SimpleNamespace
 
 from app.agent import AudioVisualAgent
 from app.models import Asset, AssetStatus, DislikeRequest, ExternalTrack
@@ -98,7 +97,6 @@ def test_import_skips_disliked_tracks(tmp_path, monkeypatch):
     result = agent.import_netease_playlist("123", user_id="test-import-skip")
     assert result["disliked_skipped"] == 1
     assert result["imported"] == 1
-    ids = {a.asset_id for a in agent.list_assets()}
     assert any(a.title == "Track B" for a in agent.list_assets())
     assert not any(a.title == "Track A" for a in agent.list_assets())  # 被嫌弃的没进库
 

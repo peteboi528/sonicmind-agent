@@ -371,11 +371,13 @@ def test_sample_stream_returns_dossier_and_source_cards(agent, monkeypatch):
 
 
 def test_knowledge_stream_returns_dossier_and_latency_budget(agent, monkeypatch):
-    monkeypatch.setattr("app.knowledge.web_search_source.search_web_info", lambda *args, **kwargs: [])
-    # 关掉所有结构化外部源，保证 dossier.partial 由 web 空决定，确定性（不依赖网络）。
+    # web_knowledge 工具内部走 app.services.web_knowledge，patch 其 async 入口保证空结果。
+    monkeypatch.setattr("app.services.web_knowledge.web_search_source.asearch_web_info", lambda *args, **kwargs: [])
+    # 关掉所有结构化外部源与 parametric 兜底，保证 dossier.partial 由 web 空决定，确定性（不依赖网络）。
     monkeypatch.setattr("app.config.settings.enable_musicbrainz", False)
     monkeypatch.setattr("app.config.settings.enable_spotify", False)
     monkeypatch.setattr("app.config.settings.enable_discogs", False)
+    monkeypatch.setattr("app.config.settings.deepseek_parametric_enabled", False)
     events = _events(agent, "讲讲 Blonde 这张专辑，乐评怎么说？")
     assert events[-1].type == "final"
     assert any(event.type == "dossier" for event in events)

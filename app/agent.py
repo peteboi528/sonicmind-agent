@@ -1,54 +1,21 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
-import math
-import re
 import threading
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from app.config import settings
-from app.services.album import AlbumService
-from app.services.greeting import GreetingService
-from app.services.catalog import CatalogService
-from app.services.feedback import FeedbackService
-from app.services.profile_signals import ProfileSignals
-from app.rules.discover import (
-    _QUERY_NOISE,
-    _artist_alias_keys,
-    _artist_credit_parts,
-    _artist_query_matches,
-    _curated_playlist_query,
-    _extract_search_query,
-    _format_search_summary,
-    _is_scenario_playlist_instruction,
-    _journey_phases,
-    _local_ratio_from_query,
-    _looks_like_bare_artist_query,
-    _normalize_match_text,
-    _playlist_online_queries,
-    _playlist_search_terms,
-    _query_matches_track,
-    _query_requests_variant_content,
-    _scene_playlist_queries,
-    _string_similarity,
-)
-from app.services.discover import DiscoverService
-from app.services.journey import JourneyService
 from app.library import ResourceLibrary
-from app.services.library import LibraryService
 from app.llm.client import build_llm
 from app.llm.protocol import LLMError, LLMProvider
-from app.llm.structured import extract_json_dict, extract_json_list
+from app.llm.structured import extract_json_list
 from app.media.pipeline import MediaPipeline
 from app.memory import MemoryManager
 from app.models import (
     AgentAnswer,
     Asset,
-    AssetStatus,
     DailyRecommendation,
     DislikeRequest,
     EnrichResponse,
@@ -67,47 +34,44 @@ from app.models import (
     TasteExperiment,
     TasteExperimentFeedbackRequest,
     TasteExperimentReport,
-    TasteExperimentSegment,
     TasteExperimentTrack,
     TasteProfile,
-    TrackRef,
     UserMemory,
-    utc_now_iso,
 )
-from app.services.playlist import PlaylistService
-from app.services.playback import PlaybackService
 from app.prompts import (
-    IDENTIFY_FROM_URL_TEMPLATE,
     LLM_SEARCH_TEMPLATE,
 )
 from app.recommend.daily import DailyRecommender
 from app.recommend.engine import RecommendEngine
+from app.recommend.source_balance import balance_recommendation_sources
+from app.rules.discover import (
+    _QUERY_NOISE,
+    _artist_alias_keys,
+    _artist_credit_parts,
+    _artist_query_matches,
+    _curated_playlist_query,
+    _extract_search_query,
+    _format_search_summary,
+    _is_scenario_playlist_instruction,
+    _journey_phases,
+    _local_ratio_from_query,
+    _looks_like_bare_artist_query,
+    _normalize_match_text,
+    _playlist_online_queries,
+    _playlist_search_terms,
+    _query_requests_variant_content,
+    _scene_playlist_queries,
+    _string_similarity,
+)
 from app.rules.recommend import (
-    RecommendationAnchors,
     _extract_recommendation_anchors,
     _infer_playlist_count,
     _is_playlist_context_compatible,
     _is_recommendation_quality_track,
-    _netease_song_id,
     _recommendation_search_seeds,
     _track_matches_recommendation_anchors,
     get_time_bucket_name,
 )
-from app.services.recommend import RecommendationService
-from app.services.rag import RagService
-from app.recommend.source_balance import balance_recommendation_sources
-from app.retrieval.vector_store import HybridRetriever
-from app.services.search import SearchService
-from app.similarity import AssetSimilarity
-from app.sources import bilibili as bilibili_source
-from app.sources import netease as netease_source
-from app.sources import web_search as web_search_source
-from app.sources import youtube as youtube_source
-from app.sources.mock_source import MockSource
-from app.sources.netease_source import NeteaseSource
-from app.sources.protocol import ExternalSource
-from app.storage import JsonStore
-from app.services.taste_experiment import TasteExperimentService
 from app.rules.taste_experiment import (
     apply_taste_experiment_ts_feedback,
     bucket_label,
@@ -140,6 +104,27 @@ from app.rules.track import (
     _track_key,
     _valid_external_track,
 )
+from app.services.album import AlbumService
+from app.services.catalog import CatalogService
+from app.services.discover import DiscoverService
+from app.services.feedback import FeedbackService
+from app.services.greeting import GreetingService
+from app.services.journey import JourneyService
+from app.services.library import LibraryService
+from app.services.playback import PlaybackService
+from app.services.playlist import PlaylistService
+from app.services.profile_signals import ProfileSignals
+from app.services.rag import RagService
+from app.services.recommend import RecommendationService
+from app.services.search import SearchService
+from app.services.taste_experiment import TasteExperimentService
+from app.similarity import AssetSimilarity
+from app.sources import bilibili as bilibili_source
+from app.sources import netease as netease_source
+from app.sources.mock_source import MockSource
+from app.sources.netease_source import NeteaseSource
+from app.sources.protocol import ExternalSource
+from app.storage import JsonStore
 
 logger = logging.getLogger(__name__)
 
@@ -1088,8 +1073,8 @@ class AudioVisualAgent:
             )
             trace_lines.extend(route_trace)
         else:
-            from app.search.netease_playlist import search_and_extract
             from app.search.lastfm_discovery import discover_from_lastfm
+            from app.search.netease_playlist import search_and_extract
             from app.search.web_music_discovery import discover_from_llm
 
             all_candidates, route_trace = rec_service.extend_discovery_route_candidates(

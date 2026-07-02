@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from app.models import UserMemory
 from app.profile.evidence import (
     SCENE_LABELS,
     ProfileEvidence,
@@ -26,7 +27,6 @@ from app.profile.models import (
     TasteSummary,
     UserProfileResponse,
 )
-from app.models import UserMemory
 
 # ── 声音指纹维度定义（计划 §4.1）────────────────────────────────────────────
 # 每维 = 若干 genre/mood 的加权贡献。归一化后映射到 [0,1]。

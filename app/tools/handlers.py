@@ -5,10 +5,9 @@ import re
 from typing import Any
 
 from app.answer import song_card
-from app.recommend.hygiene import is_valid_music_track
 from app.intents import expand_content_negation, extract_content_negations, normalize_content_negation
 from app.models import ExternalTrack, ResultHygieneReport, TrackRef
-from app.recommend.hygiene import filter_music_tracks
+from app.recommend.hygiene import filter_music_tracks, is_valid_music_track
 from app.tools.actions import AUX_TOOL_NAMES, execute_aux_tool
 from app.tools.contracts import ToolContext, ToolResult, ToolStatus
 from app.tools.registry import bind_async_tool_handler, bind_tool_handler

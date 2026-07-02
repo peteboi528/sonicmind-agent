@@ -13,20 +13,21 @@ _ensure_track_tags）、资产读写与进程内缓存（list_assets / _invalida
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 from app.config import settings
-from app.genres import NETEASE_TAG_TO_GENRE, VALID_GENRES, VALID_GENRE_SET
+from app.genres import NETEASE_TAG_TO_GENRE, VALID_GENRE_SET, VALID_GENRES
 from app.library import ResourceLibrary
-from app.recommend.features import estimate_features
-from app.recommend.hygiene import is_structural_reject
 from app.llm.protocol import LLMProvider
 from app.llm.structured import extract_json_list
 from app.media.pipeline import MediaPipeline, stable_id
 from app.memory import MemoryManager
 from app.models import Asset, AssetStatus, EnrichResponse, utc_now_iso
 from app.prompts import IDENTIFY_FROM_URL_TEMPLATE
+from app.recommend.features import estimate_features
+from app.recommend.hygiene import is_structural_reject
 from app.rules.recommend import _netease_song_id
 from app.sources import bilibili as bilibili_source
 from app.sources import netease as netease_source
@@ -82,10 +83,10 @@ class LibraryService:
         self._invalidate_assets_cache()
         return asset
 
-    def _track_identity(self, track: Any) -> tuple[str | None, str, str, str, str, str, Any]:
+    def _track_identity(self, track: Any) -> tuple[str | None, str, str, str, str, str, Any, str]:
         """归一化 track 的身份字段并算出逻辑 asset_id（stable_id，不落盘）。
 
-        返回 (asset_id|None, title, artist, source, external_id, source_url, cover_url)。
+        返回 (asset_id|None, title, artist, source, external_id, source_url, cover_url, stable_key)。
         抽出来是因为「播放回一个稳定 id 给收听采集」与「真入库拿 asset_id」必须用同一套算法，
         否则同一首歌播过、将来入库后历史 listen 对不上。asset_id 为 None 表示该 track 无可识别身份。
         """
@@ -96,7 +97,7 @@ class LibraryService:
         source_url = str(getattr(track, "source_url", "") or "").strip()
         cover_url = getattr(track, "cover_url", None)
         if not any((title, artist, external_id, source_url)):
-            return None, title, artist, source, external_id, source_url, cover_url
+            return None, title, artist, source, external_id, source_url, cover_url, ""
         if not source_url and source == "netease" and external_id:
             source_url = f"https://music.163.com/song?id={external_id}"
         if not source_url and external_id:
@@ -106,7 +107,7 @@ class LibraryService:
             if external_id else
             source_url or f"{source}:{title}:{artist}"
         )
-        return stable_id(stable_key), title, artist, source, external_id, source_url, cover_url
+        return stable_id(stable_key), title, artist, source, external_id, source_url, cover_url, stable_key
 
     def asset_id_for_track(self, track: Any) -> str | None:
         """计算 track 的逻辑 asset_id（不落盘）。供播放/收听采集用——play ≠ add，
@@ -120,7 +121,7 @@ class LibraryService:
         （见 asset_id_for_track）。保持诚实：不伪造分析，只持久化足够的规范元数据供后续
         listen/rating 关联。
         """
-        asset_id, title, artist, source, external_id, source_url, cover_url = self._track_identity(track)
+        asset_id, title, artist, source, external_id, source_url, cover_url, stable_key = self._track_identity(track)
         if asset_id is None:
             return None
         existing = self.store.read_model("assets", asset_id, Asset)

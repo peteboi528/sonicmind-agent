@@ -26,7 +26,6 @@ from app.models import (
     MusicDossier,
     MusicEntity,
     QueryPlanPayload,
-    SecondaryIntent,
 )
 
 

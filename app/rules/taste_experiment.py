@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from app.models import ExternalTrack, TasteExperiment, TasteExperimentTrack, utc_now_iso
+from app.models import ExternalTrack, TasteExperiment, TasteExperimentTrack
 
 
 def filter_taste_experiment_candidates(

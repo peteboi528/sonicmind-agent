@@ -12,7 +12,6 @@ from app.models import (
 )
 from app.storage import JsonStore
 
-
 CHAT_COLLECTION = "chat_history"
 RECOMMENDATION_COLLECTION = "recommendation_history_full"
 

@@ -9,7 +9,6 @@ import pytest
 
 import app.recommend.scene_vibe as sv
 
-
 # ---- 场景识别 ----
 
 def test_detect_time_of_day_and_scenes():

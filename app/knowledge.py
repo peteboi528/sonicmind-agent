@@ -2119,7 +2119,7 @@ def _enrich_review_content(
 
     tasks = [(f"extract:{_citation_domain(c.url)}", lambda c=c: _fetch(c)) for c in candidates]
     batches = run_parallel(tasks, timeout=max(0.5, extract_budget), default="")
-    for c, text in zip(candidates, batches):
+    for c, text in zip(candidates, batches, strict=False):
         text = (text or "").strip()
         if text:
             c.excerpt = text[:1800]
@@ -2211,7 +2211,7 @@ def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None 
     budget = timeout if timeout is not None else settings.knowledge_source_timeout_seconds
     batch_timeout = max(0.5, budget - 0.3)
     results = run_parallel(tasks, timeout=batch_timeout, default=None)
-    res = dict(zip([label for label, _ in tasks], results))
+    res = dict(zip([label for label, _ in tasks], results, strict=False))
 
     try:
         # 1) 结构化权威源合流（顺序：MB 纠正实体名 → Spotify 补声音/封面 → Discogs 补细类）。

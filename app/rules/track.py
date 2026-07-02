@@ -4,8 +4,8 @@ import re
 from typing import Any
 
 from app.config import settings
-from app.rules.discover import _query_matches_track
 from app.models import Asset, ExternalTrack
+from app.rules.discover import _query_matches_track
 
 
 def _generic_metadata_title(title: str | None) -> bool:

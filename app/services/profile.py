@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 
+from app.models import UserMemory, utc_now_iso
 from app.profile.builder import UserProfileBuilder
 from app.profile.insights import apply_feedback, generate_profile_insights
 from app.profile.models import (
@@ -19,7 +20,6 @@ from app.profile.models import (
     ProfileInsightFeedback,
     UserProfileResponse,
 )
-from app.models import UserMemory, utc_now_iso
 from app.storage import JsonStore
 
 logger = logging.getLogger(__name__)

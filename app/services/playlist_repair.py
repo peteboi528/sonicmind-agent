@@ -140,7 +140,7 @@ def _duplicate_titles(tracks: list[Any]) -> list[dict[str, Any]]:
 
 def _style_jumps(tracks: list[Any]) -> list[dict[str, Any]]:
     jumps: list[dict[str, Any]] = []
-    for left, right in zip(tracks, tracks[1:]):
+    for left, right in zip(tracks, tracks[1:], strict=False):
         left_tags = {str(item).lower() for item in [*(getattr(left, "genre", []) or []), *(getattr(left, "mood", []) or [])] if str(item).strip()}
         right_tags = {str(item).lower() for item in [*(getattr(right, "genre", []) or []), *(getattr(right, "mood", []) or [])] if str(item).strip()}
         if left_tags and right_tags and not left_tags.intersection(right_tags):
@@ -167,7 +167,7 @@ def _energy_bucket(track: Any) -> int:
 
 def _energy_gaps(tracks: list[Any]) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
-    for left, right in zip(tracks, tracks[1:]):
+    for left, right in zip(tracks, tracks[1:], strict=False):
         if abs(_energy_bucket(left) - _energy_bucket(right)) >= 2:
             gaps.append({
                 "from": _track_brief(left),

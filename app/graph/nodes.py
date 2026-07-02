@@ -717,7 +717,6 @@ async def web_fallback_async(agent: AudioVisualAgent, state: AgentState) -> Agen
     trace = [*state.get("trace", []), "[web_fallback] 本地候选不足，触发联网兜底补搜。"]
     events = [*state.get("events", []), StreamEvent(type="eval", content="本地候选不足，联网兜底补搜。")]
     outcomes = list(state.get("tool_outcomes", []))
-    state_context = dict(state.get("context") or {})
     call = ToolCall(name="web_music_search", arguments=_planned_arguments("web_music_search", query, plan, top_k))
     local_results: list[dict[str, Any]] = []
     runtime_result = await _run_tool_async_safely(

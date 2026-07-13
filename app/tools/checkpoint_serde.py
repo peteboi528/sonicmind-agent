@@ -8,6 +8,8 @@ from pydantic import BaseModel
 _SECRET_KEYS = {
     "api_key", "apikey", "authorization", "cookie", "cookies", "credential",
     "credentials", "password", "secret", "token", "access_token", "refresh_token",
+    # 长效会话凭证 / 第三方平台密钥（精确匹配，堵 graph state 残留缺口）
+    "music_u", "verification_token", "user_api_keys", "app_secret", "encrypt_key",
 }
 _BINARY_KEYS = {"audio", "raw_audio", "audio_bytes", "blob", "content_bytes", "file_bytes"}
 _MAX_HISTORY_ITEMS = 20

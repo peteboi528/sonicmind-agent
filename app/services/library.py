@@ -218,12 +218,13 @@ class LibraryService:
             if title:
                 return title
 
-        # 通用兜底：yt-dlp（不强依赖 Chrome cookies）
+        # 通用兜底：yt-dlp（不强依赖 Chrome cookies）。--no-playlist 防单 URL 展开成数百条目；
+        # URL 已在 API 边界经 validate_ingest_url 校验（scheme/SSRF），此处不再裸跑。
         try:
             import subprocess
             result = subprocess.run(
-                ["yt-dlp", "--get-title", "--no-download", "--no-warnings", url],
-                capture_output=True, text=True, timeout=15,
+                ["yt-dlp", "--get-title", "--no-download", "--no-warnings", "--no-playlist", url],
+                capture_output=True, text=True, timeout=settings.ingest_title_timeout,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()

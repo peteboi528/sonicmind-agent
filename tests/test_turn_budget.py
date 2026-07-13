@@ -183,3 +183,23 @@ def test_hard_budget_recovery_switches_directly_to_local(tmp_path, monkeypatch):
     assert out["_need_refine"] is True
     assert out["plan"].tools_needed == ["recommend"]
     assert any("直接切到可追溯的本地检索" in t for t in out["trace"])
+
+
+def test_planning_deadline_uses_deterministic_fallback(tmp_path, monkeypatch):
+    """规划 LLM 卡住时不应穿透普通请求 deadline。"""
+    from app.graph import nodes
+    from app.graph.planning import plan_intent_async
+
+    async def slow_plan(*_args, **_kwargs):
+        await asyncio.sleep(0.2)
+        return None, {}, {}
+
+    monkeypatch.setattr(nodes, "plan_with_llm_with_meta_async", slow_plan)
+    plan = AgentPlan(intent="recommend", retrieval_plan=RetrievalPlan(search_query="放松"))
+    state = _state(plan, turn_deadline=time.monotonic() + 1)
+    state["context"]["deadline_at"] = time.monotonic() + 0.02
+    started = time.monotonic()
+    out = asyncio.run(plan_intent_async(_agent(tmp_path), state))
+    assert time.monotonic() - started < 0.12
+    assert out["plan"].intent == "recommend"
+    assert any("规划超时" in line for line in out["trace"])

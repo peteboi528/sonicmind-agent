@@ -85,11 +85,14 @@ def aggregate(per_case: dict[str, dict[str, Any]]) -> dict[str, Any]:
     """跨 case 聚合：意图命中率 / 反幻觉通过率 / 平均 must_mention / 平均 relevance。
 
     intent_hit 为 None 的 case（未标 expected_intent）不计入意图命中率分母。
+    skipped（requires_llm 且在 mock 模式跳过）的 case 完全不计入任何聚合。
     """
-    cases = [v for k, v in per_case.items() if not k.startswith("__")]
+    cases = [v for k, v in per_case.items() if not k.startswith("__") and not v.get("skipped")]
     intent_checked = [c for c in cases if c["intent_hit"] is not None]
     rel = [c["relevance"] for c in cases if c["relevance"] is not None]
     return {
+        "n_total_cases": len([v for k, v in per_case.items() if not k.startswith("__")]),
+        "n_skipped_cases": len([v for k, v in per_case.items() if not k.startswith("__") and v.get("skipped")]),
         "intent_hit_rate": (
             sum(1 for c in intent_checked if c["intent_hit"]) / len(intent_checked)
             if intent_checked else None

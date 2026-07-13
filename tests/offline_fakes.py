@@ -14,10 +14,16 @@ from typing import Any
 from unittest.mock import patch
 
 
-def configure_offline_env() -> None:
-    """Set process env before importing app.config/settings."""
-    os.environ["LLM_API_KEY"] = ""
-    os.environ.setdefault("LLM_TIMEOUT_SECONDS", "1")
+def configure_offline_env(keep_llm: bool = False) -> None:
+    """Set process env before importing app.config/settings.
+
+    keep_llm=True：保留真实 LLM_API_KEY 与正常 LLM 超时，仅伪造音乐源——用于 run.py --offline
+    离线门禁（eval 须真实 LLM/Judge，候选来自假源保确定性、无平台噪声）。默认 False：清空 key
+    进 mock mode 并把 LLM 超时压到 1s（pytest/regress 既有行为）。
+    """
+    if not keep_llm:
+        os.environ["LLM_API_KEY"] = ""
+        os.environ.setdefault("LLM_TIMEOUT_SECONDS", "1")
     os.environ.setdefault("RESOURCE_LIBRARY_PATH", "data/test_resource_library.sqlite")
     # STORE_ROOT 隔离：全局 app.api.main.agent 的 JSON 库（assets/memory/...）此前一直落在
     # 真实 data/store——_default_store_root() 总挑它。开发机真库一旦有数据（如导入 200 首），

@@ -48,6 +48,13 @@ class SearchService:
         self._search_youtube_video = search_youtube_video
         self._lexical_query_noise = lexical_query_noise
 
+    def _cache_external_tracks(self, tracks: list[ExternalTrack]) -> None:
+        """候选池只是性能缓存；写入失败不能影响本轮已验证的在线结果。"""
+        try:
+            self.library.upsert_externals(tracks)
+        except Exception:
+            logger.warning("resource library cache write failed", exc_info=True)
+
     def search_web_music(
         self,
         query: str,
@@ -79,8 +86,7 @@ class SearchService:
             for batch in run_parallel(tasks, timeout=8.0, default=[]):
                 merged.extend(batch or [])
             selected = self._dedupe_tracks(merged)[:top_k]
-            for track in selected:
-                self.library.upsert_external(track)
+            self._cache_external_tracks(selected)
             return selected
 
         tracks: list[ExternalTrack] = []
@@ -121,8 +127,7 @@ class SearchService:
                     tracks.append(fallback)
 
         selected = self._unique_source_tracks(tracks)[:top_k]
-        for track in selected:
-            self.library.upsert_external(track)
+        self._cache_external_tracks(selected)
         return selected
 
     async def search_web_music_async(
@@ -150,7 +155,7 @@ class SearchService:
                 )
             )
             selected = self._dedupe_tracks([track for batch in batches for track in batch])[:top_k]
-            await asyncio.gather(*(asyncio.to_thread(self.library.upsert_external, track) for track in selected))
+            await asyncio.to_thread(self._cache_external_tracks, selected)
             return selected
 
         from app.sources.netease import asearch_netease_many
@@ -205,7 +210,7 @@ class SearchService:
                 offset=offset,
                 variants=variants,
             )
-        await asyncio.gather(*(asyncio.to_thread(self.library.upsert_external, track) for track in selected))
+        await asyncio.to_thread(self._cache_external_tracks, selected)
         return selected
 
     def dense_library_fallback(self, query: str, existing: list[ExternalTrack], limit: int = 5) -> list[ExternalTrack]:

@@ -67,13 +67,20 @@ def test_api_flow():
 
     chat = client.post("/chat", json={"user_id": "api-user", "message": "推荐一些适合工作时听的音乐"})
     assert chat.status_code == 200
-    assert chat.json()["answer"]
-    assert chat.json()["agent_trace"]
+    chat_data = chat.json()
+    assert chat_data["answer"]
+    assert chat_data["agent_trace"]
+    # QW5：同步 /chat 也应携带与 SSE 路径一致的透明度摘要。
+    assert chat_data.get("trace_summary")
+    assert chat_data["trace_summary"].get("intent")
 
     agent_run = client.post("/agent/run", json={"user_id": "api-user", "message": "分析我的品味"})
     assert agent_run.status_code == 200
-    assert agent_run.json()["answer"]
-    assert agent_run.json()["agent_trace"]
+    run_data = agent_run.json()
+    assert run_data["answer"]
+    assert run_data["agent_trace"]
+    assert run_data.get("trace_summary")
+    assert run_data["trace_summary"].get("intent")
 
     enrich = client.post(f"/assets/{asset_id}/enrich", json={"use_network": False})
     assert enrich.status_code == 200

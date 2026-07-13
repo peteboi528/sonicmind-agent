@@ -7,6 +7,7 @@ import uuid
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from app import netease_auth
 from app.api.main import agent, app
 from app.config import settings
 from app.models import Asset
@@ -127,6 +128,22 @@ class TestWebRoutes:
         data = resp.json()
         # 拿到流则 ok，否则应提示需要 VIP/登录
         assert data["reason"] in {"ok", "vip_required"}
+
+    @pytest.mark.anyio
+    async def test_playback_audio_anonymous_ignores_body_user_id(self, client, monkeypatch):
+        """匿名模式（AUTH_ENABLED=false）下播放代理不能按 body user_id 加载他人 cookie。"""
+        loaded = []
+        def spy_load(user_id):  # noqa: ARG001
+            loaded.append(user_id)
+            return None
+        monkeypatch.setattr(netease_auth, "load_cookie", spy_load)
+
+        resp = await client.post("/api/playback/audio", json={
+            "track": {"title": "x", "artist": "y", "source": "netease"},
+            "user_id": "victim_user",
+        })
+        assert resp.status_code == 200
+        assert loaded == ["web_user"]
 
 
 class TestIdentifyAlbum:

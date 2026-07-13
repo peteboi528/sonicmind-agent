@@ -121,6 +121,29 @@ def _run_case(case: EvalCase, judge: Any | None) -> tuple[Any, dict[str, Any]]:
     return answer, compute_metrics(case, answer, relevance)
 
 
+def _skipped_metrics() -> dict[str, Any]:
+    """requires_llm 的 case 在 mock 模式下的占位指标：全 None + skipped 标记。
+
+    aggregate 会过滤掉 skipped，故不计入任何聚合；此处给齐 print_diff 用到的键。
+    """
+    return {
+        "skipped": True,
+        "intent_hit": None,
+        "anti_halluc_pass": None,
+        "junk_rate": None,
+        "must_mention_hit": None,
+        "local_ratio": None,
+        "local_ratio_ok": None,
+        "answer_len": None,
+        "trace_steps": None,
+        "recommended_tracks": None,
+        "diversity": None,
+        "prompt_signature": "",
+        "fallback": None,
+        "relevance": None,
+    }
+
+
 def collect(case_filter: str | None = None, *, with_llm_judge: bool = False) -> dict[str, Any]:
     """跑（过滤后的）cases，返回 {case_id: metrics} + '__aggregate__'。"""
     from app.config import settings
@@ -138,10 +161,16 @@ def collect(case_filter: str | None = None, *, with_llm_judge: bool = False) -> 
         judge = LLMJudge(judge_llm)
     cases = [c for c in EVAL_CASES if not case_filter or c.case_id == case_filter]
     per_case: dict[str, Any] = {}
+    mode = "LLM" if judge else "mock"
     for i, case in enumerate(cases, 1):
+        if case.requires_llm and settings.mock_mode:
+            # mock 关键词分类器无法正确切这类双意图句（如"推几首X顺便讲讲他"被误判 artist_info），
+            # 跑了也只是确定性失败；跳过、不计入聚合，留给真实 LLM 环境手动验证。
+            per_case[case.case_id] = _skipped_metrics()
+            print(f"  [{i}/{len(cases)}] {case.case_id}: SKIP（requires_llm：mock 分类器搞不定，需真实 LLM）")
+            continue
         answer, metrics = _run_case(case, judge)
         per_case[case.case_id] = metrics
-        mode = "LLM" if judge else "mock"
         print(f"  [{i}/{len(cases)}] {case.case_id}: intent={metrics['intent_hit']} "
               f"anti_halluc={metrics['anti_halluc_pass']} local={metrics['local_ratio']} mm_hit={metrics['must_mention_hit']} "
               f"pv={metrics['prompt_signature'] or '-'} ({mode}, {len(answer.agent_trace)} steps)")
@@ -178,6 +207,9 @@ def print_diff(current: dict[str, Any], baseline: dict[str, Any]) -> None:
     print("-" * 82)
     for cid, m in current.items():
         if cid.startswith("__"):
+            continue
+        if m.get("skipped"):
+            print(f"{cid:<22} SKIP（requires_llm：mock 模式跳过，需真实 LLM 验证）")
             continue
         b = baseline.get(cid, {})
         print(

@@ -1,4 +1,4 @@
-# 智能影音推荐 Agent（MusicAgent / SonicMind）
+# SonicMind —— 智能音乐推荐 Agent（原 MusicAgent）
 
 一个**可解释、记忆驱动、反幻觉**的音乐推荐 Agent。核心不是单次 LLM 对话，而是一个围绕用户品味持续工作、决策全程可追溯的智能体。
 

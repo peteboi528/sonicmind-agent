@@ -1,7 +1,6 @@
 """Web 前端路由：Vue 单页应用服务 + 播放代理。"""
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,6 +8,7 @@ from types import SimpleNamespace
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
+from app import netease_auth
 from app.api.main import _effective_user_id, agent
 from app.config import settings
 from app.services.cover_recognizer import (
@@ -92,7 +92,11 @@ async def playback_audio(request: Request):
     """
     body = await request.json()
     track = body.get("track", {})
-    user_id = body.get("user_id", "web_user")
+    user_id = _effective_user_id(
+        request,
+        body.get("user_id", "web_user"),
+        bind_in_anonymous_mode=True,
+    )
     source = (track.get("source") or "").lower()
 
     track_obj = _make_track_ns(track)
@@ -213,11 +217,14 @@ def _make_track_ns(data: dict) -> SimpleNamespace:
 
 
 def _load_netease_cookie(user_id: str) -> str:
-    """尝试加载用户的网易云 cookie。"""
+    """尝试加载用户的网易云 cookie。
+
+    走 ``netease_auth.load_cookie`` 而非自己读文件——确保与写入路径走同一套
+    解密逻辑，避免「写入加密、此处读回明文」的漂移。
+    """
     try:
-        auth_path = Path(agent.store.root) / "netease_auth" / f"{user_id}.json"
-        if auth_path.exists():
-            auth_data = json.loads(auth_path.read_text(encoding="utf-8"))
+        auth_data = netease_auth.load_cookie(user_id)
+        if auth_data:
             return auth_data.get("cookie", "")
     except Exception:
         pass

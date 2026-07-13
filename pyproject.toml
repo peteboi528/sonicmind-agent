@@ -1,5 +1,5 @@
 [project]
-name = "av-recommend-agent"
+name = "sonicmind-agent"
 version = "0.3.0"
 description = "智能影音推荐助手 - 个性化音乐推荐、每日歌单、LLM 语义搜索"
 readme = "README.md"

@@ -43,6 +43,19 @@ def _reset_netease_album_cache():
 
 
 @pytest.fixture(autouse=True)
+def _reset_shared_executor():
+    """共享线程池跨用例隔离：每用例后关停，避免上一用例超时滞留的 worker 线程漏到下一用例
+    （离线 fakes 即时返回，关停近乎零开销；池对象下次按需重建，线程按需创建）。"""
+    yield
+    try:
+        from app.concurrency import shutdown_shared_executor
+
+        shutdown_shared_executor()
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _seed_random():
     """全局 random 未 seed 是 flaky 总根因：library.sample_ts_scores 的 betavariate
     （TS 探索，enable_explore 默认开）和 MockLLM 的 random.choice 让推荐排序/mock 输出

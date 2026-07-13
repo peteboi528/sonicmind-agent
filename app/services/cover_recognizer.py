@@ -375,5 +375,7 @@ def synthesize_query(rec: CoverRecognition) -> str | None:
         return f"album\n{rec.album}\n解读这张专辑"
     if rec.method == "ocr" and rec.raw_text:
         # OCR 只有裸文字：当专辑名交给 MusicBrainz 模糊匹配，比解析自然语言句子稳。
-        return f"album\n{rec.raw_text}\n解读这张专辑"
+        # OCR 文本攻击者可控（恶意封面/印刷文字），剔除常见注入话术防越权流入下游 prompt。
+        from app.prompts.untrusted_boundary import strip_directive_phrases
+        return f"album\n{strip_directive_phrases(rec.raw_text)}\n解读这张专辑"
     return None

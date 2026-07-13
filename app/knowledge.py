@@ -1109,12 +1109,13 @@ def _synthesize_dossier_prose(
     if style_tags:
         evidence_lines.append(f"- 风格标签：{'、'.join(style_tags[:8])}")
     has_reviews = bool(review_citations or critic_points)
-    evidence_block = "\n".join(evidence_lines)
+    from app.prompts.untrusted_boundary import UNTRUSTED_CONTENT_RULE, strip_directive_phrases, wrap_untrusted
+    evidence_block = wrap_untrusted(strip_directive_phrases("\n".join(evidence_lines)), "证据资料")
 
     system = (
         "你是严谨而文笔专业的资深乐评编辑。只能依据【证据】改写、翻译、组织成流畅、详尽、专业的中文长评，"
         "严禁补充证据里没有的事实、评分、年份或人物。证据是英文或德文就翻译成自然地道的中文，"
-        "不要保留外文残句、不要逐条罗列证据条目，要融会成连贯的分析。"
+        "不要保留外文残句、不要逐条罗列证据条目，要融会成连贯的分析。" + UNTRUSTED_CONTENT_RULE
     )
     if parametric:
         system += (
@@ -1370,15 +1371,26 @@ def build_dossier(
                 career_phases = _extracted_phases
     if is_compare:
         profiled = _artist_compare_profile(entities[0], entities[1])
-        if profiled:
+        # 有 profile 或 parametric 直答时，对比正文是可用的——剔除"乐评未取回/外部资料不足"
+        # 失败性描述，与 album/artist 的 is_parametric 清洗一致，避免富正文却挂"部分降级"。
+        if profiled or is_parametric:
             partial_reasons = [
                 reason for reason in partial_reasons
                 if "乐评来源本轮未在时间预算内取回足够结果" not in reason
                 and "外部资料来源不足，无法做完整乐评总结" not in reason
             ]
-        summary = _compare_summary(entities[0], entities[1])
         related = [entities[1]]
-        consensus = _critical_consensus(citations, opinions)
+        if web_knowledge_answer:
+            # DeepSeek 直答（parametric）：名艺人/名盘对比模型先验扎实，直接用作正文，
+            # 不再回落静态「声音密度/叙事方式」模板（那是 resolve+metadata 全空时的旧兜底，
+            # 对 The Weeknd vs Drake 这种常识对比明显空洞）。与下方 album/artist 的
+            # web_knowledge_answer 直答通路一致；render 侧由 summary_is_narrative 跳过静态对比表。
+            summary = _polish_narrative(web_knowledge_answer)[:4000]
+            summary_is_narrative = True
+            consensus = ""
+        else:
+            summary = _compare_summary(entities[0], entities[1])
+            consensus = _critical_consensus(citations, opinions)
     elif ambiguous:
         # 同名歧义过大：不合成、不拼凑，返回消歧提示让用户补艺人名。
         summary = _ambiguous_summary(entity)
@@ -1593,6 +1605,17 @@ def _artist_career_answer(dossier: MusicDossier) -> str:
 def dossier_answer(dossier: MusicDossier) -> str:
     if dossier.related_entities:
         other = dossier.related_entities[0]
+        if dossier.summary_is_narrative:
+            # DeepSeek 直答对比正文：summary 已是成文对比，不再追加静态「看叙事方式」模板表
+            # （那是无 profile 时的旧兜底，与富正文重复且空洞）。与 artist 直答通路一致：
+            # 气泡只出正文 + 库命中 + parametric 短声明。
+            parts = [f"{dossier.entity.name} 和 {other.name} 的区别：{dossier.summary}"]
+            match_lines = _library_match_lines(dossier)
+            if match_lines:
+                parts.append("\n".join(match_lines))
+            if dossier.is_parametric:
+                parts.append(_PARAMETRIC_NOTE)
+            return "\n".join(parts)
         profiled = _artist_compare_profile(dossier.entity, other)
         lines = [f"{dossier.entity.name} 和 {other.name} 的区别：{dossier.summary}"]
         if dossier.partial and dossier.degraded_reason:

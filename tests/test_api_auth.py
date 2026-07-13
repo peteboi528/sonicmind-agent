@@ -6,6 +6,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from app import netease_auth
 from app.api import main as main_module
 
 
@@ -64,3 +65,39 @@ def test_per_user_key_overrides_client_user_id(monkeypatch):
     assert r.status_code == 200
     assert main_module.agent.memory.get_memory(bound_user).preferences
     assert not main_module.agent.memory.get_memory(victim_user).preferences
+
+
+def test_playback_user_id_bound_to_auth_user(monkeypatch):
+    """播放代理在鉴权模式下必须用 API key 绑定的用户加载 cookie，不能用 body user_id 伪造。"""
+    bound_user = f"auth-alice-{uuid.uuid4().hex}"
+    victim_user = f"victim-{uuid.uuid4().hex}"
+    monkeypatch.setattr(main_module.settings, "auth_enabled", True)
+    monkeypatch.setattr(main_module.settings, "api_key", "")
+    monkeypatch.setattr(main_module.settings, "user_api_keys", {"alice-key": bound_user})
+
+    loaded = []
+    def spy_load(user_id):
+        loaded.append(user_id)
+        return None
+    monkeypatch.setattr(netease_auth, "load_cookie", spy_load)
+
+    client = TestClient(main_module.app)
+    r = client.post(
+        "/api/playback/audio",
+        json={"track": {"title": "x", "artist": "y", "source": "netease"}, "user_id": victim_user},
+        headers={"X-API-Key": "alice-key"},
+    )
+    assert r.status_code == 200
+    assert loaded == [bound_user]
+
+
+def test_web_static_open_under_auth(auth_client):
+    # 开鉴权时前端静态资源必须放行——浏览器无法自定义 X-API-Key 头，
+    # 若连 /web 都拦则「开鉴权 = 前端不可用」。不依赖 dist 是否构建：不被门禁拦（≠401）即可。
+    assert auth_client.get("/web").status_code != 401
+    assert auth_client.get("/web/assets/nonexistent.css").status_code != 401
+
+
+def test_webhook_not_accidentally_public_under_auth(auth_client):
+    """/web 静态资源白名单不能扩大成 /webhook 前缀白名单。"""
+    assert auth_client.post("/webhook/feishu", json={}).status_code == 401

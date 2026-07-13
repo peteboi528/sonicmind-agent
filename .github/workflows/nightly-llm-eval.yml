@@ -1,0 +1,49 @@
+name: Nightly LLM Evaluation
+
+on:
+  schedule:
+    - cron: "20 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_BASE_URL: ${{ secrets.LLM_BASE_URL }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      JUDGE_MODEL: ${{ secrets.JUDGE_MODEL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,vision,embeddings]"
+      - name: Report missing LLM secret
+        if: ${{ env.LLM_API_KEY == '' || env.LLM_BASE_URL == '' || env.LLM_MODEL == '' }}
+        run: |
+          echo "Nightly LLM evaluation skipped: LLM config incomplete."
+          echo "  LLM_API_KEY  : $([ -n "$LLM_API_KEY" ] && echo set || echo MISSING)"
+          echo "  LLM_BASE_URL : $([ -n "$LLM_BASE_URL" ] && echo set || echo MISSING)"
+          echo "  LLM_MODEL    : $([ -n "$LLM_MODEL" ] && echo set || echo MISSING)"
+          echo "Configure all three as repository secrets (JUDGE_MODEL optional)."
+      - name: Run LLM evaluation
+        if: ${{ env.LLM_API_KEY != '' && env.LLM_BASE_URL != '' && env.LLM_MODEL != '' }}
+        run: >-
+          python -m tests.eval.run
+          --offline
+          --json-output artifacts/nightly-llm-eval.json
+          --min-pass-rate 0.8
+      - name: Upload evaluation report
+        if: ${{ always() && env.LLM_API_KEY != '' && env.LLM_BASE_URL != '' && env.LLM_MODEL != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-llm-eval
+          path: artifacts/nightly-llm-eval.json
+          if-no-files-found: warn

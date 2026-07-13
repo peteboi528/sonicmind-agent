@@ -325,9 +325,9 @@ def test_finalize_failure_still_emits_final(agent):
         "trace": [],
         "events": [],
         "context": {},
-    }, RuntimeError("final down"))
+    })
 
-    assert out["answer"].fallback_reason.startswith("finalize_error")
+    assert out["answer"].fallback_reason == "finalize_error"
     assert out["events"][-1].type == "final"
     assert "没有编造额外歌曲" in out["events"][-1].content
 

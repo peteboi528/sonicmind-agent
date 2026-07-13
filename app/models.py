@@ -182,11 +182,13 @@ class AgentAnswer(BaseModel):
     goal_progress: list[str] = Field(default_factory=list)
     # 标记本轮是否走了降级路径（LLM 失败 → 关键词/模板兜底），便于排查"对话僵硬"。
     fallback_reason: str | None = None
+    # 与 SSE /agent/stream 一致的透明度摘要，同步 /chat 路径直接透传。
+    trace_summary: dict[str, Any] = Field(default_factory=dict)
     _compound_cards: list[dict[str, Any]] = PrivateAttr(default_factory=list)
 
 
 class IngestRequest(BaseModel):
-    url: str
+    url: str = Field(max_length=2048)
     force_refresh: bool = False
 
 

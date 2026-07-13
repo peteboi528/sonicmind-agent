@@ -235,6 +235,64 @@
 
 ---
 
+## P6 — 安全加固（凭证加密 / 提示注入 / 限流）✅ 已完成 2026-07-03
+
+承接专家评审报告（`docs/SONICMIND_专家分析报告.md` §5.2）点名的三大攻击面。三块独立交付、各自可回滚，全程在 947→966 测试安全网内进行，**零外部新依赖**。
+
+### 6.1 凭证静态加密
+- 新建 `app/security/secret_box.py`：Fernet 懒加载 + 统一 `{_encrypted, blob}` 格式 + 幂等迁移（明文→加密 + 0600 + `.bak.plaintext`）。`SECRET_STORE_KEY` 空=降级明文（向后兼容）；未配置时 dev 兜底生成 `data/.secret_key`（已 gitignore，启动告警）。
+- `app/netease_auth.py`：save 加密落盘、load 解密 + 兼容旧明文格式。
+- `app/api/web_routes.py`：`_load_netease_cookie` 统一走 `load_cookie`（**消除「写入加密、此处读回明文」二读漂移**——专家报告与 Explore 双重确认的隐患）。
+- `app/api/main.py` lifespan：启动时自动迁移存量明文 cookie（实测历史文件 0644 全机可读，比代码以为的 0600 更糟）。
+- `app/tools/checkpoint_serde.py`：`_SECRET_KEYS` 补 `music_u`/`verification_token`/`user_api_keys`/`app_secret`/`encrypt_key`。
+- `tests/test_secret_box.py`（7 测试）：往返 / 降级 / 迁移+0600+.bak+幂等 / save→load / 兼容旧格式。
+
+### 6.2 提示注入边界
+- 新建 `app/prompts/untrusted_boundary.py`：`wrap_untrusted`（定界 `<<<UNTRUSTED_BEGIN:label>>>...<<<UNTRUSTED_END>>>`）+ `strip_directive_phrases`（剔除中英注入话术，降权非硬拒）+ `UNTRUSTED_CONTENT_RULE` 常量。
+- `app/prompts/agent_system.py`：AGENT_SYSTEM_PROMPT 末尾追加「外部资料处理规约」段。
+- 4 个合成 system prompt 加规约：knowledge `_synthesize_dossier_prose`、main `_localize_artist_bio`、web_knowledge `_PARAMETRIC_SYSTEM`、nodes `_artist_info_prompt` 规则段。
+- 8 拼接点调 wrap（高危 strip+wrap）：dossier evidence_block、artist_bio source、artist_info search_context、OCR raw_text；中危 wrap：3 个 intro/discuss/video prompt、`_PARAMETRIC` entity。
+- `tests/test_prompt_injection.py`（6 测试）：helper 单元 + OCR/entity/search 拼接点的注入剔除与定界。
+
+### 6.3 限流与滥用防护
+- 新建 `app/rate_limit.py`：TokenBucket（`time.monotonic` 懒 refill + `threading.Lock`）+ RateLimiter（chat/playback 分档 + LRU 上限防泄漏），对齐 `concurrency.py` 自研风格。
+- `app/api/main.py`：`_enforce_rate_limit` 中间件（注册在 `_enforce_api_key` 后 = 更内层，key=`auth_user_id or ip:`，body user_id 不进 key 防伪造）。
+- `app/api/web_routes.py`：playback_audio 改 `_effective_user_id`（堵借他人 user_id 读他人 VIP cookie）。
+- `app/config.py`：`rate_limit_enabled`(默认 false，与 AUTH_ENABLED 同款哲学) / `chat_rpm`(30) / `playback_rpm`(60)。
+- `tests/test_rate_limit.py`（6 测试）：桶单元 + 中间件 429+Retry-After / 分档独立 / disabled。
+
+### 验收
+ruff 全绿；pytest **947 → 966**（+19：7 secret_box / 6 rate_limit / 6 injection）；零外部新依赖；三块均可独立开关回滚（`SECRET_STORE_KEY` 空 / `RATE_LIMIT_ENABLED` false / wrap 纯字符串无副作用）。
+
+### 不做（留 P7+）
+- AUTH_ENABLED=false 时的 cookie 绑定机制（无身份锚，需独立鉴权设计）。
+- `exc_info=True` 日志间接暴露面（P10 结构化日志统一处理）。
+- nodes.py / knowledge.py 拆分（P7 上帝模块二次拆分）。
+
+---
+
+## 阶段 0（QW + P6 收尾）✅ 已完成 2026-07-03
+
+承接 `docs/SONICMIND_优化方案.md` 的 QW 快速修复清单与 P6 剩余缺口，改动小、当天交付。
+
+### QW5：同步 `/chat` 透传 `trace_summary`
+- `app/models.py`：`AgentAnswer` 新增可选字段 `trace_summary: dict[str, Any]`。
+- `app/agent.py`：`_graph_unavailable_answer` 补空 `trace_summary`，避免降级路径缺字段。
+- 效果：同步 `/chat` 与 `/agent/run` 直接返回与 SSE `/agent/stream` 一致的透明度摘要（`intent`/`tools`/`sources`/`fallback` 等），无需改动 graph finalize 逻辑——`AgentAnswer.model_validate(final.payload)` 自动承接。
+
+### P6.3 收尾：播放代理用户一致性绑定
+- `app/api/main.py`：`_effective_user_id` 新增 `bind_in_anonymous_mode` 参数；当未鉴权且 `AUTH_ENABLED=false` 时，固定返回 `"web_user"`，**不信任客户端 body 里的 `user_id`**，堵住"我知道你的 user_id 就能加载你的 VIP cookie"的显式伪造。
+- `app/api/web_routes.py`：`playback_audio` 调用 `_effective_user_id(..., bind_in_anonymous_mode=True)`。
+- 测试：
+  - `tests/test_api_auth.py::test_playback_user_id_bound_to_auth_user`：鉴权模式下 body `user_id` 被 API key 绑定用户覆盖。
+  - `tests/test_web_routes.py::test_playback_audio_anonymous_ignores_body_user_id`：匿名模式下 body `user_id` 被忽略，固定使用 `"web_user"`。
+
+### 验收
+- `ruff check .` 全绿。
+- `pytest -q`：**968 passed, 2 skipped**（+2：1 auth binding + 1 anonymous binding）。
+- 同步 `/chat` 响应含非空 `trace_summary`。
+- 注：`python -m tests.eval.regress` 中 `multi_intent_recommend_plus_deep_dive` 在 offline/mock 源下未命中，经验证与本次改动无关（offline patch 的 `fake_search_web_music` 过滤后仅返回 1 个候选，触发提前 shortfall；未 offline patch 时通过）。待 P7/P11 统一刷新 eval baseline。
+
 ## Definition of Done（整体）
 
 - [x] `pytest -q` 离线、确定、0 failed、5 连一致。 *(P0)*

@@ -47,11 +47,13 @@ def _default_store_root() -> Path:
 
 class Settings:
     def __init__(self) -> None:
-        self.llm_base_url: str = os.getenv("LLM_BASE_URL", "http://localhost:11434/v1")
+        self.llm_base_url: str = _env_str("LLM_BASE_URL", "http://localhost:11434/v1")
+        # llm_api_key 故意用裸 os.getenv：空 key 是「mock mode」的既定语义（见 mock_mode
+        # 属性），不回退默认值。其余 base_url/model 字段空串必为误配 → _env_str 回退默认。
         self.llm_api_key: str = os.getenv("LLM_API_KEY", "")
-        self.llm_model: str = os.getenv("LLM_MODEL", "qwen2.5")
-        self.llm_fast_model: str = os.getenv("LLM_FAST_MODEL", self.llm_model)
-        self.llm_strong_model: str = os.getenv("LLM_STRONG_MODEL", self.llm_model)
+        self.llm_model: str = _env_str("LLM_MODEL", "qwen2.5")
+        self.llm_fast_model: str = _env_str("LLM_FAST_MODEL", self.llm_model)
+        self.llm_strong_model: str = _env_str("LLM_STRONG_MODEL", self.llm_model)
         self.llm_timeout_seconds: float = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
         # 连接超时（建连阶段）：连接类卡死应快速失败，别等满 llm_timeout_seconds。
         self.llm_connect_timeout: float = float(os.getenv("LLM_CONNECT_TIMEOUT", "8"))
@@ -161,6 +163,11 @@ class Settings:
         # refine/recovery 回环，由 finalize 的 shortfall 兜底诚实说明（治"超时卡死"）。
         # knowledge 路径走自己的 knowledge_turn_budget_seconds（36s），不在此列。
         self.turn_budget_seconds: float = float(os.getenv("TURN_BUDGET_SECONDS", "15"))
+        # 为最终回答保留时间：普通工具/规划只能使用总预算减去这段余量，避免候选已拿到
+        # 却因最后一次 LLM 生成被前序工具耗尽预算而无响应。
+        self.turn_finalize_reserve_seconds: float = max(
+            0.0, float(os.getenv("TURN_FINALIZE_RESERVE_SECONDS", "2"))
+        )
         # P4v2：在真正耗尽 turn budget 之前，先按剩余预算做渐进降级：
         # soft = 关 search_variants / 禁用 LLM recovery；hard = recovery 直接切本地。
         self.turn_budget_soft_degrade_seconds: float = float(os.getenv("TURN_BUDGET_SOFT_DEGRADE_SECONDS", "6"))
@@ -212,9 +219,9 @@ class Settings:
         # 再读不出文字则提示用户直接输入专辑名/歌手。
         # 端点：国内 https://dashscope.aliyuncs.com/compatible-mode/v1；
         #       国际 https://dashscope-intl.aliyuncs.com/compatible-mode/v1。
-        self.vision_llm_base_url: str = os.getenv("VISION_LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.vision_llm_base_url: str = _env_str("VISION_LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.vision_llm_api_key: str = os.getenv("VISION_LLM_API_KEY", "")
-        self.vision_llm_model: str = os.getenv("VISION_LLM_MODEL", "qwen-vl-max-latest")
+        self.vision_llm_model: str = _env_str("VISION_LLM_MODEL", "qwen-vl-max-latest")
         self.vision_llm_timeout_seconds: float = float(os.getenv("VISION_LLM_TIMEOUT_SECONDS", "20"))
         self.vision_llm_connect_timeout: float = float(os.getenv("VISION_LLM_CONNECT_TIMEOUT", "8"))
         self.vision_llm_max_tokens: int = int(os.getenv("VISION_LLM_MAX_TOKENS", "512"))
@@ -258,6 +265,34 @@ class Settings:
         self.auth_enabled: bool = os.getenv("AUTH_ENABLED", "false").lower() == "true"
         self.api_key: str = os.getenv("API_KEY", "")
         self.user_api_keys: dict[str, str] = _parse_user_api_keys(os.getenv("USER_API_KEYS", ""))
+        # 凭证静态加密密钥（Fernet base64）。空串=禁用，降级明文（向后兼容旧文件）；
+        # 未配置时本地 demo 会自动生成 dev 兜底密钥（见 app/security/secret_box.py）。
+        self.secret_store_key: str = os.getenv("SECRET_STORE_KEY", "")
+
+        # ---- 限流（滥用防护）----
+        # rate_limit_enabled=false（默认）：本地 demo / 测试零拦截，与 AUTH_ENABLED 同款哲学。
+        # 部署时显式 true：按 user_id|IP 分档限流（聊天 chat_rpm / 播放代理 playback_rpm）。
+        self.rate_limit_enabled: bool = os.getenv("RATE_LIMIT_ENABLED", "false").lower() == "true"
+        self.chat_rpm: int = int(os.getenv("CHAT_RPM", "30"))
+        self.playback_rpm: int = int(os.getenv("PLAYBACK_RPM", "60"))
+        # 并发线程池上限（run_parallel 共享有界池）。旧实现每次调用新建 len(tasks) 个线程、
+        # 超时后 shutdown(wait=False) 仅返回而阻塞中的线程无法取消，长跑会积压。改为进程级
+        # 共享有界池后总量封顶于此值；饱和时溢出任务改调用方内联执行（防嵌套死锁）。
+        # 默认 64：本代码库嵌套广度（变体×端点≈12、阶段×端点≈20）给 3–5× 余量。
+        self.concurrency_max_workers: int = int(os.getenv("CONCURRENCY_MAX_WORKERS", "64"))
+
+        # ---- 入库 URL 治理（Issue 5）----
+        # ALLOW_ANY_URL=true（默认）：本机自用便利，接受任意 http/https 公网 URL。
+        #   注意：scheme 限定 + SSRF/私网阻断「常开」，与此开关无关——即便 true 也挡 127.0.0.1 等。
+        # false：仅允许 INGEST_ALLOWED_HOSTS 内站点（公网/局域网部署收紧入口）。
+        self.allow_any_url: bool = os.getenv("ALLOW_ANY_URL", "true").lower() == "true"
+        self.ingest_allowed_hosts: list[str] = _csv_env(
+            "INGEST_ALLOWED_HOSTS", "youtube.com,youtu.be,163.com,163cn.tv,bilibili.com"
+        )
+        self.ingest_rpm: int = int(os.getenv("INGEST_RPM", "10"))
+        self.ingest_title_timeout: int = int(os.getenv("INGEST_TITLE_TIMEOUT", "15"))
+        # 入库数量上限（0 = 不限）。>0 时 ingest 前校验，超限 507。防资产文件无限增长。
+        self.max_assets: int = int(os.getenv("MAX_ASSETS", "0"))
 
     def user_id_for_api_key(self, api_key: str | None) -> str | None:
         """Return the bound user_id for a per-user API key, or None for shared-key auth."""
@@ -279,6 +314,18 @@ def _csv_env(name: str, default: str) -> list[str]:
     raw = os.getenv(name, default)
     values = [item.strip() for item in raw.split(",") if item.strip()]
     return values or [default]
+
+
+def _env_str(name: str, default: str) -> str:
+    """os.getenv that treats empty/whitespace string as unset → falls back to default.
+
+    裸 os.getenv(NAME, default) 在 env 存在但为 "" 时返回 ""，静默压掉默认值（典型场景：
+    GitHub 工作流里 ${{ secrets.X }} 在 Secret 未配时求值为 ""）。对有实质默认值且空串必为
+    误配的字段（LLM 端点/模型），空串 → 默认值。与 STORE_ROOT/MEDIA_ROOT 的 strip+回退
+    惯例一致。注意：空串有语义的字段（如 llm_api_key 空=mock mode）不要用此助手。
+    """
+    val = os.getenv(name, "").strip()
+    return val if val else default
 
 
 def _bool_env(name: str, default: bool) -> bool:

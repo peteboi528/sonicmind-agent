@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +21,8 @@ from app.llm.observability import empty_runtime_metrics, format_runtime_metrics,
 from app.llm.routing import select_llm
 from app.models import AgentAnswer, StreamEvent
 from app.prompts import COMPOUND_SYNTH_SYSTEM, COMPOUND_SYNTH_USER, COMPOUND_SYNTH_VERSION
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from app.agent import AudioVisualAgent
@@ -148,8 +151,18 @@ class AgentGraphRunner:
                     yield chunk
                 elif isinstance(chunk, dict):
                     yield StreamEvent.model_validate(chunk)
-        except Exception as exc:  # noqa: BLE001
-            yield StreamEvent(type="error", content=f"处理出错：{exc}")
+        except Exception:  # noqa: BLE001
+            logger.exception("LangGraph stream execution failed")
+            trace = ["[graph_error] 本轮图执行失败，已输出保守兜底回答。"]
+            answer = AgentAnswer(
+                answer="这轮处理时遇到临时问题，我没有生成未经核实的音乐结果。请稍后重试，或换一个更具体的描述。",
+                evidences=[],
+                agent_trace=trace,
+                fallback_reason="graph_execution_failed",
+                trace_summary={"intent": "unknown", "tools": [], "sources": [], "fallback": "graph_execution_failed"},
+            )
+            yield StreamEvent(type="error", content="处理暂时失败，已返回保守结果。")
+            yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))
 
     async def _astream_compound(
         self,

@@ -109,3 +109,33 @@ def test_async_runtime_times_out_sync_handler_without_retry():
     assert result.status == ToolStatus.ERROR
     assert result.error and result.error.kind == "timeout"
     assert "timed out" in result.error.message
+
+
+def test_runtime_deadline_caps_tool_timeout():
+    """请求级 deadline 比 tool spec 更短时，必须优先按剩余时间中止。"""
+    spec = TOOL_REGISTRY["recommend"]
+    original_handler = spec.handler
+    original_timeout = spec.timeout_seconds
+
+    def slow_handler(_arguments, _context):
+        time.sleep(0.2)
+        return ToolResult(tool="recommend", status=ToolStatus.OK)
+
+    spec.handler = slow_handler
+    spec.timeout_seconds = 1.0
+    async def execute():
+        started = time.monotonic()
+        result = await ToolRuntime().execute(
+            ToolCall(name="recommend", arguments={"query": "test", "top_k": 5}),
+            _context().model_copy(update={"deadline_at": started + 0.03}),
+        )
+        return result, time.monotonic() - started
+
+    try:
+        result, elapsed = asyncio.run(execute())
+    finally:
+        spec.handler = original_handler
+        spec.timeout_seconds = original_timeout
+    assert elapsed < 0.12
+    assert result.status == ToolStatus.ERROR
+    assert result.error and result.error.kind == "timeout"

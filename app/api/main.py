@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -51,6 +52,8 @@ from app.models import (
     TasteExperimentRequest,
     TrendingRequest,
 )
+from app.rate_limit import RateLimiter
+from app.security.ingest_guard import IngestURLError, validate_ingest_url
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +64,15 @@ async def _lifespan(_app: FastAPI):
 
     checkpoint_store.cleanup()
     trace_store.cleanup()
+    # 启动时把存量明文 cookie 迁移为加密格式（幂等；无明文/未启用加密则空操作）。
+    try:
+        from app.security import secret_box
+
+        migrated = secret_box.migrate_plaintext_cookies(settings.store_root).get("migrated", 0)
+        if migrated:
+            logger.info("启动迁移：%d 个明文 cookie 文件已加密重写", migrated)
+    except Exception:
+        logger.debug("启动 cookie 迁移失败", exc_info=True)
     if settings.agent_checkpoints and agent.graph is not None:
         await agent.graph.initialize_checkpointing(settings.agent_checkpoint_path)
     try:
@@ -75,6 +87,11 @@ async def _lifespan(_app: FastAPI):
         await source_transport.close()
         await close_shared_async_client()
         await tool_runtime.close()
+        # 共享有界线程池：cancel 未启动任务后立即返回（已在阻塞 syscall 的 worker 仍会跑到
+        # 自身 socket 超时才退出，Python 无法强取消已开始线程）。
+        from app.concurrency import shutdown_shared_executor
+
+        shutdown_shared_executor()
 
 app = FastAPI(
     title="智能影音推荐助手 API",
@@ -90,6 +107,49 @@ app.add_middleware(
 )
 
 
+# 分档限流器（模块级单例，桶状态跨请求保持）。配置在 import 时读取；运行时改 settings
+# 需 monkeypatch 此单例（见 tests/test_rate_limit.py）。
+_rate_limiter = RateLimiter({
+    "chat": settings.chat_rpm,
+    "playback": settings.playback_rpm,
+    "ingest": settings.ingest_rpm,
+})
+
+
+@app.middleware("http")
+async def _enforce_rate_limit(request, call_next):
+    """分档限流（RATE_LIMIT_ENABLED=true 时生效）。
+
+    按 user_id|IP 维度对聊天 / 播放代理端点限流，超限 429 + Retry-After。
+    本中间件先注册、由随后注册的鉴权中间件包在外层，因此 keying 优先使用
+    鉴权绑定的 user_id；未鉴权时退回按 IP 限流。
+    body 里的 user_id 不进 key（客户端可伪造，playback 漏洞正是它）。
+    """
+    if settings.rate_limit_enabled:
+        path = request.url.path
+        if path.startswith(("/chat", "/agent/run", "/agent/stream")):
+            tier = "chat"
+        elif path.startswith("/api/playback/"):
+            tier = "playback"
+        elif path.startswith("/assets/ingest"):
+            tier = "ingest"
+        else:
+            tier = None
+        if tier:
+            uid = getattr(request.state, "auth_user_id", None)
+            client_host = request.client.host if request.client else "unknown"
+            key = uid or f"ip:{client_host}"
+            ok, retry = _rate_limiter.acquire(tier, key)
+            if not ok:
+                wait = int(retry) + 1
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "rate limited", "retry_after": wait},
+                    headers={"Retry-After": str(wait)},
+                )
+    return await call_next(request)
+
+
 @app.middleware("http")
 async def _enforce_api_key(request, call_next):
     """API 鉴权门禁（AUTH_ENABLED=true 时生效）。
@@ -101,14 +161,17 @@ async def _enforce_api_key(request, call_next):
     """
     if settings.auth_enabled:
         path = request.url.path.rstrip("/")
-        if path not in {"", "/health", "/docs", "/openapi.json", "/redoc"}:
+        # 仅放行前端入口和静态资源；不能用 /web 前缀，否则 /webhook/* 也会被放行。
+        public_paths = {"", "/health", "/docs", "/openapi.json", "/redoc", "/web"}
+        is_public = path in public_paths or path.startswith("/web/assets/")
+        if not is_public:
             api_key = request.headers.get("X-API-Key")
             bound_user_id = settings.user_id_for_api_key(api_key)
             if settings.user_api_keys:
                 if not bound_user_id:
                     return JSONResponse(status_code=401, content={"detail": "invalid or missing X-API-Key"})
                 request.state.auth_user_id = bound_user_id
-            elif api_key != settings.api_key:
+            elif not hmac.compare_digest(api_key or "", settings.api_key):
                 return JSONResponse(status_code=401, content={"detail": "invalid or missing X-API-Key"})
     return await call_next(request)
 
@@ -123,9 +186,25 @@ profile_service = UserProfileService(agent.store, agent.memory)
 history_service = HistoryService(agent.store)
 
 
-def _effective_user_id(request: Request, provided_user_id: str | None) -> str:
+def _effective_user_id(
+    request: Request,
+    provided_user_id: str | None,
+    *,
+    bind_in_anonymous_mode: bool = False,
+) -> str:
+    """解析请求应归属的用户 ID。
+
+    优先使用 API key 绑定的 auth_user_id（多租户/鉴权模式）；未鉴权时退回 body
+    里的 provided_user_id。对于播放代理等涉及真实付费凭证的端点，可设置
+    ``bind_in_anonymous_mode=True``：在匿名模式（AUTH_ENABLED=false）下不信任
+    客户端传入的 user_id，统一固定为 ``web_user``，防止显式借用他人 VIP cookie。
+    """
     auth_user_id = getattr(request.state, "auth_user_id", None)
-    return auth_user_id or (provided_user_id or "web_user")
+    if auth_user_id:
+        return auth_user_id
+    if bind_in_anonymous_mode and not settings.auth_enabled:
+        return "web_user"
+    return provided_user_id or "web_user"
 
 
 def _frontend_build_hash() -> str:
@@ -241,15 +320,18 @@ async def _localize_artist_bio(artist: str, bio: str, tags: list[str], fallback_
         return _best_bio_fallback(cleaned, fallback_bio)
 
     tag_text = "、".join(tags[:5])
+    from app.prompts.untrusted_boundary import UNTRUSTED_CONTENT_RULE
     system = (
         "你是严谨的音乐资料编辑。只基于给定资料改写，不补充额外事实。"
-        "把英文资料整理成自然、完整的中文歌手介绍。"
+        "把英文资料整理成自然、完整的中文歌手介绍。" + UNTRUSTED_CONTENT_RULE
     )
     async def _rewrite(source: str, timeout: float) -> str:
+        from app.prompts.untrusted_boundary import strip_directive_phrases, wrap_untrusted
+        safe_source = wrap_untrusted(strip_directive_phrases(source), "歌手资料")
         prompt = (
             f"歌手：{artist}\n"
             f"标签：{tag_text or '无'}\n\n"
-            f"资料：{source}\n\n"
+            f"资料：{safe_source}\n\n"
             "请输出 320-700 字中文简介，优先交代身份背景、创作/制作特点、风格线索、代表阶段或影响力。"
             "若资料涉及多个阶段，尽量覆盖从早期出道到后续代表阶段的变化。"
             "行文要像资料卡，不要只写两三句概述；重点艺人可适当写得更完整。"
@@ -339,8 +421,24 @@ def list_assets():
     return {"assets": [a.model_dump(mode="json") for a in agent.list_assets()]}
 
 
+def _check_ingest_allowed(url: str) -> None:
+    """入库前的统一治理闸：URL 校验 + 数量上限。失败 raise HTTPException（400/507）。"""
+    try:
+        validate_ingest_url(url)
+    except IngestURLError as exc:
+        raise HTTPException(status_code=400, detail=f"invalid or disallowed ingest url: {exc}") from exc
+    if settings.max_assets > 0:
+        try:
+            current = len(agent.list_assets())
+        except Exception:
+            current = 0
+        if current >= settings.max_assets:
+            raise HTTPException(status_code=507, detail="asset library size limit reached")
+
+
 @app.post("/assets/ingest")
 def ingest(request: IngestRequest):
+    _check_ingest_allowed(request.url)
     asset = agent.ingest_video(request.url, force_refresh=request.force_refresh)
     return asset
 
@@ -353,6 +451,7 @@ def ingest_full(request: IngestRequest):
     导致入库的音视频停在占位标题、未识别——本端点修复该回归）。
     enrich 失败不阻断（标题至少有 URL 解析的结果），analyze 仍会执行。
     """
+    _check_ingest_allowed(request.url)
     asset = agent.ingest_video(request.url, force_refresh=request.force_refresh)
     try:
         enriched = agent.enrich_asset(asset.asset_id, use_network=True)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from pathlib import Path
 
 from app.models import Asset, DislikeRequest, ExternalTrack, ResourceTrack, utc_now_iso
@@ -21,14 +22,17 @@ class ResourceLibrary:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
         self._writes_since_prune = 0
+        self._write_lock = threading.RLock()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=5.0)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tracks (
@@ -107,54 +111,71 @@ class ResourceLibrary:
         # 成本（语义层判定仍只在推荐出口 classify_candidate 跑）。规则与推荐出口同源（hygiene）。
         if is_structural_reject(track):
             return
-        self.upsert_track(
-            ResourceTrack(
-                title=track.title,
-                artist=track.artist,
-                source=track.source,
-                source_id=track.external_id,
-                genre=track.genre,
-                mood=track.mood,
-                playback_url=track.playback_url,
-                verified=track.source in {"netease", "bilibili", "youtube"},
-            )
+        self.upsert_tracks([self._resource_track_from_external(track)])
+
+    @staticmethod
+    def _resource_track_from_external(track: ExternalTrack) -> ResourceTrack:
+        return ResourceTrack(
+            title=track.title,
+            artist=track.artist,
+            source=track.source,
+            source_id=track.external_id,
+            genre=track.genre,
+            mood=track.mood,
+            playback_url=track.playback_url,
+            verified=track.source in {"netease", "bilibili", "youtube"},
         )
 
+    def upsert_externals(self, tracks: list[ExternalTrack]) -> None:
+        """批量写入已通过候选池质量闸门的外部曲目。"""
+        accepted = [
+            self._resource_track_from_external(track)
+            for track in tracks
+            if "fallback" not in (track.source or "").lower()
+            and (track.source or "").lower() not in {"mock", "llm"}
+            and not is_structural_reject(track)
+        ]
+        self.upsert_tracks(accepted)
+
     def upsert_track(self, track: ResourceTrack) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                """
-                INSERT INTO tracks(title, artist, source, source_id, genre, mood, playback_url, verified, last_seen, exposure_count)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source, source_id, title, artist) DO UPDATE SET
-                    genre=excluded.genre,
-                    mood=excluded.mood,
-                    playback_url=excluded.playback_url,
-                    verified=excluded.verified,
-                    last_seen=excluded.last_seen,
-                    -- genre/mood 进了 embedding 文本，变了就需重算，标 dirty。
-                    embed_dirty = CASE
-                        WHEN excluded.genre IS NOT tracks.genre OR excluded.mood IS NOT tracks.mood
-                        THEN 1 ELSE tracks.embed_dirty END
-                """,
-                (
-                    track.title,
-                    track.artist,
-                    track.source,
-                    track.source_id,
-                    "|".join(track.genre),
-                    "|".join(track.mood),
-                    track.playback_url,
-                    1 if track.verified else 0,
-                    utc_now_iso(),
-                    track.exposure_count,
-                ),
+        self.upsert_tracks([track])
+
+    def upsert_tracks(self, tracks: list[ResourceTrack]) -> None:
+        """在单个事务中写入候选，避免并行搜索为每首歌竞争 SQLite 写锁。"""
+        if not tracks:
+            return
+        rows = [
+            (
+                track.title, track.artist, track.source, track.source_id,
+                "|".join(track.genre), "|".join(track.mood), track.playback_url,
+                1 if track.verified else 0, utc_now_iso(), track.exposure_count,
             )
-        # 周期性裁剪（每 50 次写检查一次，摊销开销），把无界增长封顶。
-        self._writes_since_prune += 1
-        if self._writes_since_prune >= 50:
-            self._writes_since_prune = 0
-            self.prune()
+            for track in tracks
+        ]
+        with self._write_lock:
+            with self._connect() as conn:
+                conn.executemany(
+                    """
+                    INSERT INTO tracks(title, artist, source, source_id, genre, mood, playback_url, verified, last_seen, exposure_count)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(source, source_id, title, artist) DO UPDATE SET
+                        genre=excluded.genre,
+                        mood=excluded.mood,
+                        playback_url=excluded.playback_url,
+                        verified=excluded.verified,
+                        last_seen=excluded.last_seen,
+                        -- genre/mood 进了 embedding 文本，变了就需重算，标 dirty。
+                        embed_dirty = CASE
+                            WHEN excluded.genre IS NOT tracks.genre OR excluded.mood IS NOT tracks.mood
+                            THEN 1 ELSE tracks.embed_dirty END
+                    """,
+                    rows,
+                )
+            # 周期性裁剪按写入批次计数；锁内更新以避免并发请求丢失计数。
+            self._writes_since_prune += len(rows)
+            if self._writes_since_prune >= 50:
+                self._writes_since_prune = 0
+                self.prune()
 
     def prune(self) -> int:
         """池子超上限时淘汰最旧的、未被曝光过的外部候选，返回删除行数。
@@ -162,23 +183,24 @@ class ResourceLibrary:
         保护 source='local'（用户真实导入库）和 exposure_count>0（曾被推荐过、
         有价值）的行；只淘汰"搜来但从没用上"的外部候选，按 last_seen 最旧优先。
         """
-        with self._connect() as conn:
-            total = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
-            if total <= self.max_tracks:
-                return 0
-            overflow = total - self.max_tracks
-            cursor = conn.execute(
-                """
-                DELETE FROM tracks WHERE id IN (
-                    SELECT id FROM tracks
-                    WHERE source != 'local' AND exposure_count = 0
-                    ORDER BY last_seen ASC
-                    LIMIT ?
+        with self._write_lock:
+            with self._connect() as conn:
+                total = conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
+                if total <= self.max_tracks:
+                    return 0
+                overflow = total - self.max_tracks
+                cursor = conn.execute(
+                    """
+                    DELETE FROM tracks WHERE id IN (
+                        SELECT id FROM tracks
+                        WHERE source != 'local' AND exposure_count = 0
+                        ORDER BY last_seen ASC
+                        LIMIT ?
+                    )
+                    """,
+                    (overflow,),
                 )
-                """,
-                (overflow,),
-            )
-            return cursor.rowcount
+                return cursor.rowcount
 
     def purge_fallback_sources(self) -> int:
         """一次性清理：删除历史遗留的 fallback/mock/llm 假候选。

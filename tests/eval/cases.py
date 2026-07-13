@@ -29,6 +29,9 @@ class EvalCase:
     expected_intent: str | None = None
     # 若设置，则要求最终推荐里 local 来源占比不得超过该值。
     max_local_ratio: float | None = None
+    # 标记该 case 的正确分类/回答依赖真实 LLM 语义理解（mock 关键词分类器搞不定）。
+    # 离线 mock 回归会跳过它（不跑、不计入 aggregate）；需在真实 LLM 环境手动验证。
+    requires_llm: bool = False
 
 
 EVAL_CASES: list[EvalCase] = [
@@ -263,7 +266,7 @@ EVAL_CASES: list[EvalCase] = [
     ),
     EvalCase(
         case_id="multi_intent_recommend_plus_deep_dive",
-        description="双意图并行：一句话既要推荐又要讲解艺人（需 ENABLE_MULTI_INTENT=true）",
+        description="双意图并行：一句话既要推荐又要讲解艺人（需 ENABLE_MULTI_INTENT=true + 真实 LLM）",
         user_id="eval_multi_intent_user",
         query="推几首 The Weeknd，顺便讲讲他的风格",
         criteria=[
@@ -273,6 +276,9 @@ EVAL_CASES: list[EvalCase] = [
         ],
         must_mention=["The Weeknd"],
         must_not_mention=["LLM 请求失败", "无法识别"],
+        # mock 关键词分类器把"讲讲…风格"判成 artist_info，multi-intent 不触发——
+        # 这条只有真实 LLM 才能正确切成 recommend+knowledge，故离线 mock 跳过。
+        requires_llm=True,
     ),
 ]
 

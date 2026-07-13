@@ -15,10 +15,18 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
 import time
 from pathlib import Path
+
+# --offline 必须在 app.config 导入前配置 env：settings 是构造一次的单例，后设 env 不生效。
+# offline_fakes 模块级无 app 导入，可安全前置导入。
+if "--offline" in sys.argv:
+    from tests.offline_fakes import configure_offline_env
+
+    configure_offline_env(keep_llm=True)  # 伪造音乐源，保留真实 LLM key
 
 from app.agent import AudioVisualAgent
 from app.config import settings
@@ -60,7 +68,7 @@ def _setup_agent(case, agent: AudioVisualAgent) -> None:
             agent.rate_asset(case.user_id, action["asset_id"], action["score"])
 
 
-def run_eval(case_id: str | None = None, store_root: str = "/tmp/musicagent_eval") -> list[JudgeScore]:
+def run_eval(case_id: str | None = None, store_root: str = "/tmp/musicagent_eval") -> dict:
     if settings.mock_mode:
         print("⚠️  当前是 mock mode，eval 没有实际意义。请设置 LLM_API_KEY 后再跑。")
         sys.exit(1)
@@ -80,6 +88,7 @@ def run_eval(case_id: str | None = None, store_root: str = "/tmp/musicagent_eval
     judge = LLMJudge(judge_llm)
 
     scores: list[JudgeScore] = []
+    case_reports: list[dict] = []
     for i, case in enumerate(cases, 1):
         # 每个 case 用独立 store 避免相互污染
         case_store = Path(store_root) / case.case_id
@@ -100,6 +109,17 @@ def run_eval(case_id: str | None = None, store_root: str = "/tmp/musicagent_eval
 
         score = judge.evaluate(case, answer.answer)
         scores.append(score)
+        case_reports.append({
+            "case_id": case.case_id,
+            "latency_seconds": round(latency, 3),
+            "has_final_answer": bool(answer.answer.strip()),
+            "overall": score.overall,
+            "passed": score.passed,
+            "mention_hit": score.mention_hit,
+            "mention_miss": score.mention_miss,
+            "per_criterion": score.per_criterion,
+            "rationale": score.rationale,
+        })
         status = "✅" if score.passed else "❌"
         print(f"  {status} overall={score.overall:.2f}  mention_hit={score.mention_hit}  violations={score.mention_miss}")
         if score.rationale:
@@ -111,15 +131,68 @@ def run_eval(case_id: str | None = None, store_root: str = "/tmp/musicagent_eval
     passed = sum(1 for s in scores if s.passed)
     print(f"  平均分: {avg:.2f}/5.0")
     print(f"  通过率: {passed}/{len(scores)}")
-    return scores
+    passed = sum(item["passed"] for item in case_reports)
+    violations = sum(item["mention_miss"] for item in case_reports)
+    valid_finals = sum(item["has_final_answer"] for item in case_reports)
+    return {
+        "model": settings.llm_model,
+        "judge_model": judge_model,
+        "cases": case_reports,
+        "summary": {
+            "total_cases": len(case_reports),
+            "passed_cases": passed,
+            "pass_rate": round(passed / len(case_reports), 4) if case_reports else 0.0,
+            "hard_violations": violations,
+            "valid_final_answers": valid_finals,
+        },
+    }
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--case", help="只跑某个 case_id")
     parser.add_argument("--store", default="/tmp/musicagent_eval", help="临时 store 根目录")
+    parser.add_argument("--json-output", help="将机器可读评估报告写入该路径")
+    parser.add_argument("--min-pass-rate", type=float, default=0.8, help="通过率门槛，默认 0.8")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="离线门禁：伪造音乐源（固定候选）+ 真实 LLM/Judge，确定性、无平台噪声",
+    )
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="只报告、不按通过率失败（在线冒烟用，永不阻塞 CI）",
+    )
     args = parser.parse_args()
-    run_eval(case_id=args.case, store_root=args.store)
+    stack = None
+    if args.offline:
+        from tests.offline_fakes import start_offline_patches
+
+        stack = start_offline_patches()
+    try:
+        report = run_eval(case_id=args.case, store_root=args.store)
+    finally:
+        if stack is not None:
+            stack.close()
+    if args.json_output:
+        output = Path(args.json_output)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    summary = report["summary"]
+    ok = (
+        summary["total_cases"] > 0
+        and summary["valid_final_answers"] == summary["total_cases"]
+        and summary["hard_violations"] == 0
+        and summary["pass_rate"] >= args.min_pass_rate
+    )
+    if args.offline:
+        print("\n[offline] 离线门禁：候选来自假源（固定夹具），无真实平台访问。")
+    if not ok:
+        if args.report_only:
+            print("\n⚠️  未达标，但 --report-only：仅报告，不失败 CI。")
+            return
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

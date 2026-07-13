@@ -31,7 +31,7 @@ jobs:
         run: ruff check .
 
       - name: Test with coverage
-        run: pytest -q --cov=app --cov-report=term-missing --cov-fail-under=60
+        run: pytest -q --cov=app --cov-report=term-missing --cov-fail-under=75
 
       - name: Long dialogue smoke
         run: python scripts/long_dialogue_smoke.py

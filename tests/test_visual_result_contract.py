@@ -7,6 +7,7 @@ from app.answer import collect_tracks as _collect_track_candidates
 from app.graph.nodes import (
     _drop_tracks_from_results,
     _finalize_fallback,
+    _record_runtime_result,
     _run_tool_async,
     _select_listed_tracks,
     _trace_summary,
@@ -21,7 +22,7 @@ from app.models import (
     SearchResponse,
     StreamEvent,
 )
-from app.tools.contracts import ToolCall
+from app.tools.contracts import ToolCall, ToolResult, ToolStatus
 
 
 def _track(index: int, source: str = "netease") -> ExternalTrack:
@@ -218,9 +219,64 @@ def test_finalize_fallback_preserves_previously_streamed_cards():
         "context": {},
     }
 
-    finalized = _finalize_fallback(state, RuntimeError("boom"))
+    finalized = _finalize_fallback(state)
     event = finalized["events"][-1]
 
     assert event.type == "final"
     assert event.payload["cards"] == [card]
     assert event.payload["trace_summary"]["final_cards"] == 1
+    # 客户端只见稳定码（精确匹配，防 {exc} 重新插回泄漏内部细节）
+    assert finalized["answer"].fallback_reason == "finalize_error"
+    assert event.payload["trace_summary"]["fallback"] == "finalize_error"
+    assert all(
+        ":" not in line.split("[final_error]", 1)[-1]
+        for line in finalized["answer"].agent_trace
+        if line.startswith("[final_error]")
+    )
+
+
+class _NullCheckpointStore:
+    def put(self, *_args, **_kwargs):
+        return False
+
+
+def _record(handler: str, data: dict):
+    """跑 _record_runtime_result，返回它追加的 events。"""
+    events: list[StreamEvent] = []
+    _record_runtime_result(
+        handler,
+        ToolCall(name=handler, arguments={}),
+        {},
+        ToolResult(tool=handler, status=ToolStatus.OK, data=data, summary=handler),
+        [], [], events,
+        checkpoint_store=_NullCheckpointStore(),
+        thread_id="t", user_id="u", query="q",
+    )
+    return events
+
+
+def test_compare_does_not_emit_bogus_main_album_card():
+    """music_compare 的 entity 在 resolve 失败时常被误判成 album（The Weeknd/drake→type=album）。
+
+    旧逻辑据此下发一张「主专辑卡」：name=The Weeknd、artist 空→前端渲染「未知歌手」错卡。
+    compare 的 entity 是两个比较对象之一，不该作为专辑卡下发。
+    """
+    events = _record("build_music_dossier", {
+        "type": "music_compare",
+        "dossier": {"entity": {"type": "album", "name": "The Weeknd", "artist": ""}},
+        "answer": "The Weeknd 和 drake 的区别：...",
+    })
+    assert not [e for e in events if e.type == "album_card"]
+
+
+def test_album_deep_dive_still_emits_main_album_card():
+    """album_deep_dive 的主专辑卡仍正常下发——compare 的守卫不得误伤专辑解读。"""
+    events = _record("build_music_dossier", {
+        "type": "music_dossier",
+        "dossier": {"entity": {"type": "album", "name": "Blonde", "artist": "Frank Ocean"}},
+        "answer": "Blonde 解读",
+    })
+    album_cards = [e for e in events if e.type == "album_card"]
+    assert len(album_cards) == 1
+    assert album_cards[0].payload["album"]["name"] == "Blonde"
+    assert album_cards[0].payload["album"]["artist"] == "Frank Ocean"

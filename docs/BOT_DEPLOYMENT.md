@@ -87,3 +87,15 @@ ngrok http 8000
 
 - CORS 当前 `allow_origins=["*"]`（`app/api/main.py:38`），生产应收紧到你的前端域名。
 - 无用户认证，`user_id` 客户端自填——Bot 场景下用平台 open_id 前缀隔离（`feishu_` / `wechat_`），够用；Web 直连场景需另加鉴权。
+
+### Web 直连的 API 鉴权（AUTH_ENABLED）
+
+`AUTH_ENABLED=true` 时，除公开端点外所有请求必须带 `X-API-Key`（共享 `API_KEY` 或 `USER_API_KEYS` 绑定用户）。**前端静态资源 `/web`、`/web/assets/*` 故意放行**——它们只是 HTML/JS/CSS，不含业务数据；浏览器无法自定义 `X-API-Key` 头，若连静态页都拦，前端将完全不可用。部署矩阵：
+
+| 路径 | AUTH_ENABLED=true | 说明 |
+|------|-------------------|------|
+| `/web`、`/web/assets/*` | 放行 | 静态资源，无数据 |
+| `/health`、`/docs`、`/openapi.json` | 放行 | 探活/文档 |
+| `/chat`、`/agent/stream`、`/api/*` 等数据 API | 需 `X-API-Key` | 真正的数据边界 |
+
+前端调用数据 API 时由构建期注入的 key 携带（或前置网关注入）。公网部署务必同时：①收紧 `ALLOWED_ORIGINS`；②给播放代理 `/api/playback/audio` 加按 user 的限流，避免成为免费网易云代理。

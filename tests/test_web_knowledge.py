@@ -164,11 +164,19 @@ class TestParametricRescue:
     def test_disallowed_intent_skips(self, monkeypatch):
         calls: list = []
         self._spy(monkeypatch, calls)
-        # concert_events 必须真来源，不在白名单 → 不兜底
+        # concert_events/fact_check 必须真来源，不在兜底白名单 → 不兜底
         assert wk.maybe_parametric_rescue(query="tour", intent="concert_events", entities=["The Weeknd"], remaining=40.0) is None
-        # music_compare 走自有 _compare_summary 分支、不消费直答正文 → 不兜底（否则纯浪费一次生成）
-        assert wk.maybe_parametric_rescue(query="A 和 B", intent="music_compare", entities=["A", "B"], remaining=40.0) is None
+        assert wk.maybe_parametric_rescue(query="核验", intent="music_fact_check", entities=["Blonde"], remaining=40.0) is None
         assert calls == []
+
+    def test_compare_is_rescued(self, monkeypatch):
+        calls: list = []
+        self._spy(monkeypatch, calls)
+        # music_compare 现在消费直答正文（build_dossier compare 分支不再回落静态模板），
+        # 故 web_knowledge 工具失败时也兜底一次直答，与 album/artist 一致。
+        rescued = wk.maybe_parametric_rescue(query="A 和 B", intent="music_compare", entities=["A", "B"], remaining=40.0)
+        assert rescued is not None and rescued.answer_summary
+        assert len(calls) == 1 and calls[0]["intent"] == "music_compare"
 
     def test_low_budget_skips(self, monkeypatch):
         calls: list = []

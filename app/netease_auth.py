@@ -14,6 +14,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from app.security import secret_box
+
 logger = logging.getLogger(__name__)
 
 _HEADERS = {
@@ -287,9 +289,14 @@ def save_cookie(
         "vip_label": vip_label,
     }
     path = _path(user_id)
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    # cookie 含长效会话令牌（MUSIC_U）。本地 agent 不加密，但收紧为仅属主可读写（0600），
-    # 避免同机其他用户读到。chmod 在 Windows 上无 0600 语义，失败则忽略。
+    # 凭证加密落盘：格式 {"_encrypted": bool, "blob": <JSON 串的加密/明文 token>}。
+    # MUSIC_U 是长效会话令牌，明文落盘会被备份/误提交泄漏（历史文件实测 0644 全机可读）。
+    payload = {
+        "_encrypted": secret_box.is_enabled(),
+        "blob": secret_box.encrypt(json.dumps(data, ensure_ascii=False)),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    # 即便已加密也收紧为仅属主可读写（0600），分层防御。chmod 在 Windows 上无 0600 语义，失败则忽略。
     try:
         path.chmod(0o600)
     except OSError:
@@ -300,7 +307,12 @@ def load_cookie(user_id: str) -> dict | None:
     p = _path(user_id)
     if not p.exists():
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and "blob" in data:
+        # 新格式：blob 为加密/明文 JSON 串，解密后还原。
+        return json.loads(secret_box.decrypt(data["blob"]))
+    # 兼容旧明文格式 {"cookie": ...}（无 blob 字段）。
+    return data
 
 
 def clear_cookie(user_id: str) -> None:

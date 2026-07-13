@@ -2,8 +2,12 @@
 import { ref, watch, computed, nextTick, onBeforeUnmount } from "vue";
 import { store } from "../store.js";
 import { api } from "../api.js";
+import { installMediaKeys, setMediaPlayState } from "../mediaKeys.js";
 
 const audio = ref(null);
+// 接管硬件/键盘媒体键（上一首 · 下一首 · 播放/暂停）+ OS Now Playing。幂等，全局只装一次。
+// audioGetter 延迟取值：媒体键按下时 audio.value 早已由 <audio ref> 挂上。
+installMediaKeys(() => audio.value);
 const spinning = ref(false);
 const toastVisible = ref(false);
 const toastText = ref("");
@@ -143,8 +147,8 @@ function stopLyricSync() {
   rafId = null;
 }
 
-function onPlay() { spinning.value = true; startLyricSync(); }
-function onPause() { spinning.value = false; stopLyricSync(); }
+function onPlay() { spinning.value = true; startLyricSync(); setMediaPlayState(true); }
+function onPause() { spinning.value = false; stopLyricSync(); setMediaPlayState(false); }
 
 // ── 自定义播放控件：时间格式 / 进度百分比 / 播放暂停 / 拖拽 seek ──
 function fmt(t) {

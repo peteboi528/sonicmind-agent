@@ -136,6 +136,7 @@ def _graph_unavailable_answer() -> AgentAnswer:
         recommended_tracks=[],
         agent_trace=["[graph_error] LangGraph unavailable; no secondary orchestrator was executed."],
         fallback_reason="langgraph_unavailable",
+        trace_summary={"intent": "unknown", "tools": [], "sources": [], "fallback": "langgraph_unavailable"},
     )
 
 

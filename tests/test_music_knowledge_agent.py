@@ -774,6 +774,36 @@ def test_build_dossier_parametric_is_complete_not_partial():
     assert dossier.summary  # 正文照常生成
 
 
+def test_music_compare_uses_parametric_answer_not_static_template():
+    """music_compare 有 DeepSeek 直答时，应把直答用作对比正文，不再回落空洞的静态模板。
+
+    回归点：旧 compare 分支无视 web_knowledge_answer、总用 _compare_summary 的静态
+    「声音密度/叙事方式」兜底——The Weeknd vs Drake 这种常识对比也出空壳表。
+    """
+    from app.knowledge import build_dossier, dossier_answer
+    from app.models import MusicEntity
+
+    entities = [
+        MusicEntity(type="artist", name="The Weeknd"),
+        MusicEntity(type="artist", name="Drake"),
+    ]
+    answer = (
+        "## 声音与制作\nThe Weeknd 根植合成器流行的暗夜氛围；Drake 更偏说唱与旋律说唱的流动。\n"
+        "## 叙事方式\nThe Weeknd 擅长角色化的暗黑情节；Drake 偏自白与情绪片段。"
+    )
+    dossier = build_dossier(
+        None, "The Weeknd 和 Drake 的对比", "music_compare", entities, [], [], [], [], [],
+        web_knowledge_provider="deepseek_parametric",
+        web_knowledge_answer=answer,
+    )
+    assert dossier.is_parametric is True
+    assert dossier.summary_is_narrative is True
+    text = dossier_answer(dossier)
+    assert "合成器流行" in text       # 直答正文被采用为对比正文
+    assert "声音密度" not in text     # 不再出静态模板 summary
+    assert "看叙事方式" not in text   # 不再出静态模板 detail 行
+
+
 def test_extract_career_phases_from_parametric_text():
     """直答正文里的「年份+《作品》」应抽成职业时间线：左→右归年、无年份句不产阶段。"""
     from app.knowledge import _extract_career_phases_from_text

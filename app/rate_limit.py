@@ -11,6 +11,7 @@
 - LRU 上限：桶数超 ``_MAX_BUCKETS`` 时整体重置，防多用户实例无界增长。
 - 零依赖：仅标准库，未引入 slowapi/redis。
 """
+
 from __future__ import annotations
 
 import logging

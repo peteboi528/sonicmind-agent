@@ -11,6 +11,7 @@
 - wrap 不自动 strip（保持纯标注），strip 由调用方按风险决定，职责清晰。
 - 零依赖：纯字符串 + 正则。
 """
+
 from __future__ import annotations
 
 import re

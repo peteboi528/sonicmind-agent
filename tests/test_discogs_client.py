@@ -1,4 +1,5 @@
 """Discogs client 单测：mock search 结果解析，不依赖真实网络与 token。"""
+
 from __future__ import annotations
 
 from app.sources import discogs_client
@@ -11,10 +12,26 @@ def test_unavailable_without_token():
 
 def test_resolve_release_parses_year_styles(monkeypatch):
     client = discogs_client.DiscogsClient("tok")
-    monkeypatch.setattr(client, "_get", lambda path, **p: {"results": [
-        {"id": 123, "title": "Frank Ocean — Blonde", "year": 2016,
-         "genre": ["Electronic"], "style": ["Alternative R&B", "Neo Soul"], "type": "master"},
-    ]} if "search" in path else {})
+    monkeypatch.setattr(
+        client,
+        "_get",
+        lambda path, **p: (
+            {
+                "results": [
+                    {
+                        "id": 123,
+                        "title": "Frank Ocean — Blonde",
+                        "year": 2016,
+                        "genre": ["Electronic"],
+                        "style": ["Alternative R&B", "Neo Soul"],
+                        "type": "master",
+                    },
+                ]
+            }
+            if "search" in path
+            else {}
+        ),
+    )
     hit = client.resolve_release("Blonde", "Frank Ocean")
     assert hit["title"] == "Frank Ocean — Blonde"
     assert hit["year"] == 2016
@@ -41,9 +58,19 @@ def test_resolve_release_falls_back_to_release_type(monkeypatch):
 
 def test_resolve_artist_parses_styles(monkeypatch):
     client = discogs_client.DiscogsClient("tok")
-    monkeypatch.setattr(client, "_get", lambda path, **p: {"results": [
-        {"id": 7, "title": "SZA", "genre": ["Pop"], "style": ["Contemporary R&B"]},
-    ]} if "search" in path else {})
+    monkeypatch.setattr(
+        client,
+        "_get",
+        lambda path, **p: (
+            {
+                "results": [
+                    {"id": 7, "title": "SZA", "genre": ["Pop"], "style": ["Contemporary R&B"]},
+                ]
+            }
+            if "search" in path
+            else {}
+        ),
+    )
     hit = client.resolve_artist("sza")
     assert hit["name"] == "SZA"
     assert "Contemporary R&B" in hit["styles"]

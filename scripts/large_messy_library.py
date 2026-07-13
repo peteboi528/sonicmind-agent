@@ -6,6 +6,7 @@
 search 按查询关键词（流派/情绪/场景）命中打分返回，并混入 ~20% 噪声——
 测推荐 rerank 能否把噪声压下去、从杂库里挑准，以及记忆层在复杂对话下不被污染。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -68,55 +69,83 @@ def _build_messy_pool() -> list[Any]:
                 cross = [other]
             title = f"{genre} Track {i:02d}"
             artist = f"Demo {genre} {i // 4 + 1}"
-            pool.append(ExternalTrack(
-                external_id=f"messy-{genre}-{i}",
-                title=title,
-                artist=artist,
-                genre=[*cross, genre],
-                mood=mood,
-                source="netease",
-                playback_url=f"https://music.163.com/song?id=900{counter:03d}",
-            ))
+            pool.append(
+                ExternalTrack(
+                    external_id=f"messy-{genre}-{i}",
+                    title=title,
+                    artist=artist,
+                    genre=[*cross, genre],
+                    mood=mood,
+                    source="netease",
+                    playback_url=f"https://music.163.com/song?id=900{counter:03d}",
+                )
+            )
 
     # SEO 垃圾曲名：相关性差、靠热词堆砌，推荐不该把它排到前面
     for j in range(18):
-        pool.append(ExternalTrack(
-            external_id=f"messy-seo-{j}",
-            title=f"{_SEO_NOISE[j % len(_SEO_NOISE)]} #{j}",
-            artist="SEO Collector",
-            genre=["流行"],
-            mood=["欢快"],
-            source="netease",
-            playback_url=f"https://music.163.com/song?id=910{j:02d}",
-        ))
+        pool.append(
+            ExternalTrack(
+                external_id=f"messy-seo-{j}",
+                title=f"{_SEO_NOISE[j % len(_SEO_NOISE)]} #{j}",
+                artist="SEO Collector",
+                genre=["流行"],
+                mood=["欢快"],
+                source="netease",
+                playback_url=f"https://music.163.com/song?id=910{j:02d}",
+            )
+        )
 
     # 标签错乱：R&B 的歌标成"古典"，测推荐是否被错误标签误导
     for k in range(10):
-        pool.append(ExternalTrack(
-            external_id=f"messy-mislabel-{k}",
-            title=f"Mislabeled R&B {k}",
-            artist=f"Confused Artist {k}",
-            genre=["古典"],   # 实际是 R&B 但被错标
-            mood=["性感"],
-            source="netease",
-            playback_url=f"https://music.163.com/song?id=920{k:02d}",
-        ))
+        pool.append(
+            ExternalTrack(
+                external_id=f"messy-mislabel-{k}",
+                title=f"Mislabeled R&B {k}",
+                artist=f"Confused Artist {k}",
+                genre=["古典"],  # 实际是 R&B 但被错标
+                mood=["性感"],
+                source="netease",
+                playback_url=f"https://music.163.com/song?id=920{k:02d}",
+            )
+        )
 
     # 缺标签：部分歌无流派/情绪，测推荐在信息不全时的鲁棒性
     for m in range(8):
-        pool.append(ExternalTrack(
-            external_id=f"messy-bare-{m}",
-            title=f"Bare Title {m}",
-            artist=f"Unknown {m}",
-            genre=[],
-            mood=[],
-            source="netease",
-            playback_url=f"https://music.163.com/song?id=930{m:02d}",
-        ))
+        pool.append(
+            ExternalTrack(
+                external_id=f"messy-bare-{m}",
+                title=f"Bare Title {m}",
+                artist=f"Unknown {m}",
+                genre=[],
+                mood=[],
+                source="netease",
+                playback_url=f"https://music.163.com/song?id=930{m:02d}",
+            )
+        )
 
     # 同名不同人：测去重别误杀
-    pool.append(ExternalTrack(external_id="dup-a", title="同名曲", artist="Singer A", genre=["流行"], mood=["伤感"], source="netease", playback_url="https://music.163.com/song?id=94001"))
-    pool.append(ExternalTrack(external_id="dup-b", title="同名曲", artist="Singer B", genre=["摇滚"], mood=["激昂"], source="netease", playback_url="https://music.163.com/song?id=94002"))
+    pool.append(
+        ExternalTrack(
+            external_id="dup-a",
+            title="同名曲",
+            artist="Singer A",
+            genre=["流行"],
+            mood=["伤感"],
+            source="netease",
+            playback_url="https://music.163.com/song?id=94001",
+        )
+    )
+    pool.append(
+        ExternalTrack(
+            external_id="dup-b",
+            title="同名曲",
+            artist="Singer B",
+            genre=["摇滚"],
+            mood=["激昂"],
+            source="netease",
+            playback_url="https://music.163.com/song?id=94002",
+        )
+    )
 
     return pool
 
@@ -132,12 +161,14 @@ def _query_keywords(query: str) -> set[str]:
 
 
 def _score_track(track: Any, wanted: set[str]) -> int:
-    text = " ".join([
-        getattr(track, "title", "") or "",
-        getattr(track, "artist", "") or "",
-        *(getattr(track, "genre", []) or []),
-        *(getattr(track, "mood", []) or []),
-    ]).lower()
+    text = " ".join(
+        [
+            getattr(track, "title", "") or "",
+            getattr(track, "artist", "") or "",
+            *(getattr(track, "genre", []) or []),
+            *(getattr(track, "mood", []) or []),
+        ]
+    ).lower()
     return sum(1 for w in wanted if w.lower() in text)
 
 
@@ -165,11 +196,11 @@ def install_large_messy() -> None:
         take = max(top_k + offset, top_k)
         top = [t for _, t in scored[:take]]
         if len(top) < take:
-            return top[offset:offset + top_k] if offset else top[:top_k]
+            return top[offset : offset + top_k] if offset else top[:top_k]
         # 末位替换 1 个为低分噪声项（若有的话）
-        noise_pool = [t for _, t in scored[len(top):]]
+        noise_pool = [t for _, t in scored[len(top) :]]
         if noise_pool and top:
             top[-1] = noise_pool[0]
-        return top[offset:offset + top_k] if offset else top[:top_k]
+        return top[offset : offset + top_k] if offset else top[:top_k]
 
     AudioVisualAgent.search_web_music = fake_search_web_music

@@ -149,31 +149,37 @@ class DiscoverService:
         def fetch_bili() -> list[ExternalTrack]:
             out: list[ExternalTrack] = []
             for item in bilibili_source.search_bilibili_many(query, limit=min(top_k, 5)):
-                out.append(ExternalTrack(
-                    external_id=item["bvid"],
-                    title=item["title"],
-                    artist=item.get("author", ""),
-                    source="bilibili",
-                    candidate_kind=self._classify_candidate_kind(item["title"], "bilibili"),
-                    playback_url=f"https://player.bilibili.com/player.html?bvid={item['bvid']}&autoplay=0&high_quality=1&danmaku=0",
-                ))
+                out.append(
+                    ExternalTrack(
+                        external_id=item["bvid"],
+                        title=item["title"],
+                        artist=item.get("author", ""),
+                        source="bilibili",
+                        candidate_kind=self._classify_candidate_kind(item["title"], "bilibili"),
+                        playback_url=f"https://player.bilibili.com/player.html?bvid={item['bvid']}&autoplay=0&high_quality=1&danmaku=0",
+                    )
+                )
             return out
 
         def fetch_youtube() -> list[ExternalTrack]:
             out: list[ExternalTrack] = []
             for item in youtube_source.search_youtube_many(query, limit=min(top_k, 3)):
                 vid = item["video_id"]
-                title = item.get("title") or youtube_source.fetch_youtube_title(
-                    f"https://www.youtube.com/watch?v={vid}"
-                ) or ""
-                out.append(ExternalTrack(
-                    external_id=vid,
-                    title=title,
-                    artist="",
-                    source="youtube",
-                    candidate_kind=self._classify_candidate_kind(title, "youtube"),
-                    playback_url=f"https://www.youtube.com/embed/{vid}?autoplay=1&rel=0",
-                ))
+                title = (
+                    item.get("title")
+                    or youtube_source.fetch_youtube_title(f"https://www.youtube.com/watch?v={vid}")
+                    or ""
+                )
+                out.append(
+                    ExternalTrack(
+                        external_id=vid,
+                        title=title,
+                        artist="",
+                        source="youtube",
+                        candidate_kind=self._classify_candidate_kind(title, "youtube"),
+                        playback_url=f"https://www.youtube.com/embed/{vid}?autoplay=1&rel=0",
+                    )
+                )
             return out
 
         bili_tracks, yt_tracks = run_parallel(
@@ -213,14 +219,16 @@ class DiscoverService:
         ]
         for item in youtube_items:
             title = item.get("title") or await youtube_source.afetch_youtube_title(item["video_id"])
-            tracks.append(ExternalTrack(
-                external_id=item["video_id"],
-                title=title,
-                artist="",
-                source="youtube",
-                candidate_kind=self._classify_candidate_kind(title, "youtube"),
-                playback_url=f"https://www.youtube.com/embed/{item['video_id']}?autoplay=1&rel=0",
-            ))
+            tracks.append(
+                ExternalTrack(
+                    external_id=item["video_id"],
+                    title=title,
+                    artist="",
+                    source="youtube",
+                    candidate_kind=self._classify_candidate_kind(title, "youtube"),
+                    playback_url=f"https://www.youtube.com/embed/{item['video_id']}?autoplay=1&rel=0",
+                )
+            )
         selected = self._dedupe_tracks(tracks)[:top_k]
         if selected:
             return selected
@@ -241,7 +249,9 @@ class DiscoverService:
                 api_key=settings.tavily_api_key,
             )
         except Exception:
-            logger.debug("async artist info search failed; falling back to sync path for query=%s", query, exc_info=True)
+            logger.debug(
+                "async artist info search failed; falling back to sync path for query=%s", query, exc_info=True
+            )
             return await asyncio.to_thread(self._sync_search_artist_info, query=query)
         if result:
             return result
@@ -269,7 +279,8 @@ class DiscoverService:
         )
         exact_track = next(
             (
-                asset.title for asset in self._list_assets()
+                asset.title
+                for asset in self._list_assets()
                 if normalized_key and self._normalize_match_text(asset.title) == normalized_key
             ),
             "",
@@ -297,7 +308,11 @@ class DiscoverService:
                 "reason": "library_track_exact",
             }
 
-        category_order = (("scenario", "scene", "场景电台"), ("mood", "mood", "情绪电台"), ("genre", "genre", "曲风探索"))
+        category_order = (
+            ("scenario", "scene", "场景电台"),
+            ("mood", "mood", "情绪电台"),
+            ("genre", "genre", "曲风探索"),
+        )
         for tag_key, browse_category, label in category_order:
             if tags.get(tag_key):
                 values = [*tags.get("genre", []), *tags.get("mood", []), *tags.get("scenario", [])]

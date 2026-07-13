@@ -12,6 +12,7 @@ _strategy_for / _default_summary / _VALID_INTENTS）、prompts/query_plan.py
 - query_plan prompt 的意图清单由 registry 动态生成
 - build_agent_plan 关键词 fallback 遍历 keyword_signals
 """
+
 from __future__ import annotations
 
 import re
@@ -21,13 +22,13 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class IntentDef:
     name: str
-    summary: str                      # 默认 reasoning_summary
-    prompt_desc: str                  # query_plan prompt 里这个意图的说明行
+    summary: str  # 默认 reasoning_summary
+    prompt_desc: str  # query_plan prompt 里这个意图的说明行
     base_tools: tuple[str, ...] = ()  # 该意图始终执行的工具
     prepend_web_search: bool = False  # use_web 时是否在最前面插 web_music_search
-    strategy_web: str = "online_first"     # use_web=True 时的策略
+    strategy_web: str = "online_first"  # use_web=True 时的策略
     strategy_no_web: str = "library_first"  # use_web=False 时的策略
-    online_default: bool = True       # 未显式给 use_web 时的默认联网需求
+    online_default: bool = True  # 未显式给 use_web 时的默认联网需求
     keyword_signals: tuple[str, ...] = ()  # 关键词 fallback 命中信号
 
     def tools_for(self, use_web: bool) -> list[str]:
@@ -42,20 +43,72 @@ class IntentDef:
 # playlist（"导入歌单""音乐旅程"含子串），discuss 作为音乐知识类兜底放在
 # recommend 之后、chat 之前。
 _INTENT_PRIORITY = (
-    "feedback", "listening_history", "my_playlists", "lyrics", "audio_features",
-    "find_on_platform", "concert_events", "journey", "import", "playlist_repair",
-    "taste_shift_detector", "music_fact_check", "recommend_explainer", "playlist", "video",
+    "feedback",
+    "listening_history",
+    "my_playlists",
+    "lyrics",
+    "audio_features",
+    "find_on_platform",
+    "concert_events",
+    "journey",
+    "import",
+    "playlist_repair",
+    "taste_shift_detector",
+    "music_fact_check",
+    "recommend_explainer",
+    "playlist",
+    "video",
     "sample_lookup",
-    "music_compare", "review_summary", "album_deep_dive", "artist_deep_dive",
-    "search", "taste_experiment", "taste", "artist_albums", "similar_artists", "recommend", "artist_info", "discuss",
+    "music_compare",
+    "review_summary",
+    "album_deep_dive",
+    "artist_deep_dive",
+    "search",
+    "taste_experiment",
+    "taste",
+    "artist_albums",
+    "similar_artists",
+    "recommend",
+    "artist_info",
+    "discuss",
 )
 
 _DISCUSS_KEYWORDS = (
-    "牛逼", "怎么样", "评价", "风格是", "什么水平", "好听吗",
-    "厉害", "经典", "代表", "值得听", "有什么歌", "有哪些歌", "成名曲",
-    "特色", "曲风", "地位", "影响", "如何看", "聊聊",
-    "和 ", " vs ", "对比", "谁的", "谁更", "更牛", "专辑", "出道", "代表作", "区别",
-    "同一", "一样", "是不是", "think", "opinion", "feel about",
+    "牛逼",
+    "怎么样",
+    "评价",
+    "风格是",
+    "什么水平",
+    "好听吗",
+    "厉害",
+    "经典",
+    "代表",
+    "值得听",
+    "有什么歌",
+    "有哪些歌",
+    "成名曲",
+    "特色",
+    "曲风",
+    "地位",
+    "影响",
+    "如何看",
+    "聊聊",
+    "和 ",
+    " vs ",
+    "对比",
+    "谁的",
+    "谁更",
+    "更牛",
+    "专辑",
+    "出道",
+    "代表作",
+    "区别",
+    "同一",
+    "一样",
+    "是不是",
+    "think",
+    "opinion",
+    "feel about",
 )
 
 INTENT_REGISTRY: dict[str, IntentDef] = {
@@ -64,7 +117,9 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         summary="用户在评价刚刚展示或曲库中的真实歌曲，记录结构化反馈并更新排序信号。",
         prompt_desc="feedback：喜欢/不喜欢/跳过/听过某首歌或某位歌手",
         base_tools=("feedback",),
-        strategy_web="memory_only", strategy_no_web="memory_only", online_default=False,
+        strategy_web="memory_only",
+        strategy_no_web="memory_only",
+        online_default=False,
         keyword_signals=("不喜欢", "讨厌", "别再放", "这首不错", "喜欢这首", "跳过", "切歌", "听过这首"),
     ),
     "listening_history": IntentDef(
@@ -72,7 +127,9 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         summary="只读用户听歌历史并做聚合统计。",
         prompt_desc="listening_history：最近听了什么 / 循环最多的歌或歌手",
         base_tools=("listening_history",),
-        strategy_web="memory_only", strategy_no_web="memory_only", online_default=False,
+        strategy_web="memory_only",
+        strategy_no_web="memory_only",
+        online_default=False,
         keyword_signals=("听歌历史", "最近在听", "最近听了", "循环最多", "上周听", "本月听"),
     ),
     "my_playlists": IntentDef(
@@ -87,29 +144,43 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         name="lyrics",
         summary="解析真实 song_id 后获取网易云歌词，失败时不编造。",
         prompt_desc="lyrics：查询某首歌的歌词",
-        base_tools=("lyrics",), prepend_web_search=False,
+        base_tools=("lyrics",),
+        prepend_web_search=False,
         keyword_signals=("歌词", "lyrics", "唱的什么"),
     ),
     "audio_features": IntentDef(
         name="audio_features",
         summary="读取已有真实 BPM、能量等音频特征，缺失时保持未知。",
         prompt_desc="audio_features：查询歌曲 BPM、调性、能量或舞蹈性",
-        base_tools=("audio_features",), prepend_web_search=False, online_default=False,
+        base_tools=("audio_features",),
+        prepend_web_search=False,
+        online_default=False,
         keyword_signals=("BPM", "bpm", "调性", "音频特征", "能量值", "danceability"),
     ),
     "find_on_platform": IntentDef(
         name="find_on_platform",
         summary="在用户指定的平台定位真实歌曲或视频。",
         prompt_desc="find_on_platform：把某首歌定位到网易云、YouTube 或 B站",
-        base_tools=("find_on_platform",), prepend_web_search=False,
+        base_tools=("find_on_platform",),
+        prepend_web_search=False,
         keyword_signals=("在youtube", "在 youtube", "在b站", "在 b站", "在网易云", "换个平台"),
     ),
     "concert_events": IntentDef(
         name="concert_events",
         summary="查找带网页来源的公开演出或巡演信息。",
         prompt_desc="concert_events：查某歌手近期演出或巡演信息",
-        base_tools=("concert_events",), prepend_web_search=False,
-        keyword_signals=("巡演信息", "近期演出", "演出日期", "演出安排", "tour dates", "巡演", "演唱会时间", "哪里演出"),
+        base_tools=("concert_events",),
+        prepend_web_search=False,
+        keyword_signals=(
+            "巡演信息",
+            "近期演出",
+            "演出日期",
+            "演出安排",
+            "tour dates",
+            "巡演",
+            "演唱会时间",
+            "哪里演出",
+        ),
     ),
     "recommend": IntentDef(
         name="recommend",
@@ -129,10 +200,23 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         strategy_no_web="online_first",
         online_default=True,
         keyword_signals=(
-            "这张专辑", "这张先听", "整张专辑", "专辑解读", "解读专辑",
-            "为什么经典", "为什么这么经典", "album deep dive", "分析这张",
-            "专辑听法", "听法", "从哪首听", "先听哪首", "最值得先听",
-            "入门曲目", "这两首最对味", "这首最对味",
+            "这张专辑",
+            "这张先听",
+            "整张专辑",
+            "专辑解读",
+            "解读专辑",
+            "为什么经典",
+            "为什么这么经典",
+            "album deep dive",
+            "分析这张",
+            "专辑听法",
+            "听法",
+            "从哪首听",
+            "先听哪首",
+            "最值得先听",
+            "入门曲目",
+            "这两首最对味",
+            "这首最对味",
         ),
     ),
     "artist_deep_dive": IntentDef(
@@ -210,9 +294,19 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         strategy_no_web="online_first",
         online_default=True,
         keyword_signals=(
-            "探索我的口味", "探索口味", "口味实验", "品味实验", "taste lab",
-            "推荐点不一样", "推荐一点不一样", "听腻了", "发现新风格",
-            "帮我发现新风格", "做个品味实验", "探索边界", "大胆一点",
+            "探索我的口味",
+            "探索口味",
+            "口味实验",
+            "品味实验",
+            "taste lab",
+            "推荐点不一样",
+            "推荐一点不一样",
+            "听腻了",
+            "发现新风格",
+            "帮我发现新风格",
+            "做个品味实验",
+            "探索边界",
+            "大胆一点",
         ),
     ),
     "playlist_repair": IntentDef(
@@ -224,7 +318,15 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         strategy_web="library_first",
         strategy_no_web="library_first",
         online_default=False,
-        keyword_signals=("修一下歌单", "修一下上一轮歌单", "歌单有问题", "检查歌单", "修复歌单", "这歌单怪怪的", "哪里不对"),
+        keyword_signals=(
+            "修一下歌单",
+            "修一下上一轮歌单",
+            "歌单有问题",
+            "检查歌单",
+            "修复歌单",
+            "这歌单怪怪的",
+            "哪里不对",
+        ),
     ),
     "taste_shift_detector": IntentDef(
         name="taste_shift_detector",
@@ -265,7 +367,20 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         prompt_desc="search：搜索特定歌曲或歌手",
         base_tools=("search",),
         prepend_web_search=True,
-        keyword_signals=("搜索", "找歌", "找一首", "找几首", "帮我找", "搜歌", "搜一下", "找到", "search", "联网", "真实", "最新"),
+        keyword_signals=(
+            "搜索",
+            "找歌",
+            "找一首",
+            "找几首",
+            "帮我找",
+            "搜歌",
+            "搜一下",
+            "找到",
+            "search",
+            "联网",
+            "真实",
+            "最新",
+        ),
     ),
     "playlist": IntentDef(
         name="playlist",
@@ -331,8 +446,21 @@ INTENT_REGISTRY: dict[str, IntentDef] = {
         strategy_web="online_first",
         strategy_no_web="no_search",
         keyword_signals=(
-            "介绍", "背景", "成员", "出道", "简介", "资料", "百科", "是谁",
-            "什么团", "这个团", "哪个团", "谁啊", "来头", "讲讲", "查查",
+            "介绍",
+            "背景",
+            "成员",
+            "出道",
+            "简介",
+            "资料",
+            "百科",
+            "是谁",
+            "什么团",
+            "这个团",
+            "哪个团",
+            "谁啊",
+            "来头",
+            "讲讲",
+            "查查",
             "biography",
         ),
     ),
@@ -358,10 +486,16 @@ def is_valid_intent(intent: str) -> bool:
 # 只有落在此集合的 (primary, secondary) 对才会真正建 sub_plans；其余组合丢弃 secondary
 # 退回单意图。限定 coherent 对可避开 composer 里的同型 section 冲突（如 recommend+playlist）。
 _MULTI_INTENT_PRIMARIES = frozenset({"recommend", "search"})
-_MULTI_INTENT_SECONDARIES = frozenset({
-    "artist_deep_dive", "album_deep_dive", "review_summary",
-    "artist_info", "lyrics", "find_on_platform",
-})
+_MULTI_INTENT_SECONDARIES = frozenset(
+    {
+        "artist_deep_dive",
+        "album_deep_dive",
+        "review_summary",
+        "artist_info",
+        "lyrics",
+        "find_on_platform",
+    }
+)
 _MULTI_INTENT_ALLOWED_PAIRS: frozenset[tuple[str, str]] = frozenset(
     (p, s) for p in _MULTI_INTENT_PRIMARIES for s in _MULTI_INTENT_SECONDARIES
 )
@@ -411,12 +545,44 @@ def match_intent_by_keywords(query: str) -> str | None:
 # 注意：跨轮去重的排除集只在 is_continuation 为真时挂载（_apply_dialogue_continuation），
 # 所以"不要重复/换新的"这类反重复信号必须在这里出现，否则去重永不触发。
 _CONTINUATION_SIGNALS = (
-    "再来", "再推", "再给", "换一批", "换一首", "换几首", "还要", "还想", "还有",
-    "多来", "多给", "类似", "差不多", "类似这个", "像这样", "像这个", "继续",
-    "更多", "再来点", "再来些", "同类型", "同风格", "相似歌手", "类似的歌手",
+    "再来",
+    "再推",
+    "再给",
+    "换一批",
+    "换一首",
+    "换几首",
+    "还要",
+    "还想",
+    "还有",
+    "多来",
+    "多给",
+    "类似",
+    "差不多",
+    "类似这个",
+    "像这样",
+    "像这个",
+    "继续",
+    "更多",
+    "再来点",
+    "再来些",
+    "同类型",
+    "同风格",
+    "相似歌手",
+    "类似的歌手",
     # 反重复信号：用户明确表示上一轮给重了，要换没看过的。
-    "不要重复", "别重复", "不重复", "重复了", "又重复", "换新的", "来点新的", "来些新的",
-    "more", "another", "similar", "same vibe", "keep going",
+    "不要重复",
+    "别重复",
+    "不重复",
+    "重复了",
+    "又重复",
+    "换新的",
+    "来点新的",
+    "来些新的",
+    "more",
+    "another",
+    "similar",
+    "same vibe",
+    "keep going",
 )
 
 # 指代信号：本轮包含代词或省略实体，需要从前文继承实体。
@@ -440,8 +606,20 @@ _CONTENT_NEGATION = re.compile(
     re.IGNORECASE,
 )
 _NON_CONTENT_NEGATIONS = {
-    "", "了", "啦", "吧", "重复", "重样", "一样", "相同", "其他", "其他的",
-    "别的", "别的歌", "这个", "那个",
+    "",
+    "了",
+    "啦",
+    "吧",
+    "重复",
+    "重样",
+    "一样",
+    "相同",
+    "其他",
+    "其他的",
+    "别的",
+    "别的歌",
+    "这个",
+    "那个",
 }
 
 _LANGUAGE_NEGATION_GROUPS: dict[str, tuple[str, ...]] = {
@@ -488,13 +666,12 @@ def extract_content_negations(query: str) -> list[str]:
         constraints.append(value)
     return list(dict.fromkeys(constraints))
 
+
 # 纯数量延续："我需要12首""再来几首""要多首"——只给数字+量词、省略实体，
 # 依赖上一轮的歌手/歌单上下文。必须确认去掉语气/动词/数字量词后基本无实体残留，
 # 否则会把"周杰伦12首"（自带新实体）误判成延续。
 _COUNT_QUANTIFIER = re.compile(r"\d+\s*首|[几两]\s*首|十\s*[几]?\s*首|多\s*首")
-_PURE_COUNT_STRIP = re.compile(
-    r"[\s我你他她它要给来多再需想希望看听听下点号、，。!！?？首\d几两十百歌曲个吧的了]"
-)
+_PURE_COUNT_STRIP = re.compile(r"[\s我你他她它要给来多再需想希望看听听下点号、，。!！?？首\d几两十百歌曲个吧的了]")
 
 
 def _is_count_continuation(query: str) -> bool:
@@ -522,12 +699,35 @@ def is_continuation(query: str) -> bool:
 
     # 检查是否包含明确的新意图信号——有则不是延续，而是意图切换
     _NEW_INTENT_SIGNALS = (
-        "MV", "mv", "现场", "live", "演唱会", "concert", "视频", "video", "演出", "tour",
-        "介绍", "背景", "成员", "出道", "简介", "百科", "biography", "about",
-        "歌单", "playlist", "合集",
-        "导入", "import", "旅程",
-        "品味", "taste",
-        "搜索", "搜", "search",
+        "MV",
+        "mv",
+        "现场",
+        "live",
+        "演唱会",
+        "concert",
+        "视频",
+        "video",
+        "演出",
+        "tour",
+        "介绍",
+        "背景",
+        "成员",
+        "出道",
+        "简介",
+        "百科",
+        "biography",
+        "about",
+        "歌单",
+        "playlist",
+        "合集",
+        "导入",
+        "import",
+        "旅程",
+        "品味",
+        "taste",
+        "搜索",
+        "搜",
+        "search",
     )
     if any(sig in q or sig in query for sig in _NEW_INTENT_SIGNALS):
         return False

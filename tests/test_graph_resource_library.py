@@ -63,8 +63,10 @@ def test_journey_has_dynamic_day_arc_and_rotates_tracks(tmp_path, monkeypatch):
         prefix = query.split()[0]
         return [
             ExternalTrack(
-                external_id=f"{prefix}-{i}", title=f"{prefix} Track {i}",
-                artist="Verified Artist", source="netease",
+                external_id=f"{prefix}-{i}",
+                title=f"{prefix} Track {i}",
+                artist="Verified Artist",
+                source="netease",
             )
             for i in range(1, 6)
         ]
@@ -98,27 +100,36 @@ def test_journey_stream_emits_track_cards(monkeypatch):
                     "name": name,
                     "goal": goal,
                     "transition": transition,
-                    "tracks": [{
-                        "external_id": f"journey-{index}",
-                        "title": f"Journey Track {index}",
-                        "artist": "Journey Artist",
-                        "source": "netease",
-                    }],
+                    "tracks": [
+                        {
+                            "external_id": f"journey-{index}",
+                            "title": f"Journey Track {index}",
+                            "artist": "Journey Artist",
+                            "source": "netease",
+                        }
+                    ],
                 }
-                for index, (name, goal, transition) in enumerate([
-                    ("清晨", "温和唤醒", "开始一天"),
-                    ("午后", "保持活力", "增加律动"),
-                    ("深夜", "放松收束", "安静落幕"),
-                ], start=1)
+                for index, (name, goal, transition) in enumerate(
+                    [
+                        ("清晨", "温和唤醒", "开始一天"),
+                        ("午后", "保持活力", "增加律动"),
+                        ("深夜", "放松收束", "安静落幕"),
+                    ],
+                    start=1,
+                )
             ],
         }
 
     monkeypatch.setattr(main_module.agent, "generate_music_journey", fake_journey)
     client = TestClient(app)
-    with client.stream("POST", "/agent/stream", json={
-        "user_id": "journey-stream-user",
-        "message": "做一个清晨到深夜的音乐旅程",
-    }) as response:
+    with client.stream(
+        "POST",
+        "/agent/stream",
+        json={
+            "user_id": "journey-stream-user",
+            "message": "做一个清晨到深夜的音乐旅程",
+        },
+    ) as response:
         body = "".join(response.iter_text())
 
     assert response.status_code == 200
@@ -133,18 +144,20 @@ def test_journey_final_cards_keep_all_phases_without_explicit_count():
 
     phases = []
     for phase_index, name in enumerate(["清晨", "上午", "午后", "傍晚", "深夜"]):
-        phases.append({
-            "name": name,
-            "tracks": [
-                ExternalTrack(
-                    external_id=f"{phase_index}-{track_index}",
-                    title=f"Track {phase_index}-{track_index}",
-                    artist="Artist",
-                    source="netease",
-                ).model_dump(mode="json")
-                for track_index in range(4)
-            ],
-        })
+        phases.append(
+            {
+                "name": name,
+                "tracks": [
+                    ExternalTrack(
+                        external_id=f"{phase_index}-{track_index}",
+                        title=f"Track {phase_index}-{track_index}",
+                        artist="Artist",
+                        source="netease",
+                    ).model_dump(mode="json")
+                    for track_index in range(4)
+                ],
+            }
+        )
     results = [{"type": "journey", "journey": {"phases": phases}}]
 
     tracks = _select_listed_tracks(results, AgentPlan(intent="journey"))
@@ -155,7 +168,9 @@ def test_journey_final_cards_keep_all_phases_without_explicit_count():
 def test_stream_endpoint_emits_sse_events():
     client = TestClient(app)
 
-    with client.stream("POST", "/agent/stream", json={"user_id": "stream-user", "message": "推荐三首chill歌"}) as response:
+    with client.stream(
+        "POST", "/agent/stream", json={"user_id": "stream-user", "message": "推荐三首chill歌"}
+    ) as response:
         body = "".join(response.iter_text())
 
     assert response.status_code == 200
@@ -185,13 +200,16 @@ def test_library_and_dislike_api(monkeypatch):
     assert library.json()["tracks"]
 
     track = library.json()["tracks"][0]
-    dislike = client.post("/feedback/dislike", json={
-        "user_id": "api-lib",
-        "title": track["title"],
-        "artist": track["artist"],
-        "source": track["source"],
-        "source_id": track["source_id"],
-        "reason": "test",
-    })
+    dislike = client.post(
+        "/feedback/dislike",
+        json={
+            "user_id": "api-lib",
+            "title": track["title"],
+            "artist": track["artist"],
+            "source": track["source"],
+            "source_id": track["source_id"],
+            "reason": "test",
+        },
+    )
     assert dislike.status_code == 200
     assert dislike.json()["updated"] is True

@@ -9,6 +9,7 @@
 diversity 现在既可在 A/B rerank 层度量，也可基于 AgentAnswer.recommended_tracks
 做端到端推荐多样性。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -53,24 +54,22 @@ def local_ratio(answer: AgentAnswer) -> float | None:
     return local_n / len(tracks)
 
 
-def compute_metrics(
-    case: EvalCase, answer: AgentAnswer, relevance: float | None = None
-) -> dict[str, Any]:
+def compute_metrics(case: EvalCase, answer: AgentAnswer, relevance: float | None = None) -> dict[str, Any]:
     """汇总单个 case 的指标字典。relevance 由调用方传入（有 LLM key 时取 judge 分）。"""
     diversity = None
     if answer.recommended_tracks:
         diversity = intra_list_diversity(answer.recommended_tracks)
     ratio = local_ratio(answer)
-    prompt_signature = ", ".join(
-        f"{key}={value}" for key, value in sorted(answer.prompt_versions.items())
-    )
+    prompt_signature = ", ".join(f"{key}={value}" for key, value in sorted(answer.prompt_versions.items()))
     return {
         "intent_hit": intent_hit(case, answer),
         "anti_halluc_pass": anti_halluc_pass(case, answer),
         "junk_rate": round(junk_rate(case, answer), 3),
         "must_mention_hit": round(must_mention_hit(case, answer), 3),
         "local_ratio": round(ratio, 3) if ratio is not None else None,
-        "local_ratio_ok": (ratio <= case.max_local_ratio) if ratio is not None and case.max_local_ratio is not None else None,
+        "local_ratio_ok": (ratio <= case.max_local_ratio)
+        if ratio is not None and case.max_local_ratio is not None
+        else None,
         "answer_len": len(answer.answer),
         "trace_steps": len(answer.agent_trace),
         "recommended_tracks": len(answer.recommended_tracks),
@@ -94,30 +93,27 @@ def aggregate(per_case: dict[str, dict[str, Any]]) -> dict[str, Any]:
         "n_total_cases": len([v for k, v in per_case.items() if not k.startswith("__")]),
         "n_skipped_cases": len([v for k, v in per_case.items() if not k.startswith("__") and v.get("skipped")]),
         "intent_hit_rate": (
-            sum(1 for c in intent_checked if c["intent_hit"]) / len(intent_checked)
-            if intent_checked else None
+            sum(1 for c in intent_checked if c["intent_hit"]) / len(intent_checked) if intent_checked else None
         ),
         "anti_halluc_rate": sum(1 for c in cases if c["anti_halluc_pass"]) / len(cases) if cases else None,
-        "avg_junk_rate": (
-            sum(c.get("junk_rate", 0.0) for c in cases) / len(cases) if cases else None
-        ),
-        "avg_must_mention_hit": (
-            sum(c["must_mention_hit"] for c in cases) / len(cases) if cases else None
-        ),
+        "avg_junk_rate": (sum(c.get("junk_rate", 0.0) for c in cases) / len(cases) if cases else None),
+        "avg_must_mention_hit": (sum(c["must_mention_hit"] for c in cases) / len(cases) if cases else None),
         "avg_local_ratio": (
-            sum(c["local_ratio"] for c in cases if c["local_ratio"] is not None) /
-            len([c for c in cases if c["local_ratio"] is not None])
-            if any(c["local_ratio"] is not None for c in cases) else None
+            sum(c["local_ratio"] for c in cases if c["local_ratio"] is not None)
+            / len([c for c in cases if c["local_ratio"] is not None])
+            if any(c["local_ratio"] is not None for c in cases)
+            else None
         ),
         "local_ratio_pass_rate": (
-            sum(1 for c in cases if c["local_ratio_ok"]) /
-            len([c for c in cases if c["local_ratio_ok"] is not None])
-            if any(c["local_ratio_ok"] is not None for c in cases) else None
+            sum(1 for c in cases if c["local_ratio_ok"]) / len([c for c in cases if c["local_ratio_ok"] is not None])
+            if any(c["local_ratio_ok"] is not None for c in cases)
+            else None
         ),
         "avg_diversity": (
-            sum(c["diversity"] for c in cases if c["diversity"] is not None) /
-            len([c for c in cases if c["diversity"] is not None])
-            if any(c["diversity"] is not None for c in cases) else None
+            sum(c["diversity"] for c in cases if c["diversity"] is not None)
+            / len([c for c in cases if c["diversity"] is not None])
+            if any(c["diversity"] is not None for c in cases)
+            else None
         ),
         "avg_relevance": (sum(rel) / len(rel)) if rel else None,
         "n_cases": len(cases),

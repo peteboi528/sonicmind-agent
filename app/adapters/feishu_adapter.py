@@ -7,6 +7,7 @@
 依赖：httpx（已有）+ cryptography（新增，AES-CBC 解密）
 不依赖飞书 SDK，纯 HTTP + stdlib。
 """
+
 from __future__ import annotations
 
 import base64
@@ -67,14 +68,11 @@ class FeishuAdapter:
             return self._verify_token(body)
 
         logger.warning(
-            "Feishu: 未配置 encrypt_key 或 verification_token，请求未经校验放行"
-            "（仅限本地开发，公网部署不安全）"
+            "Feishu: 未配置 encrypt_key 或 verification_token，请求未经校验放行（仅限本地开发，公网部署不安全）"
         )
         return True
 
-    def verify_signature(
-        self, timestamp: str, nonce: str, body: bytes, signature: str
-    ) -> bool:
+    def verify_signature(self, timestamp: str, nonce: str, body: bytes, signature: str) -> bool:
         """飞书事件订阅签名校验：sha256(timestamp + nonce + encrypt_key + body)。"""
         if not (timestamp and nonce and signature):
             return False
@@ -114,9 +112,7 @@ class FeishuAdapter:
                 return None
         return payload
 
-    def parse_request(
-        self, body: bytes, headers: dict[str, str]
-    ) -> IncomingMessage | None:
+    def parse_request(self, body: bytes, headers: dict[str, str]) -> IncomingMessage | None:
         """解析飞书事件回调。
 
         返回 None 表示这是一个 verification challenge（已内部处理）。
@@ -194,7 +190,9 @@ class FeishuAdapter:
         body = {
             "receive_id": open_id,
             "msg_type": card.get("msg_type", "interactive"),
-            "content": card.get("content", "{}") if card.get("msg_type") == "text" else json.dumps(card, ensure_ascii=False),
+            "content": card.get("content", "{}")
+            if card.get("msg_type") == "text"
+            else json.dumps(card, ensure_ascii=False),
         }
 
         try:
@@ -238,34 +236,38 @@ class FeishuAdapter:
 
         # 引言文字
         if intro_text:
-            elements.append({
-                "tag": "markdown",
-                "content": intro_text[:600],
-            })
+            elements.append(
+                {
+                    "tag": "markdown",
+                    "content": intro_text[:600],
+                }
+            )
 
         # 歌曲列表（最多 5 首）
         for i, card in enumerate(cards[:5], 1):
-            elements.append({
-                "tag": "column_set",
-                "flex_mode": "bisect",
-                "background_style": "default",
-                "columns": [
-                    {
-                        "tag": "column",
-                        "width": "weighted",
-                        "weight": 1,
-                        "elements": [
-                            {
-                                "tag": "markdown",
-                                "content": f"**{i}. {card.title}**\n"
-                                          f"{card.artist}"
-                                          + (f" · {card.source}" if card.source else "")
-                                          + (f"\n_{card.reason}_" if card.reason else ""),
-                            },
-                        ],
-                    },
-                ],
-            })
+            elements.append(
+                {
+                    "tag": "column_set",
+                    "flex_mode": "bisect",
+                    "background_style": "default",
+                    "columns": [
+                        {
+                            "tag": "column",
+                            "width": "weighted",
+                            "weight": 1,
+                            "elements": [
+                                {
+                                    "tag": "markdown",
+                                    "content": f"**{i}. {card.title}**\n"
+                                    f"{card.artist}"
+                                    + (f" · {card.source}" if card.source else "")
+                                    + (f"\n_{card.reason}_" if card.reason else ""),
+                                },
+                            ],
+                        },
+                    ],
+                }
+            )
 
         return {
             "msg_type": "interactive",

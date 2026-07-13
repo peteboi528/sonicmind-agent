@@ -34,6 +34,7 @@ _CONTRASTIVE_MIN_SPREAD = 0.05
 @dataclass
 class PreferenceProfile:
     """用户偏好集合，供个性化锚做 Jaccard。"""
+
     genres: set[str]
     moods: set[str]
     scenarios: set[str]
@@ -206,7 +207,8 @@ def apply_profile_artist_adjust(
 
 
 def apply_scene_vibe_adjust(
-    scored: list[tuple[Any, RankingBreakdown]], query: str,
+    scored: list[tuple[Any, RankingBreakdown]],
+    query: str,
 ) -> list[tuple[Any, RankingBreakdown]]:
     """场景 vibe 调整：场景 query（深夜/下午/早晨…）下，vibe 偏离场景的候选降分。
 
@@ -388,7 +390,11 @@ def tri_anchor_rerank(
     semantic, semantic_ok = _semantic_anchor(query, tracks)
     personalize = _personalize_anchor(tracks, profile)
     behavior, behavior_ok = _behavior_anchor(tracks, behavior_scores)
-    collab = collaborative_scores if (collaborative_ok and collaborative_scores and len(collaborative_scores) == len(tracks)) else None
+    collab = (
+        collaborative_scores
+        if (collaborative_ok and collaborative_scores and len(collaborative_scores) == len(tracks))
+        else None
+    )
     collab_ok = collab is not None
     explore_ok = bool(settings.enable_explore and ts_scores)
     w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(semantic_ok, behavior_ok, collab_ok, explore_ok)
@@ -435,7 +441,9 @@ def _ts_score_for_track(ts_scores: dict[str, float] | None, track: Any) -> float
     if not ts_scores:
         return 0.0
     source = getattr(track, "source", "") or "local"
-    source_id = getattr(track, "source_id", None) or getattr(track, "external_id", None) or getattr(track, "asset_id", "") or ""
+    source_id = (
+        getattr(track, "source_id", None) or getattr(track, "external_id", None) or getattr(track, "asset_id", "") or ""
+    )
     title = (getattr(track, "title", "") or "").strip().lower()
     artist = (getattr(track, "artist", "") or "").strip().lower()
     keys = [
@@ -549,7 +557,10 @@ def _all_tags(track: Any) -> set[str]:
 def _track_identity(track: Any) -> tuple[str, str, str, str]:
     return (
         getattr(track, "source", "") or "local",
-        getattr(track, "source_id", None) or getattr(track, "external_id", None) or getattr(track, "asset_id", "") or "",
+        getattr(track, "source_id", None)
+        or getattr(track, "external_id", None)
+        or getattr(track, "asset_id", "")
+        or "",
         (getattr(track, "title", "") or "").strip().lower(),
         (getattr(track, "artist", "") or "").strip().lower(),
     )
@@ -590,8 +601,13 @@ def rerank_candidates(
 
     profile = PreferenceProfile.from_taste(taste, scenarios=scenarios)
     scored = tri_anchor_rerank(
-        query, tracks, profile, behavior_scores, lang_pref=lang_pref,
-        collaborative_scores=collaborative_scores, collaborative_ok=collaborative_ok,
+        query,
+        tracks,
+        profile,
+        behavior_scores,
+        lang_pref=lang_pref,
+        collaborative_scores=collaborative_scores,
+        collaborative_ok=collaborative_ok,
         ts_scores=ts_scores,
     )
     # 画像艺人微调（core/rising 加分、avoid 减分）：小幅、可选，空集时原样返回。

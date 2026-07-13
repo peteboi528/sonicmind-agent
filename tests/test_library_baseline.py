@@ -18,18 +18,28 @@ def test_library_baseline_is_read_only_and_ignores_ranking_counters(tmp_path):
     (media / "cover.jpg").write_bytes(b"cover-bytes")
     resource_path = tmp_path / "resource.sqlite"
     library = ResourceLibrary(resource_path)
-    library.upsert_track(ResourceTrack(
-        title="One", artist="Artist", source="local", source_id="a1", verified=True,
-    ))
+    library.upsert_track(
+        ResourceTrack(
+            title="One",
+            artist="Artist",
+            source="local",
+            source_id="a1",
+            verified=True,
+        )
+    )
 
     before = build_library_baseline(
-        store_root=store, resource_library=resource_path, media_root=media,
+        store_root=store,
+        resource_library=resource_path,
+        media_root=media,
     )
     before_mtime = resource_path.stat().st_mtime_ns
     with sqlite3.connect(resource_path) as connection:
         connection.execute("UPDATE tracks SET exposure_count=99,ts_alpha=8,ts_beta=3")
     after_counters = build_library_baseline(
-        store_root=store, resource_library=resource_path, media_root=media,
+        store_root=store,
+        resource_library=resource_path,
+        media_root=media,
     )
 
     assert before.asset_count == 2

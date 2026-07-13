@@ -31,6 +31,7 @@ def estimate_tokens(text: str) -> int:
 @dataclass
 class ContextSource:
     """一个上下文来源。priority 越小越重要，越后被截断。"""
+
     name: str
     content: str
     priority: int
@@ -46,10 +47,11 @@ class ContextSource:
 @dataclass
 class BudgetReport:
     """Token 预算分配报告，供透明度面板展示。"""
+
     total_budget: int
-    allocations: dict[str, int] = field(default_factory=dict)   # name -> 分配的 token
-    original: dict[str, int] = field(default_factory=dict)      # name -> 原始 token
-    truncated: list[str] = field(default_factory=list)          # 被截断的源名
+    allocations: dict[str, int] = field(default_factory=dict)  # name -> 分配的 token
+    original: dict[str, int] = field(default_factory=dict)  # name -> 原始 token
+    truncated: list[str] = field(default_factory=list)  # 被截断的源名
 
     @property
     def original_total(self) -> int:
@@ -64,7 +66,9 @@ class BudgetReport:
         return max(0, self.original_total - self.final_total)
 
     def as_lines(self) -> list[str]:
-        lines = [f"[gssc] 预算 {self.total_budget} tokens，原始 {self.original_total} → 最终 {self.final_total}（节省 {self.saved}）"]
+        lines = [
+            f"[gssc] 预算 {self.total_budget} tokens，原始 {self.original_total} → 最终 {self.final_total}（节省 {self.saved}）"
+        ]
         for name, alloc in self.allocations.items():
             orig = self.original.get(name, 0)
             mark = " (截断)" if name in self.truncated else ""

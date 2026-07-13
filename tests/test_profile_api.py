@@ -27,10 +27,13 @@ def test_profile_api_empty_then_populated():
     assert empty.json()["is_empty"] is True
 
     # 2) 喂偏好 + 排除项
-    client.post("/memory/update", json={
-        "user_id": "profile-api-user",
-        "event": "我喜欢 R&B 和治愈的流行",
-    })
+    client.post(
+        "/memory/update",
+        json={
+            "user_id": "profile-api-user",
+            "event": "我喜欢 R&B 和治愈的流行",
+        },
+    )
     client.post("/exclusions/profile-api-user", json={"rule": "抖音热歌"})
 
     populated = client.get("/profile/profile-api-user")
@@ -47,24 +50,29 @@ def test_profile_api_empty_then_populated():
 def test_profile_insight_feedback_flow():
     client = TestClient(app)
     _reset_user("profile-fb-user")
-    client.post("/memory/update", json={
-        "user_id": "profile-fb-user",
-        "event": "我喜欢电子和律动感强的歌",
-    })
+    client.post(
+        "/memory/update",
+        json={
+            "user_id": "profile-fb-user",
+            "event": "我喜欢电子和律动感强的歌",
+        },
+    )
     profile = client.get("/profile/profile-fb-user").json()
     assert profile["insights"]
     insight_id = profile["insights"][0]["insight_id"]
 
     # reject
-    resp = client.post(f"/profile/insights/{insight_id}/feedback",
-                       json={"user_id": "profile-fb-user", "action": "reject"})
+    resp = client.post(
+        f"/profile/insights/{insight_id}/feedback", json={"user_id": "profile-fb-user", "action": "reject"}
+    )
     assert resp.status_code == 200
     status = next(i["status"] for i in resp.json()["insights"] if i["insight_id"] == insight_id)
     assert status == "rejected"
 
     # 未知 action → 400
-    bad = client.post(f"/profile/insights/{insight_id}/feedback",
-                      json={"user_id": "profile-fb-user", "action": "nonsense"})
+    bad = client.post(
+        f"/profile/insights/{insight_id}/feedback", json={"user_id": "profile-fb-user", "action": "nonsense"}
+    )
     assert bad.status_code == 400
 
     # 删除反馈 → 恢复默认
@@ -78,14 +86,16 @@ def test_profile_insight_feedback_flow():
 def test_clear_profile_feedback():
     client = TestClient(app)
     _reset_user("profile-clear-user")
-    client.post("/memory/update", json={
-        "user_id": "profile-clear-user",
-        "event": "我喜欢爵士",
-    })
+    client.post(
+        "/memory/update",
+        json={
+            "user_id": "profile-clear-user",
+            "event": "我喜欢爵士",
+        },
+    )
     profile = client.get("/profile/profile-clear-user").json()
     insight_id = profile["insights"][0]["insight_id"]
-    client.post(f"/profile/insights/{insight_id}/feedback",
-                json={"user_id": "profile-clear-user", "action": "confirm"})
+    client.post(f"/profile/insights/{insight_id}/feedback", json={"user_id": "profile-clear-user", "action": "confirm"})
 
     cleared = client.delete("/profile/profile-clear-user")
     assert cleared.status_code == 200

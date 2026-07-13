@@ -10,6 +10,7 @@
 
 扫码状态机由前端驱动（每 2s 轮询），后端只在 code==803 时持久化 cookie。
 """
+
 from __future__ import annotations
 
 import logging
@@ -86,12 +87,14 @@ def netease_qr_status(unikey: str = Query(...), user_id: str = Query("web_user")
             vip_type=result.get("vip_type", 0),
             vip_label=result.get("vip_label", ""),
         )
-        payload.update({
-            "nickname": result.get("nickname"),
-            "avatar": result.get("avatar"),
-            "vip_type": result.get("vip_type", 0),
-            "vip_label": result.get("vip_label", ""),
-        })
+        payload.update(
+            {
+                "nickname": result.get("nickname"),
+                "avatar": result.get("avatar"),
+                "vip_type": result.get("vip_type", 0),
+                "vip_label": result.get("vip_label", ""),
+            }
+        )
     return payload
 
 
@@ -142,7 +145,10 @@ async def import_netease(request: Request):
 
     try:
         result = agent.import_netease_playlist(
-            playlist_ref, cookie=cookie, user_id=user_id, limit=limit,
+            playlist_ref,
+            cookie=cookie,
+            user_id=user_id,
+            limit=limit,
         )
     except ValueError as e:
         return {"error": str(e)}

@@ -6,10 +6,24 @@ from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 from pydantic import BaseModel
 
 _SECRET_KEYS = {
-    "api_key", "apikey", "authorization", "cookie", "cookies", "credential",
-    "credentials", "password", "secret", "token", "access_token", "refresh_token",
+    "api_key",
+    "apikey",
+    "authorization",
+    "cookie",
+    "cookies",
+    "credential",
+    "credentials",
+    "password",
+    "secret",
+    "token",
+    "access_token",
+    "refresh_token",
     # 长效会话凭证 / 第三方平台密钥（精确匹配，堵 graph state 残留缺口）
-    "music_u", "verification_token", "user_api_keys", "app_secret", "encrypt_key",
+    "music_u",
+    "verification_token",
+    "user_api_keys",
+    "app_secret",
+    "encrypt_key",
 }
 _BINARY_KEYS = {"audio", "raw_audio", "audio_bytes", "blob", "content_bytes", "file_bytes"}
 _MAX_HISTORY_ITEMS = 20
@@ -48,8 +62,7 @@ def sanitize_checkpoint_value(value: Any, *, parent_key: str = "") -> Any:
         return value[:_MAX_STRING_LENGTH] + "…"
     if isinstance(value, BaseModel):
         updates = {
-            name: sanitize_checkpoint_value(getattr(value, name), parent_key=name)
-            for name in type(value).model_fields
+            name: sanitize_checkpoint_value(getattr(value, name), parent_key=name) for name in type(value).model_fields
         }
         return value.model_copy(update=updates)
     return value
@@ -57,8 +70,7 @@ def sanitize_checkpoint_value(value: Any, *, parent_key: str = "") -> Any:
 
 def _contains_lyrics_result(results: Any) -> bool:
     return isinstance(results, list) and any(
-        isinstance(item, dict) and str(item.get("type") or "").lower() == "lyrics"
-        for item in results
+        isinstance(item, dict) and str(item.get("type") or "").lower() == "lyrics" for item in results
     )
 
 

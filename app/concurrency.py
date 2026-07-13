@@ -48,9 +48,7 @@ def _shared_executor() -> tuple[ThreadPoolExecutor, threading.BoundedSemaphore]:
                 from app.config import settings
 
                 workers = max(1, settings.concurrency_max_workers)
-                _SHARED_POOL = ThreadPoolExecutor(
-                    max_workers=workers, thread_name_prefix="ma-worker"
-                )
+                _SHARED_POOL = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="ma-worker")
                 _SHARED_SEM = threading.BoundedSemaphore(workers)
     assert _SHARED_POOL is not None and _SHARED_SEM is not None
     return _SHARED_POOL, _SHARED_SEM

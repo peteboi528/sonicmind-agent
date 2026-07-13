@@ -6,6 +6,7 @@ LangGraph 各节点共用同一套候选收集、去重、来源标签、
 `app.graph.nodes` 从这里导入并按需 re-export，避免结果协议漂移。
 路径与测试不破裂。
 """
+
 from __future__ import annotations
 
 import re
@@ -49,8 +50,7 @@ def source_label(source: str) -> str:
     return "本地库"
 
 
-_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5,
-            "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
 
 def _parse_cn_number(s: str) -> int | None:
@@ -176,11 +176,7 @@ def collect_known_titles(results: list[dict[str, Any]]) -> set[str]:
     含专辑名——artist_albums 结果里的专辑名来自网易云回查、可追溯，必须纳入白名单，
     否则 guard 会把答案里的《专辑名》当成幻觉歌名删掉。
     """
-    titles = {
-        getattr(track, "title", "")
-        for track in collect_tracks(results)
-        if getattr(track, "title", "")
-    }
+    titles = {getattr(track, "title", "") for track in collect_tracks(results) if getattr(track, "title", "")}
     for r in results:
         if r.get("type") == "artist_albums":
             for a in r.get("albums") or []:
@@ -243,7 +239,9 @@ def song_card(
         "title": getattr(track, "title", ""),
         "artist": getattr(track, "artist", "") or "未知",
         "source": getattr(track, "source", "local"),
-        "source_id": getattr(track, "source_id", "") or getattr(track, "external_id", "") or getattr(track, "asset_id", ""),
+        "source_id": getattr(track, "source_id", "")
+        or getattr(track, "external_id", "")
+        or getattr(track, "asset_id", ""),
         "playback_url": playback_url,
         "cover_url": getattr(track, "cover_url", None),
         "genre": getattr(track, "genre", []) or [],
@@ -305,7 +303,7 @@ def guard_answer(answer: str, known_titles: set[str]) -> tuple[str, list[str]]:
 
     def _replace(match: re.Match[str]) -> str:
         name = match.group(1)
-        prefix = answer[max(0, match.start() - 8):match.start()]
+        prefix = answer[max(0, match.start() - 8) : match.start()]
         if any(token in prefix for token in ["歌单", "专辑", "报告", "列表", "标题"]):
             return match.group(0)
         if _is_known(name):
@@ -324,7 +322,7 @@ def guard_answer(answer: str, known_titles: set[str]) -> tuple[str, list[str]]:
         name = match.group(1).strip()
         if not name or len(name) > 40 or any(p in name for p in "。！？.!?，,；;\n"):
             return match.group(0)
-        prefix = quoted_src[max(0, match.start() - 8):match.start()]
+        prefix = quoted_src[max(0, match.start() - 8) : match.start()]
         if any(token in prefix for token in ["歌单", "专辑", "报告", "列表", "标题", "需求", "请求"]):
             return match.group(0)
         if _is_known(name):

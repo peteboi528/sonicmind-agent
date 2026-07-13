@@ -113,17 +113,19 @@ def _build_catalog() -> list[ExternalTrack]:
     catalog: list[ExternalTrack] = []
     for title, artist, album, genres, moods, bpm, energy in all_data:
         ext_id = hashlib.sha1(f"{title}-{artist}".encode()).hexdigest()[:10]
-        catalog.append(ExternalTrack(
-            external_id=ext_id,
-            title=title,
-            artist=artist,
-            album=album,
-            genre=genres,
-            mood=moods,
-            tempo_bpm=bpm,
-            energy_level=energy,
-            source="mock",
-        ))
+        catalog.append(
+            ExternalTrack(
+                external_id=ext_id,
+                title=title,
+                artist=artist,
+                album=album,
+                genre=genres,
+                mood=moods,
+                tempo_bpm=bpm,
+                energy_level=energy,
+                source="mock",
+            )
+        )
     return catalog
 
 
@@ -154,7 +156,9 @@ class MockSource:
                 return track
         return None
 
-    def get_recommendations(self, seed_genres: list[str], seed_moods: list[str], limit: int = 20) -> list[ExternalTrack]:
+    def get_recommendations(
+        self, seed_genres: list[str], seed_moods: list[str], limit: int = 20
+    ) -> list[ExternalTrack]:
         scored: list[tuple[float, ExternalTrack]] = []
         for track in self.catalog:
             genre_match = len(set(track.genre) & set(seed_genres)) / max(len(seed_genres), 1)

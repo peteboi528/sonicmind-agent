@@ -32,9 +32,15 @@ class _Agent:
 
 def test_playlist_repair_detects_duplicates_and_jumps():
     tracks = [
-        ExternalTrack(external_id="1", title="Night Drive", artist="A", source="netease", genre=["Synthwave"], mood=["深夜"]),
-        ExternalTrack(external_id="2", title="Night Drive", artist="A", source="netease", genre=["Synthwave"], mood=["深夜"]),
-        ExternalTrack(external_id="3", title="Battle Cry", artist="B", source="netease", genre=["Metal"], mood=["热血"]),
+        ExternalTrack(
+            external_id="1", title="Night Drive", artist="A", source="netease", genre=["Synthwave"], mood=["深夜"]
+        ),
+        ExternalTrack(
+            external_id="2", title="Night Drive", artist="A", source="netease", genre=["Synthwave"], mood=["深夜"]
+        ),
+        ExternalTrack(
+            external_id="3", title="Battle Cry", artist="B", source="netease", genre=["Metal"], mood=["热血"]
+        ),
     ]
     payload = analyze_playlist_repair(
         agent=_Agent(UserMemory(user_id="u1"), []),
@@ -51,8 +57,26 @@ def test_playlist_repair_detects_duplicates_and_jumps():
 
 def test_taste_shift_detector_finds_emerging_genre():
     assets = [
-        Asset(asset_id="old-1", source_url="https://x/1", title="Old Jazz", artist="Jazzer", duration_seconds=180, genre=["Jazz"], mood=["放松"], status="analyzed"),
-        Asset(asset_id="new-1", source_url="https://x/2", title="New House", artist="House Hero", duration_seconds=180, genre=["House"], mood=["律动"], status="analyzed"),
+        Asset(
+            asset_id="old-1",
+            source_url="https://x/1",
+            title="Old Jazz",
+            artist="Jazzer",
+            duration_seconds=180,
+            genre=["Jazz"],
+            mood=["放松"],
+            status="analyzed",
+        ),
+        Asset(
+            asset_id="new-1",
+            source_url="https://x/2",
+            title="New House",
+            artist="House Hero",
+            duration_seconds=180,
+            genre=["House"],
+            mood=["律动"],
+            status="analyzed",
+        ),
     ]
     memory = UserMemory(
         user_id="u1",
@@ -86,7 +110,9 @@ def test_recommend_explainer_uses_recent_recommendation():
         user_id="u1",
         taste_profile=TasteProfile(top_genres=[("R&B", 3.0)], top_moods=[("放松", 2.0)]),
     )
-    track = ExternalTrack(external_id="1", title="Nikes", artist="Frank Ocean", source="netease", genre=["R&B"], mood=["放松"])
+    track = ExternalTrack(
+        external_id="1", title="Nikes", artist="Frank Ocean", source="netease", genre=["R&B"], mood=["放松"]
+    )
     recommendation = SimpleNamespace(
         tracks=[SimpleNamespace(asset=track, reason="贴近你最近常听的 R&B 和放松氛围")],
     )
@@ -102,11 +128,25 @@ def test_recommend_explainer_uses_recent_recommendation():
 
 def test_compose_deterministic_answers_for_new_tool_types():
     concert = nodes._compose_deterministic_answer(
-        [{"type": "concert_events", "artist": "The Weeknd", "city": "", "events": [{"title": "After Hours Tour", "source_url": "https://example.com"}]}],
+        [
+            {
+                "type": "concert_events",
+                "artist": "The Weeknd",
+                "city": "",
+                "events": [{"title": "After Hours Tour", "source_url": "https://example.com"}],
+            }
+        ],
         SimpleNamespace(intent="concert_events"),
     )
     repair = nodes._compose_deterministic_answer(
-        [{"type": "playlist_repair", "issues": [{"summary": "存在重复曲目"}], "repair_actions": [], "suggested_replacements": []}],
+        [
+            {
+                "type": "playlist_repair",
+                "issues": [{"summary": "存在重复曲目"}],
+                "repair_actions": [],
+                "suggested_replacements": [],
+            }
+        ],
         SimpleNamespace(intent="playlist_repair"),
     )
     assert "The Weeknd" in concert
@@ -115,24 +155,30 @@ def test_compose_deterministic_answers_for_new_tool_types():
 
 def test_concert_answer_separates_verified_events_from_weak_sources():
     concert = nodes._compose_deterministic_answer(
-        [{
-            "type": "concert_events",
-            "artist": "The Weeknd",
-            "city": "",
-            "events": [{
-                "title": "After Hours Til Dawn Tour",
-                "date_text": "2026-10-01",
-                "city": "Hong Kong",
-                "venue": "启德体育园",
-                "source_name": "theweeknd.com",
-                "source_url": "https://www.theweeknd.com/tour",
-            }],
-            "unverified_sources": [{
-                "title": "演出曲目单：The Weeknd 巡演",
-                "source_name": "music.apple.com",
-                "source_url": "https://music.apple.com/example",
-            }],
-        }],
+        [
+            {
+                "type": "concert_events",
+                "artist": "The Weeknd",
+                "city": "",
+                "events": [
+                    {
+                        "title": "After Hours Til Dawn Tour",
+                        "date_text": "2026-10-01",
+                        "city": "Hong Kong",
+                        "venue": "启德体育园",
+                        "source_name": "theweeknd.com",
+                        "source_url": "https://www.theweeknd.com/tour",
+                    }
+                ],
+                "unverified_sources": [
+                    {
+                        "title": "演出曲目单：The Weeknd 巡演",
+                        "source_name": "music.apple.com",
+                        "source_url": "https://music.apple.com/example",
+                    }
+                ],
+            }
+        ],
         SimpleNamespace(intent="concert_events"),
     )
     assert "After Hours Til Dawn Tour" in concert
@@ -143,11 +189,13 @@ def test_concert_answer_separates_verified_events_from_weak_sources():
 
 def test_music_compare_returns_honest_message_when_entity_missing():
     text = nodes._compose_deterministic_answer(
-        [{
-            "type": "music_compare",
-            "message": "我只稳定识别到《Drake》，另一侧比较对象没有解析稳，这轮先不硬做比较。",
-            "entities": [{"name": "Drake", "type": "artist"}],
-        }],
+        [
+            {
+                "type": "music_compare",
+                "message": "我只稳定识别到《Drake》，另一侧比较对象没有解析稳，这轮先不硬做比较。",
+                "entities": [{"name": "Drake", "type": "artist"}],
+            }
+        ],
         SimpleNamespace(intent="music_compare"),
     )
     assert "Drake" in text
@@ -156,11 +204,13 @@ def test_music_compare_returns_honest_message_when_entity_missing():
 
 def test_music_compare_prefers_structured_compare_answer():
     text = nodes._compose_deterministic_answer(
-        [{
-            "type": "music_compare",
-            "answer": "Drake 和 Future 的区别在于旋律结构 vs trap 状态，先听 Jumpman。",
-            "dossier": {"entity": {"name": "Drake", "type": "artist"}},
-        }],
+        [
+            {
+                "type": "music_compare",
+                "answer": "Drake 和 Future 的区别在于旋律结构 vs trap 状态，先听 Jumpman。",
+                "dossier": {"entity": {"name": "Drake", "type": "artist"}},
+            }
+        ],
         SimpleNamespace(intent="music_compare"),
     )
 

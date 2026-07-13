@@ -42,13 +42,9 @@ JUDGE_SYSTEM = """\
 def _build_judge_prompt(case: EvalCase, agent_answer: str) -> str:
     history_text = ""
     if case.history:
-        history_text = "对话历史：\n" + "\n".join(
-            f"{m['role']}: {m['content']}" for m in case.history
-        ) + "\n\n"
+        history_text = "对话历史：\n" + "\n".join(f"{m['role']}: {m['content']}" for m in case.history) + "\n\n"
 
-    criteria_text = "\n".join(
-        f"  {i + 1}. {c}" for i, c in enumerate(case.criteria)
-    )
+    criteria_text = "\n".join(f"  {i + 1}. {c}" for i, c in enumerate(case.criteria))
 
     return f"""场景：{case.description}
 

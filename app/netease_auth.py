@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 _HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://music.163.com/",
     "Content-Type": "application/x-www-form-urlencoded",
     "Cookie": "os=pc; appver=2.10.11; osver=MacOS14;",
@@ -115,15 +115,9 @@ def check_qr_status(unikey: str) -> dict:
         full = _full_cookie_string()
         result["cookie"] = full if "MUSIC_U=" in full else (music_u or None)
         result["nickname"] = (
-            resp.get("nickname")
-            or resp.get("account", {}).get("userName")
-            or resp.get("profile", {}).get("nickname")
+            resp.get("nickname") or resp.get("account", {}).get("userName") or resp.get("profile", {}).get("nickname")
         )
-        result["avatar"] = (
-            resp.get("avatarUrl")
-            or resp.get("profile", {}).get("avatarUrl")
-            or resp.get("avatar")
-        )
+        result["avatar"] = resp.get("avatarUrl") or resp.get("profile", {}).get("avatarUrl") or resp.get("avatar")
         # 登录成功后立即拉取账号详情，补全昵称/头像并记录 VIP 等级
         if music_u:
             info = fetch_account_info(music_u)
@@ -172,11 +166,12 @@ def fetch_account_info(cookie: str) -> dict | None:
 
 # ── 歌单导入 ──────────────────────────────────────────────────────────────
 
+
 def _api_get(url: str, cookie: str = "") -> dict | None:
     """GET 一个网易云 API，带可选登录 cookie。失败返回 None。"""
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Referer": "https://music.163.com/",
         "Cookie": _cookie_header(cookie) if cookie else "os=pc;",
     }
@@ -223,14 +218,16 @@ def fetch_playlist_tracks(playlist_id: str, cookie: str = "", limit: int = 200) 
     for s in songs:
         artists = "、".join(a.get("name", "") for a in (s.get("ar") or []) if a.get("name"))
         album = s.get("al") or {}
-        out["tracks"].append({
-            "song_id": str(s.get("id")),
-            "title": s.get("name", ""),
-            "artist": artists,
-            "album": album.get("name", ""),
-            "cover": album.get("picUrl", ""),
-            "duration": int((s.get("dt") or 0) // 1000) or 180,
-        })
+        out["tracks"].append(
+            {
+                "song_id": str(s.get("id")),
+                "title": s.get("name", ""),
+                "artist": artists,
+                "album": album.get("name", ""),
+                "cover": album.get("picUrl", ""),
+                "duration": int((s.get("dt") or 0) // 1000) or 180,
+            }
+        )
     return out
 
 
@@ -248,15 +245,19 @@ def fetch_user_playlists(cookie: str, uid: str | None = None) -> list[dict]:
         cookie,
     )
     playlists = (resp or {}).get("playlist") or []
-    return [{
-        "id": str(p.get("id")),
-        "name": p.get("name", ""),
-        "cover": p.get("coverImgUrl", ""),
-        "count": p.get("trackCount", 0),
-    } for p in playlists]
+    return [
+        {
+            "id": str(p.get("id")),
+            "name": p.get("name", ""),
+            "cover": p.get("coverImgUrl", ""),
+            "count": p.get("trackCount", 0),
+        }
+        for p in playlists
+    ]
 
 
 # ── Persistence ─────────────────────────────────────────────────────────
+
 
 def _path(user_id: str) -> Path:
     # Keep auth data beside the active JsonStore.  A fixed data/store path used

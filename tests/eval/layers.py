@@ -10,6 +10,7 @@ Usage:
     python -m tests.eval.layers                  # 跑 + 打印 + 对比 layers_baseline.json
     python -m tests.eval.layers --update-baseline
 """
+
 from __future__ import annotations
 
 import argparse
@@ -34,7 +35,7 @@ BASELINE_PATH = Path(__file__).parent / "layers_baseline.json"
 class HygieneCase:
     case_id: str
     query: str
-    junk: list[tuple[str, str]]          # (title, artist) —— 必须被滤掉
+    junk: list[tuple[str, str]]  # (title, artist) —— 必须被滤掉
     legit: list[tuple[str, str]] = field(default_factory=list)  # 必须保留
 
 
@@ -43,9 +44,9 @@ HYGIENE_CASES: list[HygieneCase] = [
         case_id="deep-night-functional-and-mood",
         query="推荐几首适合深夜的歌",
         junk=[
-            ("慵懒的午后", "轻音乐钢琴曲"),                 # 功能艺人
+            ("慵懒的午后", "轻音乐钢琴曲"),  # 功能艺人
             ("Sunny Afternoon(慵懒午后)", "瑶啊瑶、极音阁"),  # 括号 mood 描述
-            ("雨爱 - R&B氛围男声", "小仓鼠要早睡"),           # 破折号 mood 描述
+            ("雨爱 - R&B氛围男声", "小仓鼠要早睡"),  # 破折号 mood 描述
         ],
         legit=[
             ("Sober", "Yo Trane"),
@@ -56,23 +57,20 @@ HYGIENE_CASES: list[HygieneCase] = [
         case_id="cover-instrumental",
         query="推荐几首歌",
         junk=[
-            ("夜曲(钢琴曲)(原唱：周杰伦)", "翻唱账号"),       # 括号 + 钢琴曲 + 原唱
-            ("某歌 - 助眠版", "网名用户"),                    # 破折号 + 助眠
-            ("Beat - 8D Audio", "user"),                     # 8d 改版
+            ("夜曲(钢琴曲)(原唱：周杰伦)", "翻唱账号"),  # 括号 + 钢琴曲 + 原唱
+            ("某歌 - 助眠版", "网名用户"),  # 破折号 + 助眠
+            ("Beat - 8D Audio", "user"),  # 8d 改版
         ],
         legit=[
             ("Ditto", "NewJeans"),
-            ("Vampire - Live", "Olivia Rodrigo"),            # 合法破折号后缀，须保留
+            ("Vampire - Live", "Olivia Rodrigo"),  # 合法破折号后缀，须保留
         ],
     ),
 ]
 
 
 def _tracks(pairs: list[tuple[str, str]]) -> list[ExternalTrack]:
-    return [
-        ExternalTrack(external_id=f"{t}|{a}", title=t, artist=a, source="netease")
-        for t, a in pairs
-    ]
+    return [ExternalTrack(external_id=f"{t}|{a}", title=t, artist=a, source="netease") for t, a in pairs]
 
 
 def run_hygiene() -> dict:
@@ -92,12 +90,14 @@ def run_hygiene() -> dict:
             junk_survived = [t for t in case.junk if t[0] in accepted_titles]
             legit_dropped = [t for t in case.legit if t[0] not in accepted_titles]
             passed = not junk_survived and not legit_dropped
-            results.append({
-                "case_id": case.case_id,
-                "passed": passed,
-                "junk_survived": junk_survived,
-                "legit_dropped": legit_dropped,
-            })
+            results.append(
+                {
+                    "case_id": case.case_id,
+                    "passed": passed,
+                    "junk_survived": junk_survived,
+                    "legit_dropped": legit_dropped,
+                }
+            )
     passed_n = sum(1 for r in results if r["passed"])
     return {
         "cases": results,
@@ -110,29 +110,28 @@ def run_hygiene() -> dict:
 class SceneVibeCase:
     case_id: str
     scene: str
-    higher: str   # 期望契合度更高的文本
-    lower: str    # 期望契合度更低的文本
+    higher: str  # 期望契合度更高的文本
+    lower: str  # 期望契合度更低的文本
 
 
 SCENE_VIBE_CASES: list[SceneVibeCase] = [
     # 描述性探针（含场景词，基本能分开——验证机制本身）
-    SceneVibeCase("night-vs-afternoon", "深夜",
-                  higher="深夜 伤感 慵懒 R&B 慢板 内省",
-                  lower="Sunny Afternoon 慵懒午后 明亮 轻快"),
-    SceneVibeCase("afternoon-vs-night", "下午",
-                  higher="午后 阳光 慵懒 轻快 明亮",
-                  lower="深夜 伤感 迷幻 慢板 内省"),
-    SceneVibeCase("morning-vs-night", "早晨",
-                  higher="清晨 阳光 清爽 轻快 元气",
-                  lower="深夜 伤感 迷幻 慢板"),
+    SceneVibeCase(
+        "night-vs-afternoon", "深夜", higher="深夜 伤感 慵懒 R&B 慢板 内省", lower="Sunny Afternoon 慵懒午后 明亮 轻快"
+    ),
+    SceneVibeCase("afternoon-vs-night", "下午", higher="午后 阳光 慵懒 轻快 明亮", lower="深夜 伤感 迷幻 慢板 内省"),
+    SceneVibeCase("morning-vs-night", "早晨", higher="清晨 阳光 清爽 轻快 元气", lower="深夜 伤感 迷幻 慢板"),
     # 真实短标题（用户实际场景：标题露馅的下午曲在深夜 query 里应低分）。
     # 这才是 scene-vibe 对用户痛点的真实考验；标题里没时段词的纯 vibe 区分仍是已知天花板。
-    SceneVibeCase("real-afternoon-title-in-night", "深夜",
-                  higher="Sober",            # Yo Trane，无时段词
-                  lower="Sunny Afternoon"),  # 标题明写 afternoon——深夜里必须更低
-    SceneVibeCase("real-night-title-in-afternoon", "下午",
-                  higher="Sunny Afternoon",
-                  lower="夜曲"),             # 周杰伦「夜曲」——下午场景里应低于 Sunny Afternoon
+    SceneVibeCase(
+        "real-afternoon-title-in-night",
+        "深夜",
+        higher="Sober",  # Yo Trane，无时段词
+        lower="Sunny Afternoon",
+    ),  # 标题明写 afternoon——深夜里必须更低
+    SceneVibeCase(
+        "real-night-title-in-afternoon", "下午", higher="Sunny Afternoon", lower="夜曲"
+    ),  # 周杰伦「夜曲」——下午场景里应低于 Sunny Afternoon
 ]
 
 
@@ -161,12 +160,17 @@ def run_scene_vibe() -> dict:
             weak = passed and margin is not None and margin < 0.05
             if weak:
                 weak_n += 1
-            results.append({
-                "case_id": case.case_id, "scene": case.scene,
-                "higher_fit": round(hi, 3) if hi is not None else None,
-                "lower_fit": round(lo, 3) if lo is not None else None,
-                "margin": margin, "passed": passed, "weak": weak,
-            })
+            results.append(
+                {
+                    "case_id": case.case_id,
+                    "scene": case.scene,
+                    "higher_fit": round(hi, 3) if hi is not None else None,
+                    "lower_fit": round(lo, 3) if lo is not None else None,
+                    "margin": margin,
+                    "passed": passed,
+                    "weak": weak,
+                }
+            )
     passed_n = sum(1 for r in results if r["passed"])
     return {
         "skipped": False,
@@ -198,14 +202,19 @@ LOCAL_RATIO_CASES: list[LocalRatioCase] = [
 
 def run_local_ratio() -> dict:
     from app.agent import _local_ratio_from_query  # 局部导入，避免拉起整个 agent 依赖
+
     results = []
     for case in LOCAL_RATIO_CASES:
         ratio = _local_ratio_from_query(case.query, default=0.4)
-        results.append({
-            "case_id": case.case_id, "query": case.query,
-            "expected": case.expect, "actual": ratio,
-            "passed": abs(ratio - case.expect) < 1e-9,
-        })
+        results.append(
+            {
+                "case_id": case.case_id,
+                "query": case.query,
+                "expected": case.expect,
+                "actual": ratio,
+                "passed": abs(ratio - case.expect) < 1e-9,
+            }
+        )
     passed_n = sum(1 for r in results if r["passed"])
     return {"cases": results, "accuracy": round(passed_n / len(results), 3) if results else None}
 
@@ -231,13 +240,15 @@ def run_content_negation() -> dict:
     results = []
     for case in CONTENT_NEGATION_CASES:
         actual = extract_content_negations(case.query)
-        results.append({
-            "case_id": case.case_id,
-            "query": case.query,
-            "expected": case.expected,
-            "actual": actual,
-            "passed": actual == case.expected,
-        })
+        results.append(
+            {
+                "case_id": case.case_id,
+                "query": case.query,
+                "expected": case.expected,
+                "actual": actual,
+                "passed": actual == case.expected,
+            }
+        )
     passed_n = sum(1 for r in results if r["passed"])
     return {"cases": results, "accuracy": round(passed_n / len(results), 3) if results else None}
 
@@ -274,11 +285,15 @@ def _print_report(hygiene: dict, scene: dict, local: dict, negation: dict, summa
         for r in scene["cases"]:
             flag = "PASS" if r["passed"] else "FAIL"
             weak = "  ⚠️弱区分(margin<0.05)" if r.get("weak") else ""
-            print(f"  [{flag}] {r['case_id']} (scene={r['scene']}: "
-                  f"higher={r['higher_fit']} > lower={r['lower_fit']}, margin={r['margin']}){weak}")
-        print(f"  discrimination_rate = {summary['scene_vibe_discrimination_rate']}"
-              f"  avg_margin = {summary['scene_vibe_avg_margin']}"
-              f"  weak_count = {summary['scene_vibe_weak_count']}")
+            print(
+                f"  [{flag}] {r['case_id']} (scene={r['scene']}: "
+                f"higher={r['higher_fit']} > lower={r['lower_fit']}, margin={r['margin']}){weak}"
+            )
+        print(
+            f"  discrimination_rate = {summary['scene_vibe_discrimination_rate']}"
+            f"  avg_margin = {summary['scene_vibe_avg_margin']}"
+            f"  weak_count = {summary['scene_vibe_weak_count']}"
+        )
 
     print("\n=== Local-ratio（不要/减少 local 检测）===")
     for r in local["cases"]:

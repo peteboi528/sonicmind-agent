@@ -1,4 +1,5 @@
 """graph 层跨轮对话、去重、查询改写与状态持久化逻辑。"""
+
 from __future__ import annotations
 
 import logging
@@ -53,9 +54,11 @@ def _apply_dialogue_continuation(
     # 本轮正向实体代表话题切换；但“不要越南”里被 LLM 抽出的“越南”不是正向实体。
     if current_entities:
         if current_entities != rp.entities:
-            plan = plan.model_copy(update={
-                "retrieval_plan": rp.model_copy(update={"entities": current_entities}),
-            })
+            plan = plan.model_copy(
+                update={
+                    "retrieval_plan": rp.model_copy(update={"entities": current_entities}),
+                }
+            )
         return _mount_excluded(plan), ""
 
     prev_entities = _without_negative_constraints(dialogue_state.get("entities") or [], negative_constraints)
@@ -81,13 +84,15 @@ def _apply_dialogue_continuation(
         language_filter=_continuation_language_filter(rp.language_filter, negative_constraints),
         excluded_terms=list(dict.fromkeys([*rp.excluded_terms, *negative_constraints])),
     )
-    new_plan = plan.model_copy(update={
-        "intent": intent,
-        "strategy": spec.strategy_for(use_web),
-        "tools_needed": spec.tools_for(use_web),
-        "online_required": use_web,
-        "retrieval_plan": merged,
-    })
+    new_plan = plan.model_copy(
+        update={
+            "intent": intent,
+            "strategy": spec.strategy_for(use_web),
+            "tools_needed": spec.tools_for(use_web),
+            "online_required": use_web,
+            "retrieval_plan": merged,
+        }
+    )
     return _mount_excluded(new_plan), "、".join(prev_entities) or prev_intent
 
 
@@ -105,7 +110,8 @@ def _without_negative_constraints(values: list[str], constraints: list[str]) -> 
     if not blocked:
         return list(values)
     return [
-        value for value in values
+        value
+        for value in values
         if not any(block in _constraint_key(value) or _constraint_key(value) in block for block in blocked)
     ]
 
@@ -114,7 +120,9 @@ def _strip_negative_query(text: str, constraints: list[str]) -> str:
     cleaned = re.sub(
         r"(?:不要|别放|别推|别推荐|不想听|排除|避开|去掉|no\s+|without\s+|exclude\s+|avoid\s+)"
         r"[^，。,.!?！？]*",
-        " ", text, flags=re.IGNORECASE,
+        " ",
+        text,
+        flags=re.IGNORECASE,
     )
     for constraint in constraints:
         for alias in sorted(expand_content_negation(constraint), key=len, reverse=True):
@@ -176,11 +184,7 @@ def _normalize_query_fragment(value: str) -> str:
             tokens = tokens[:half]
     compact: list[str] = []
     for token in tokens:
-        if (
-            compact
-            and compact[-1].lower() == token.lower()
-            and re.fullmatch(r"[一-龥]{1,8}", token)
-        ):
+        if compact and compact[-1].lower() == token.lower() and re.fullmatch(r"[一-龥]{1,8}", token):
             continue
         compact.append(token)
     return " ".join(compact).strip()
@@ -291,7 +295,9 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
     genre_tags = merged_tags(rp.genre_filter, turn_tags["genre"], prior_dialogue.get("genre_tags") or [])
     mood_tags = merged_tags(rp.mood_filter, turn_tags["mood"], prior_dialogue.get("mood_tags") or [])
     scenario_tags = merged_tags(
-        rp.scenario_filter, turn_tags["scenario"], prior_dialogue.get("scenario_tags") or [],
+        rp.scenario_filter,
+        turn_tags["scenario"],
+        prior_dialogue.get("scenario_tags") or [],
     )
     # 收集本轮最终展示的曲目摘要，用于下一轮去重
     listed = _select_listed_tracks(state.get("results", []), plan)

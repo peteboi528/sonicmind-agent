@@ -18,6 +18,7 @@ DashScope Qwen-VL）走标准 OpenAI 兼容 ``/chat/completions``，``content`` 
 原样复用，本模块不碰图、不碰 agent。多行格式让 ``resolve_music_entities`` 干净解析出专辑名/歌手，
 末行的 ``这张专辑`` 保证关键词兜底命中 album_deep_dive 意图。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -85,6 +86,7 @@ class CoverRecognition:
 # ---------------------------------------------------------------------------
 # 图片预处理
 # ---------------------------------------------------------------------------
+
 
 def _encode_image_data_url(image_bytes: bytes, mime: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(image_bytes).decode()}"
@@ -159,6 +161,7 @@ def build_thumbnail_data_url(image_bytes: bytes, max_side: int = 400) -> str:
 # ---------------------------------------------------------------------------
 # 视觉模型调用（模块级，便于测试 monkeypatch）
 # ---------------------------------------------------------------------------
+
 
 async def _vision_chat_completion(payload: dict[str, Any], headers: dict[str, str]) -> str:
     """POST {vision_base_url}/chat/completions，返回 assistant 文本。
@@ -336,6 +339,7 @@ async def recognize_cover_via_ocr(image_bytes: bytes) -> CoverRecognition | None
 # 主入口 + 查询改写
 # ---------------------------------------------------------------------------
 
+
 async def recognize_album_cover(image_bytes: bytes, mime: str = "image/jpeg") -> CoverRecognition:
     """封面识别主入口：视觉优先 → OCR 兜底 → none。永远返回 CoverRecognition，不抛错。"""
     vision = await recognize_cover_via_vision(image_bytes, mime)
@@ -377,5 +381,6 @@ def synthesize_query(rec: CoverRecognition) -> str | None:
         # OCR 只有裸文字：当专辑名交给 MusicBrainz 模糊匹配，比解析自然语言句子稳。
         # OCR 文本攻击者可控（恶意封面/印刷文字），剔除常见注入话术防越权流入下游 prompt。
         from app.prompts.untrusted_boundary import strip_directive_phrases
+
         return f"album\n{strip_directive_phrases(rec.raw_text)}\n解读这张专辑"
     return None

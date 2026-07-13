@@ -67,8 +67,13 @@ async def asearch_youtube_many(query: str, limit: int = 3) -> list[dict[str, str
     }
     try:
         response = await source_transport.request(
-            "youtube", "GET", "https://www.youtube.com/results",
-            params={"search_query": query}, headers=headers, retries=1, concurrency=3,
+            "youtube",
+            "GET",
+            "https://www.youtube.com/results",
+            params={"search_query": query},
+            headers=headers,
+            retries=1,
+            concurrency=3,
         )
         return _parse_youtube_search_html(response.text, limit)
     except Exception:
@@ -82,8 +87,12 @@ async def afetch_youtube_title(video_id: str) -> str:
     url = f"https://www.youtube.com/watch?v={video_id}"
     try:
         response = await source_transport.request(
-            "youtube", "GET", "https://www.youtube.com/oembed",
-            params={"url": url, "format": "json"}, retries=1, concurrency=3,
+            "youtube",
+            "GET",
+            "https://www.youtube.com/oembed",
+            params={"url": url, "format": "json"},
+            retries=1,
+            concurrency=3,
         )
         return str(response.json().get("title") or "")
     except Exception:

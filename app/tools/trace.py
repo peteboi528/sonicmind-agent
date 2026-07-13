@@ -70,7 +70,15 @@ class LocalTraceStore:
         with self._lock, self._connect() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO runs(run_id,thread_id,user_hash,query_excerpt,status,started_at,attrs_json) VALUES(?,?,?,?,?,?,?)",
-                (run_id, thread_id, user_hash, query[:200], "running", datetime.now(UTC).isoformat(), json.dumps(_redact(attrs), ensure_ascii=False)),
+                (
+                    run_id,
+                    thread_id,
+                    user_hash,
+                    query[:200],
+                    "running",
+                    datetime.now(UTC).isoformat(),
+                    json.dumps(_redact(attrs), ensure_ascii=False),
+                ),
             )
 
     def finish_run(self, run_id: str, status: str, duration_ms: float, **attrs: Any) -> None:
@@ -79,16 +87,46 @@ class LocalTraceStore:
         with self._lock, self._connect() as connection:
             connection.execute(
                 "UPDATE runs SET status=?,finished_at=?,duration_ms=?,attrs_json=? WHERE run_id=?",
-                (status, datetime.now(UTC).isoformat(), duration_ms, json.dumps(_redact(attrs), ensure_ascii=False), run_id),
+                (
+                    status,
+                    datetime.now(UTC).isoformat(),
+                    duration_ms,
+                    json.dumps(_redact(attrs), ensure_ascii=False),
+                    run_id,
+                ),
             )
 
-    def span(self, *, span_id: str, run_id: str, name: str, kind: str, status: str, started_at: str, duration_ms: float, retries: int = 0, parent_span_id: str | None = None, attrs: dict[str, Any] | None = None) -> None:
+    def span(
+        self,
+        *,
+        span_id: str,
+        run_id: str,
+        name: str,
+        kind: str,
+        status: str,
+        started_at: str,
+        duration_ms: float,
+        retries: int = 0,
+        parent_span_id: str | None = None,
+        attrs: dict[str, Any] | None = None,
+    ) -> None:
         if not self.enabled:
             return
         with self._lock, self._connect() as connection:
             connection.execute(
                 "INSERT OR REPLACE INTO spans(span_id,run_id,parent_span_id,name,kind,status,started_at,duration_ms,retries,attrs_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (span_id, run_id, parent_span_id, name, kind, status, started_at, duration_ms, retries, json.dumps(_redact(attrs or {}), ensure_ascii=False)),
+                (
+                    span_id,
+                    run_id,
+                    parent_span_id,
+                    name,
+                    kind,
+                    status,
+                    started_at,
+                    duration_ms,
+                    retries,
+                    json.dumps(_redact(attrs or {}), ensure_ascii=False),
+                ),
             )
 
     def event(self, run_id: str, name: str, *, span_id: str | None = None, **attrs: Any) -> None:
@@ -111,4 +149,3 @@ class LocalTraceStore:
                 connection.execute(f"DELETE FROM spans WHERE run_id IN ({marks})", old_runs)
                 connection.execute(f"DELETE FROM events WHERE run_id IN ({marks})", old_runs)
                 connection.execute(f"DELETE FROM runs WHERE run_id IN ({marks})", old_runs)
-

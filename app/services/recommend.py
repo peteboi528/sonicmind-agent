@@ -71,12 +71,13 @@ class RecommendationService:
         anchors = extract_recommendation_anchors(goal)
         scene_queries = scene_playlist_queries(goal) or scene_playlist_queries(search_goal)
         has_entity = query_has_entity(search_goal)
-        taste_summary = summarize_taste(user_id, include_artists=has_entity, memory=memory) if memory.taste_profile else ""
-        library_artists = list({asset.artist for asset in self._list_assets() if asset.artist})[:10] if has_entity else []
-        seed_supply = sum(
-            1 for track in (seed_tracks or [])
-            if is_verified_track(track) and is_quality_track(track)
+        taste_summary = (
+            summarize_taste(user_id, include_artists=has_entity, memory=memory) if memory.taste_profile else ""
         )
+        library_artists = (
+            list({asset.artist for asset in self._list_assets() if asset.artist})[:10] if has_entity else []
+        )
+        seed_supply = sum(1 for track in (seed_tracks or []) if is_verified_track(track) and is_quality_track(track))
         return RecommendationContext(
             memory=memory,
             memory_query=memory_query,
@@ -105,7 +106,8 @@ class RecommendationService:
             *(name.lower() for name, _ in taste.top_artists[:8]),
         }
         query_terms = {
-            token.lower() for token in re.findall(r"[A-Za-z0-9&'-]+|[一-鿿㐀-䶿]{2,}", query or "")
+            token.lower()
+            for token in re.findall(r"[A-Za-z0-9&'-]+|[一-鿿㐀-䶿]{2,}", query or "")
             if token.lower() not in self._query_noise
         }
         scored: list[tuple[int, Asset]] = []
@@ -114,9 +116,14 @@ class RecommendationService:
                 continue
             if self.library.is_disliked(user_id, track):
                 continue
-            searchable = " ".join([
-                track.title, track.artist or "", *track.genre, *track.mood,
-            ]).lower()
+            searchable = " ".join(
+                [
+                    track.title,
+                    track.artist or "",
+                    *track.genre,
+                    *track.mood,
+                ]
+            ).lower()
             query_hits = sum(1 for term in query_terms if term in searchable)
             taste_hits = sum(1 for term in preferred if term and term in searchable)
             score = query_hits * 3 + taste_hits
@@ -194,9 +201,7 @@ class RecommendationService:
         candidates.extend(playlist_tracks)
 
         if disable_discovery_expansion:
-            trace_lines.append(
-                f"budget_degrade={degrade}, skip=llm_candidates+lastfm"
-            )
+            trace_lines.append(f"budget_degrade={degrade}, skip=llm_candidates+lastfm")
         elif not prefer_playlist:
             llm_tracks = discover_from_llm(
                 query=goal,
@@ -261,10 +266,13 @@ class RecommendationService:
         is_quality_track: Callable[[Asset | ExternalTrack], bool],
         is_context_compatible: Callable[[str, Asset | ExternalTrack], bool],
         allow_variants: bool,
-        filter_excluded_tracks: Callable[[list[Asset | ExternalTrack], list[dict[str, str]]], list[Asset | ExternalTrack]],
+        filter_excluded_tracks: Callable[
+            [list[Asset | ExternalTrack], list[dict[str, str]]], list[Asset | ExternalTrack]
+        ],
     ) -> list[Asset | ExternalTrack]:
         verified = [
-            track for track in dedupe_tracks(candidates)
+            track
+            for track in dedupe_tracks(candidates)
             if is_verified_track(track)
             and not self.library.is_disliked(user_id, track)
             and is_quality_track(track, allow_variants=allow_variants)
@@ -331,7 +339,8 @@ class RecommendationService:
             return verified, 0
         pool_hits = dense_library_fallback(search_goal or goal, verified, max(top_k * 2, top_k))
         pool_hits = [
-            track for track in pool_hits
+            track
+            for track in pool_hits
             if not self.library.is_disliked(user_id, track)
             and is_quality_track(track, allow_variants=allow_variants)
             and is_context_compatible(goal, track)
@@ -369,12 +378,15 @@ class RecommendationService:
 
         if not settings.enable_rerank or not tracks:
             fallback = [
-                (track, RankingBreakdown(
-                    title=getattr(track, "title", ""),
-                    source=getattr(track, "source", "local"),
-                    score=round(1.0 - index * 0.04, 4),
-                    reason="顺序兜底（rerank 关闭）",
-                ))
+                (
+                    track,
+                    RankingBreakdown(
+                        title=getattr(track, "title", ""),
+                        source=getattr(track, "source", "local"),
+                        score=round(1.0 - index * 0.04, 4),
+                        reason="顺序兜底（rerank 关闭）",
+                    ),
+                )
                 for index, track in enumerate(tracks[:top_k])
             ]
             return fallback
@@ -433,7 +445,9 @@ class RecommendationService:
                     histories.append(ids)
             cooccurrence = build_cooccurrence(histories)
             scores, ok = collaborative_scores(
-                [_track_id(track) for track in tracks], recent, cooccurrence,
+                [_track_id(track) for track in tracks],
+                recent,
+                cooccurrence,
             )
             return (scores, ok) if ok else (None, False)
         except Exception:
@@ -477,22 +491,133 @@ class RecommendationService:
             return False
 
         generic_en = {
-            "chill", "lofi", "lo-fi", "vibe", "vibes", "mix", "remix", "relax", "relaxing",
-            "mood", "moody", "groove", "groovy", "upbeat", "slow", "fast", "happy", "sad",
-            "deep", "party", "cozy", "dreamy", "mellow", "smooth", "calm", "calming", "peaceful",
-            "soothing", "soft", "warm", "bright", "dark", "melancholy", "melancholic",
-            "nostalgic", "uplifting", "energetic", "emotional", "romantic", "sexy", "sensual",
-            "dramatic", "epic", "ethereal", "atmospheric", "minimal", "lush",
-            "r&b", "rnb", "soul", "pop", "rock", "rap", "hip", "hop", "hiphop", "jazz",
-            "electronic", "edm", "ambient", "acoustic", "indie", "funk", "house", "techno",
-            "trap", "disco", "reggae", "blues", "country", "classical", "metal", "punk",
-            "folk", "dance", "dreampop", "shoegaze", "synthwave", "instrumental", "vocal",
-            "morning", "night", "nighttime", "evening", "afternoon", "midnight", "summer",
-            "winter", "autumn", "spring", "rainy", "sunny", "study", "focus", "sleep", "sleepy",
-            "workout", "gym", "running", "driving", "coffee", "work", "working", "commute",
-            "playlist", "playlists", "songs", "song", "music", "track", "tracks", "recommend",
-            "recommendation", "recommendations", "best", "top", "new", "old", "classic",
-            "popular", "trending", "favorite", "favourites", "similar", "like", "beats", "tunes",
+            "chill",
+            "lofi",
+            "lo-fi",
+            "vibe",
+            "vibes",
+            "mix",
+            "remix",
+            "relax",
+            "relaxing",
+            "mood",
+            "moody",
+            "groove",
+            "groovy",
+            "upbeat",
+            "slow",
+            "fast",
+            "happy",
+            "sad",
+            "deep",
+            "party",
+            "cozy",
+            "dreamy",
+            "mellow",
+            "smooth",
+            "calm",
+            "calming",
+            "peaceful",
+            "soothing",
+            "soft",
+            "warm",
+            "bright",
+            "dark",
+            "melancholy",
+            "melancholic",
+            "nostalgic",
+            "uplifting",
+            "energetic",
+            "emotional",
+            "romantic",
+            "sexy",
+            "sensual",
+            "dramatic",
+            "epic",
+            "ethereal",
+            "atmospheric",
+            "minimal",
+            "lush",
+            "r&b",
+            "rnb",
+            "soul",
+            "pop",
+            "rock",
+            "rap",
+            "hip",
+            "hop",
+            "hiphop",
+            "jazz",
+            "electronic",
+            "edm",
+            "ambient",
+            "acoustic",
+            "indie",
+            "funk",
+            "house",
+            "techno",
+            "trap",
+            "disco",
+            "reggae",
+            "blues",
+            "country",
+            "classical",
+            "metal",
+            "punk",
+            "folk",
+            "dance",
+            "dreampop",
+            "shoegaze",
+            "synthwave",
+            "instrumental",
+            "vocal",
+            "morning",
+            "night",
+            "nighttime",
+            "evening",
+            "afternoon",
+            "midnight",
+            "summer",
+            "winter",
+            "autumn",
+            "spring",
+            "rainy",
+            "sunny",
+            "study",
+            "focus",
+            "sleep",
+            "sleepy",
+            "workout",
+            "gym",
+            "running",
+            "driving",
+            "coffee",
+            "work",
+            "working",
+            "commute",
+            "playlist",
+            "playlists",
+            "songs",
+            "song",
+            "music",
+            "track",
+            "tracks",
+            "recommend",
+            "recommendation",
+            "recommendations",
+            "best",
+            "top",
+            "new",
+            "old",
+            "classic",
+            "popular",
+            "trending",
+            "favorite",
+            "favourites",
+            "similar",
+            "like",
+            "beats",
+            "tunes",
         }
         english = re.findall(r"[A-Za-z][A-Za-z0-9'&\-]*", search_goal)
         english = [t for t in english if len(t) > 1 and t.lower() not in generic_en]
@@ -501,23 +626,134 @@ class RecommendationService:
 
         cjk_tokens = re.findall(r"[一-鿿㐀-䶿]{2,}", search_goal)
         general_words = {
-            "慵懒", "律动", "放松", "治愈", "欢快", "伤感", "浪漫", "激昂", "宁静", "梦幻",
-            "轻松", "开心", "忧郁", "温馨", "热血", "安静", "舒缓", "劲爆", "性感", "温柔",
-            "甜蜜", "兴奋", "空灵", "愉悦", "感动", "舒服", "烦躁", "低沉", "吵闹",
-            "跑步", "运动", "工作", "学习", "睡眠", "开车", "通勤", "派对", "咖啡",
-            "健身", "旅行", "约会", "散步", "泡澡", "专注",
-            "深夜", "早晨", "下午", "夜晚", "凌晨", "熬夜", "今夜", "今晚", "周末",
-            "早上", "晚上", "白天", "午后", "傍晚",
-            "说唱", "摇滚", "电子", "古典", "爵士", "民谣", "国风", "金属", "朋克",
-            "嘻哈", "蓝调", "乡村", "雷鬼", "灵魂", "放克", "迪斯科", "浩室",
-            "独立", "后摇", "新浪潮", "实验", "氛围", "新金属",
-            "混搭", "推荐", "适合", "流行", "好听", "经典", "热门", "小众", "风格",
-            "陪伴", "陪你", "感觉", "能量", "曲风", "节奏", "全部", "一些", "几首", "都有", "全都有",
-            "唱歌", "跳舞", "听歌", "背景",
-            "从", "到", "帮", "让", "给", "想", "要", "能", "来", "去",
-            "一个人", "两个人", "朋友", "恋人", "情侣",
-            "好听的音乐", "推荐一些歌", "推荐几首歌", "帮我推荐一些歌",
-            "给我推荐", "推荐一些", "推荐几首", "帮我推荐",
+            "慵懒",
+            "律动",
+            "放松",
+            "治愈",
+            "欢快",
+            "伤感",
+            "浪漫",
+            "激昂",
+            "宁静",
+            "梦幻",
+            "轻松",
+            "开心",
+            "忧郁",
+            "温馨",
+            "热血",
+            "安静",
+            "舒缓",
+            "劲爆",
+            "性感",
+            "温柔",
+            "甜蜜",
+            "兴奋",
+            "空灵",
+            "愉悦",
+            "感动",
+            "舒服",
+            "烦躁",
+            "低沉",
+            "吵闹",
+            "跑步",
+            "运动",
+            "工作",
+            "学习",
+            "睡眠",
+            "开车",
+            "通勤",
+            "派对",
+            "咖啡",
+            "健身",
+            "旅行",
+            "约会",
+            "散步",
+            "泡澡",
+            "专注",
+            "深夜",
+            "早晨",
+            "下午",
+            "夜晚",
+            "凌晨",
+            "熬夜",
+            "今夜",
+            "今晚",
+            "周末",
+            "早上",
+            "晚上",
+            "白天",
+            "午后",
+            "傍晚",
+            "说唱",
+            "摇滚",
+            "电子",
+            "古典",
+            "爵士",
+            "民谣",
+            "国风",
+            "金属",
+            "朋克",
+            "嘻哈",
+            "蓝调",
+            "乡村",
+            "雷鬼",
+            "灵魂",
+            "放克",
+            "迪斯科",
+            "浩室",
+            "独立",
+            "后摇",
+            "新浪潮",
+            "实验",
+            "氛围",
+            "新金属",
+            "混搭",
+            "推荐",
+            "适合",
+            "流行",
+            "好听",
+            "经典",
+            "热门",
+            "小众",
+            "风格",
+            "陪伴",
+            "陪你",
+            "感觉",
+            "能量",
+            "曲风",
+            "节奏",
+            "全部",
+            "一些",
+            "几首",
+            "都有",
+            "全都有",
+            "唱歌",
+            "跳舞",
+            "听歌",
+            "背景",
+            "从",
+            "到",
+            "帮",
+            "让",
+            "给",
+            "想",
+            "要",
+            "能",
+            "来",
+            "去",
+            "一个人",
+            "两个人",
+            "朋友",
+            "恋人",
+            "情侣",
+            "好听的音乐",
+            "推荐一些歌",
+            "推荐几首歌",
+            "帮我推荐一些歌",
+            "给我推荐",
+            "推荐一些",
+            "推荐几首",
+            "帮我推荐",
         }
         blocked = {item.lower() for item in query_noise}
         non_general = [t for t in cjk_tokens if t not in general_words and t.lower() not in blocked]

@@ -5,6 +5,7 @@
 2. compose_answer 的引言可由 LLM 生成，但歌名清单始终来自真实候选；
    LLM 不可用或输出异常时回退确定性模板。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +16,7 @@ from app.models import AgentPlan, ExternalTrack
 
 class _SpyLLM:
     """记录最后一次 generate 的 prompt，返回可控文本。"""
+
     def __init__(self, reply: str = ""):
         self.last_prompt = ""
         self.last_system = None
@@ -37,22 +39,30 @@ class _Agent:
 
 class TestMultiTurnContext:
     def test_history_threaded_into_prompt(self):
-        spy = _SpyLLM(reply='{"intent":"recommend","entities":["周杰伦"],'
-                            '"use_local":true,"use_vector":false,"use_web":true,'
-                            '"target_count":null,"reasoning":"延续上一轮歌手"}')
+        spy = _SpyLLM(
+            reply='{"intent":"recommend","entities":["周杰伦"],'
+            '"use_local":true,"use_vector":false,"use_web":true,'
+            '"target_count":null,"reasoning":"延续上一轮歌手"}'
+        )
         agent = _Agent(spy)
-        plan = asyncio.run(plan_with_llm_async(
-            agent, "再来几首", history_text="user: 找周杰伦的歌\nassistant: 好的",
-        ))
+        plan = asyncio.run(
+            plan_with_llm_async(
+                agent,
+                "再来几首",
+                history_text="user: 找周杰伦的歌\nassistant: 好的",
+            )
+        )
         assert plan is not None
         assert "周杰伦" in spy.last_prompt
         assert "再来几首" in spy.last_prompt
         assert plan.retrieval_plan.entities == ["周杰伦"]
 
     def test_no_history_keeps_plain_prompt(self):
-        spy = _SpyLLM(reply='{"intent":"search","entities":[],"use_local":true,'
-                            '"use_vector":false,"use_web":true,"target_count":null,'
-                            '"reasoning":"x"}')
+        spy = _SpyLLM(
+            reply='{"intent":"search","entities":[],"use_local":true,'
+            '"use_vector":false,"use_web":true,"target_count":null,'
+            '"reasoning":"x"}'
+        )
         agent = _Agent(spy)
         asyncio.run(plan_with_llm_async(agent, "找点歌"))
         assert "最近对话" not in spy.last_prompt
@@ -67,11 +77,18 @@ class TestComposeIntro:
 
     def _compose(self, query, results, plan, agent=None, memory_query=""):
         async def collect():
-            return "".join([
-                piece async for piece in compose_answer_stream_async(
-                    query, results, plan, agent=agent, memory_query=memory_query,
-                )
-            ])
+            return "".join(
+                [
+                    piece
+                    async for piece in compose_answer_stream_async(
+                        query,
+                        results,
+                        plan,
+                        agent=agent,
+                        memory_query=memory_query,
+                    )
+                ]
+            )
 
         return asyncio.run(collect())
 
@@ -80,8 +97,11 @@ class TestComposeIntro:
         agent = _Agent(spy)
         plan = AgentPlan(intent="recommend", tools_needed=["recommend"])
         out = self._compose(
-            "推荐 The Weeknd", [{"type": "web_music_search", "tracks": self._tracks()}],
-            plan, agent=agent, memory_query="喜欢 R&B",
+            "推荐 The Weeknd",
+            [{"type": "web_music_search", "tracks": self._tracks()}],
+            plan,
+            agent=agent,
+            memory_query="喜欢 R&B",
         )
         assert "懂你想要的氛围" in out
         # 歌名清单仍是确定性拼接，来自真实候选
@@ -94,7 +114,10 @@ class TestComposeIntro:
         agent = _Agent(spy)
         plan = AgentPlan(intent="recommend", tools_needed=["recommend"])
         out = self._compose(
-            "推荐", [{"type": "web_music_search", "tracks": self._tracks()}], plan, agent=agent,
+            "推荐",
+            [{"type": "web_music_search", "tracks": self._tracks()}],
+            plan,
+            agent=agent,
         )
         assert "我编的歌" in out  # 流式阶段不改写 token；final Answer Guard 负责权威清理
 

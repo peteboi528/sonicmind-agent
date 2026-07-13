@@ -4,6 +4,7 @@
 对齐 SoulTuner 的 _extract_and_fetch_web_songs 思路：
 LLM 提取歌名 → Netease 搜索验证 → 只保留有真实播放链接的。
 """
+
 from __future__ import annotations
 
 import logging
@@ -34,8 +35,7 @@ def verify_song(title: str, artist: str) -> ExternalTrack | None:
         r_title = (meta.get("title") or "").lower().strip()
         r_artist = (meta.get("artist") or "").lower().strip()
         # 精确匹配：歌名或歌手至少有一边命中
-        if title_lower in r_title or r_title in title_lower or \
-           artist_lower in r_artist or r_artist in artist_lower:
+        if title_lower in r_title or r_title in title_lower or artist_lower in r_artist or r_artist in artist_lower:
             return ExternalTrack(
                 external_id=meta["song_id"],
                 title=meta["title"],

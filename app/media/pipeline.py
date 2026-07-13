@@ -15,19 +15,21 @@ logger = logging.getLogger(__name__)
 class MediaPipeline:
     """A media pipeline with pluggable analyzers."""
 
-    def __init__(self, store: JsonStore, media_root: Path | str = "data/media", analyzer: MediaAnalyzer | None = None) -> None:
+    def __init__(
+        self, store: JsonStore, media_root: Path | str = "data/media", analyzer: MediaAnalyzer | None = None
+    ) -> None:
         self.store = store
         self.media_root = Path(media_root)
         self.media_root.mkdir(parents=True, exist_ok=True)
         self.analyzer: MediaAnalyzer = analyzer or DemoAnalyzer()
 
     def ingest_video(self, url: str, force_refresh: bool = False) -> Asset:
-        url = normalize_url(url)          # 剥掉 uct2 等跟踪参数
+        url = normalize_url(url)  # 剥掉 uct2 等跟踪参数
         asset_id = stable_id(url)
         if not force_refresh:
             existing = self.store.read_model("assets", asset_id, Asset)
             if existing:
-                return existing           # 命中缓存，直接返回
+                return existing  # 命中缓存，直接返回
         if force_refresh:
             self.store.delete_key("assets", asset_id)
             self.store.delete_key("segments", asset_id)
@@ -95,6 +97,7 @@ def normalize_url(url: str) -> str:
     \u53ea\u4fdd\u7559 id\uff08\u6b4c\u66f2 ID\uff09\u53c2\u6570\u4f5c\u4e3a\u89c4\u8303\u5f62\u5f0f\u3002
     """
     import urllib.parse as _parse
+
     _TRACKING_PARAMS = {"uct2", "userid", "from", "utm_source", "utm_medium", "utm_campaign"}
     url = url.strip()
     try:

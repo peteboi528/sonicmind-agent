@@ -23,12 +23,14 @@ def filter_taste_experiment_candidates(
             continue
         if not is_quality_track(track):
             continue
-        searchable = " ".join([
-            getattr(track, "title", "") or "",
-            getattr(track, "artist", "") or "",
-            " ".join(getattr(track, "genre", []) or []),
-            " ".join(getattr(track, "mood", []) or []),
-        ]).lower()
+        searchable = " ".join(
+            [
+                getattr(track, "title", "") or "",
+                getattr(track, "artist", "") or "",
+                " ".join(getattr(track, "genre", []) or []),
+                " ".join(getattr(track, "mood", []) or []),
+            ]
+        ).lower()
         if any(rule and rule in searchable for rule in rules):
             continue
         title = (getattr(track, "title", "") or "").strip().lower()
@@ -69,8 +71,8 @@ def slice_for_bucket(
     if bucket == "safe":
         return ranked[0:per_bucket]
     if bucket == "stretch":
-        return ranked[per_bucket:2 * per_bucket]
-    return ranked[2 * per_bucket:3 * per_bucket]
+        return ranked[per_bucket : 2 * per_bucket]
+    return ranked[2 * per_bucket : 3 * per_bucket]
 
 
 def bucket_taste_experiment_candidates(
@@ -83,7 +85,7 @@ def bucket_taste_experiment_candidates(
     ranked = sorted(candidates, key=taste_familiarity, reverse=True)
     familiarities = [taste_familiarity(item) for item in ranked]
     if len(ranked) < per_bucket * 3 or max(familiarities) - min(familiarities) < 0.08:
-        buckets["stretch"] = ranked[:per_bucket * 3]
+        buckets["stretch"] = ranked[: per_bucket * 3]
         return buckets
     buckets["safe"] = slice_for_bucket(ranked, "safe", per_bucket)
     buckets["stretch"] = slice_for_bucket(ranked, "stretch", per_bucket)

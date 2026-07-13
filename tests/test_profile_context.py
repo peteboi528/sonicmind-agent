@@ -3,6 +3,7 @@
 get_context_for_llm 此前是「已留未接线」的死接口；现在 agent.profile_context_text 把它
 格式化进 query_plan。这里锁定格式 + 空画像/异常安全降级（返空串，调用方跳过注入）。
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -34,7 +35,8 @@ def _profile(artists: list[tuple[str, str]], insights: list[ProfileInsight]) -> 
 
 def test_empty_profile_returns_empty(monkeypatch):
     monkeypatch.setattr(
-        profile_service.UserProfileService, "get_context_for_llm",
+        profile_service.UserProfileService,
+        "get_context_for_llm",
         lambda self, uid: ProfileContextForLLM(),
     )
     assert _agent().profile_context_text("u") == ""
@@ -49,7 +51,8 @@ def test_formats_all_fields(monkeypatch):
         avoid_features=["激烈鼓点"],
     )
     monkeypatch.setattr(
-        profile_service.UserProfileService, "get_context_for_llm",
+        profile_service.UserProfileService,
+        "get_context_for_llm",
         lambda self, uid: ctx,
     )
     text = _agent().profile_context_text("u")
@@ -62,13 +65,16 @@ def test_formats_all_fields(monkeypatch):
 
 def test_failure_returns_empty(monkeypatch):
     """画像服务抛异常时不应阻断规划——返回空串，调用方跳过注入。"""
+
     def boom(self, uid):
         raise RuntimeError("profile unavailable")
+
     monkeypatch.setattr(profile_service.UserProfileService, "get_context_for_llm", boom)
     assert _agent().profile_context_text("u") == ""
 
 
 # ---- 纠错回流：rejected insight 真正影响推荐 ----
+
 
 def test_profile_context_text_includes_rejected(monkeypatch):
     """用户否定的画像判断进 query_plan 提示，让 LLM 不再据此推荐。"""
@@ -77,7 +83,8 @@ def test_profile_context_text_includes_rejected(monkeypatch):
         rejected_signals=["Drake 是你的核心艺人", "你的情绪偏好集中在「激烈」一带"],
     )
     monkeypatch.setattr(
-        profile_service.UserProfileService, "get_context_for_llm",
+        profile_service.UserProfileService,
+        "get_context_for_llm",
         lambda self, uid: ctx,
     )
     text = _agent().profile_context_text("u")
@@ -104,9 +111,14 @@ def test_rejected_core_artist_reversed_to_penalty(monkeypatch):
     """否定「X 是核心艺人」→ X 从加分移到减分（别再按核心推）。"""
     profile = _profile(
         artists=[("Drake", "core"), ("The Weeknd", "core")],
-        insights=[ProfileInsight(
-            insight_id="x", title="Drake 是你的核心艺人", dimension="artist", status="rejected",
-        )],
+        insights=[
+            ProfileInsight(
+                insight_id="x",
+                title="Drake 是你的核心艺人",
+                dimension="artist",
+                status="rejected",
+            )
+        ],
     )
     monkeypatch.setattr(profile_service.UserProfileService, "get_profile", lambda self, uid: profile)
     boost, penalty = _agent()._profile_rerank_signals("u")
@@ -118,9 +130,14 @@ def test_rejected_avoid_artist_un_penalized(monkeypatch):
     """否定「不要推 X」→ X 从减分移除（用户其实不排斥 X）。"""
     profile = _profile(
         artists=[("Justin Bieber", "avoid")],
-        insights=[ProfileInsight(
-            insight_id="y", title="你不希望被推荐 Justin Bieber 这类", dimension="artist", status="rejected",
-        )],
+        insights=[
+            ProfileInsight(
+                insight_id="y",
+                title="你不希望被推荐 Justin Bieber 这类",
+                dimension="artist",
+                status="rejected",
+            )
+        ],
     )
     monkeypatch.setattr(profile_service.UserProfileService, "get_profile", lambda self, uid: profile)
     _boost, penalty = _agent()._profile_rerank_signals("u")
@@ -131,9 +148,14 @@ def test_non_rejected_insights_do_not_reverse(monkeypatch):
     """active/confirmed 的洞察不触发反转——只有 rejected 才回流。"""
     profile = _profile(
         artists=[("Drake", "core")],
-        insights=[ProfileInsight(
-            insight_id="z", title="Drake 是你的核心艺人", dimension="artist", status="confirmed",
-        )],
+        insights=[
+            ProfileInsight(
+                insight_id="z",
+                title="Drake 是你的核心艺人",
+                dimension="artist",
+                status="confirmed",
+            )
+        ],
     )
     monkeypatch.setattr(profile_service.UserProfileService, "get_profile", lambda self, uid: profile)
     boost, penalty = _agent()._profile_rerank_signals("u")

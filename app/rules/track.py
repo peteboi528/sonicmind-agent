@@ -34,8 +34,18 @@ def _has_reliable_metadata(asset: Asset) -> bool:
 def _query_needs_asset_context(query: str) -> bool:
     lowered = query.lower()
     media_terms = [
-        "片段", "segment", "video", "素材", "场景", "镜头", "画面",
-        "当前视频", "当前素材", "这个视频", "这个素材", "相似片段",
+        "片段",
+        "segment",
+        "video",
+        "素材",
+        "场景",
+        "镜头",
+        "画面",
+        "当前视频",
+        "当前素材",
+        "这个视频",
+        "这个素材",
+        "相似片段",
     ]
     return any(term in lowered for term in media_terms)
 
@@ -72,9 +82,7 @@ def _is_verified_online_track(track: Asset | ExternalTrack) -> bool:
 
 def _is_local_recommendation_track(track: Asset | ExternalTrack) -> bool:
     return isinstance(track, Asset) or (
-        isinstance(track, ExternalTrack)
-        and track.source == "local"
-        and bool(track.external_id or track.playback_url)
+        isinstance(track, ExternalTrack) and track.source == "local" and bool(track.external_id or track.playback_url)
     )
 
 
@@ -102,8 +110,15 @@ def _classify_candidate_kind(title: str, source: str) -> str:
         return "playlist"
 
     long_mix_signals = [
-        "non-stop", "nonstop", "megamix", "mega mix", "dj mix",
-        "连续播放", "一直播放", "纯音乐合集", "睡眠歌单",
+        "non-stop",
+        "nonstop",
+        "megamix",
+        "mega mix",
+        "dj mix",
+        "连续播放",
+        "一直播放",
+        "纯音乐合集",
+        "睡眠歌单",
     ]
     if "remix" not in t:
         if any(sig in t for sig in long_mix_signals):
@@ -114,10 +129,24 @@ def _classify_candidate_kind(title: str, source: str) -> str:
         return "long_mix"
 
     compilation_signals = [
-        "合集", "连播", "串烧", "歌曲合集", "精选集", "全部歌曲",
-        "全部曲目", "经典回顾", "最全", "歌曲大全", "纯享合集", "金曲合集",
-        "full album", "all songs", "greatest hits", "compilation",
-        "best of", "歌曲串烧",
+        "合集",
+        "连播",
+        "串烧",
+        "歌曲合集",
+        "精选集",
+        "全部歌曲",
+        "全部曲目",
+        "经典回顾",
+        "最全",
+        "歌曲大全",
+        "纯享合集",
+        "金曲合集",
+        "full album",
+        "all songs",
+        "greatest hits",
+        "compilation",
+        "best of",
+        "歌曲串烧",
     ]
     if any(sig in t for sig in compilation_signals):
         return "compilation"

@@ -178,7 +178,7 @@ def install_fakes() -> None:
                 clone.external_id = f"{clone.external_id}-page-{offset}-{idx}"
                 clone.title = f"{clone.title} #{offset + idx}"
             tracks.append(clone)
-        return tracks[offset:offset + top_k] if offset else tracks[:top_k]
+        return tracks[offset : offset + top_k] if offset else tracks[:top_k]
 
     def fake_search_videos(self: AudioVisualAgent, query: str, top_k: int = 5) -> list[ExternalTrack]:
         return [
@@ -227,9 +227,17 @@ def install_fakes() -> None:
             asset.status = "analyzed"
             self.store.write_model("assets", asset.asset_id, asset)
             tracks.append(item.model_dump(mode="json"))
-        return {"name": "Smoke Imported Playlist", "imported": len(tracks), "skipped": 0, "total": len(tracks), "tracks": tracks}
+        return {
+            "name": "Smoke Imported Playlist",
+            "imported": len(tracks),
+            "skipped": 0,
+            "total": len(tracks),
+            "tracks": tracks,
+        }
 
-    def fake_get_audio_url(self: AudioVisualAgent, track: Asset | ExternalTrack | Any, netease_cookie: str = "") -> str | None:
+    def fake_get_audio_url(
+        self: AudioVisualAgent, track: Asset | ExternalTrack | Any, netease_cookie: str = ""
+    ) -> str | None:
         source_url = getattr(track, "source_url", "") or getattr(track, "playback_url", "")
         external_id = getattr(track, "external_id", "") or getattr(track, "source_id", "")
         if "music.163.com" in source_url or "netease" in (getattr(track, "source", "") or ""):
@@ -247,20 +255,63 @@ def install_fakes() -> None:
 
     def fake_artist_albums(artist: str, limit: int = 6) -> list[dict[str, Any]]:
         return [
-            {"id": "alb-001", "name": "Smoke Era", "artist": artist, "image": "https://example.com/alb1.jpg", "track_count": 3},
-            {"id": "alb-002", "name": "Regression Nights", "artist": artist, "image": "https://example.com/alb2.jpg", "track_count": 4},
+            {
+                "id": "alb-001",
+                "name": "Smoke Era",
+                "artist": artist,
+                "image": "https://example.com/alb1.jpg",
+                "track_count": 3,
+            },
+            {
+                "id": "alb-002",
+                "name": "Regression Nights",
+                "artist": artist,
+                "image": "https://example.com/alb2.jpg",
+                "track_count": 4,
+            },
         ][:limit]
 
     def fake_album_search(artist: str, album: str) -> dict[str, Any]:
-        return {"id": "alb-001", "name": album, "artist": artist, "cover": "https://example.com/alb1.jpg", "track_count": 3}
+        return {
+            "id": "alb-001",
+            "name": album,
+            "artist": artist,
+            "cover": "https://example.com/alb1.jpg",
+            "track_count": 3,
+        }
 
     def fake_album_tracks(album_id: str, limit: int = 100) -> dict[str, Any]:
         tracks = [
-            {"song_id": "10001", "title": "Opening Smoke", "artist": "Smoke Artist", "album": "Smoke Era", "cover": "https://example.com/alb1.jpg"},
-            {"song_id": "10002", "title": "Middle Assertion", "artist": "Smoke Artist", "album": "Smoke Era", "cover": "https://example.com/alb1.jpg"},
-            {"song_id": "10003", "title": "Final Report", "artist": "Smoke Artist", "album": "Smoke Era", "cover": "https://example.com/alb1.jpg"},
+            {
+                "song_id": "10001",
+                "title": "Opening Smoke",
+                "artist": "Smoke Artist",
+                "album": "Smoke Era",
+                "cover": "https://example.com/alb1.jpg",
+            },
+            {
+                "song_id": "10002",
+                "title": "Middle Assertion",
+                "artist": "Smoke Artist",
+                "album": "Smoke Era",
+                "cover": "https://example.com/alb1.jpg",
+            },
+            {
+                "song_id": "10003",
+                "title": "Final Report",
+                "artist": "Smoke Artist",
+                "album": "Smoke Era",
+                "cover": "https://example.com/alb1.jpg",
+            },
         ][:limit]
-        return {"id": album_id, "name": "Smoke Era", "artist": "Smoke Artist", "cover": "https://example.com/alb1.jpg", "track_count": len(tracks), "tracks": tracks}
+        return {
+            "id": album_id,
+            "name": "Smoke Era",
+            "artist": "Smoke Artist",
+            "cover": "https://example.com/alb1.jpg",
+            "track_count": len(tracks),
+            "tracks": tracks,
+        }
 
     AudioVisualAgent.search_web_music = fake_search_web_music
     AudioVisualAgent.search_videos = fake_search_videos
@@ -369,7 +420,9 @@ def dialogue_cases() -> list[DialogueCase]:
             expect=lambda a: [
                 ok("answer_non_empty", bool(answer_text(a))),
                 ok("trace_taste_experiment", "[taste_experiment]" in trace(a)),
-                ok("mentions_three_buckets", all(word in answer_text(a) for word in ["安全区", "轻微越界", "大胆探索"])),
+                ok(
+                    "mentions_three_buckets", all(word in answer_text(a) for word in ["安全区", "轻微越界", "大胆探索"])
+                ),
             ],
             fix_hint="检查 taste_experiment intent、三档候选生成和 Answer Guard 实验曲目白名单。",
         ),
@@ -469,17 +522,24 @@ def run_api_checks(app: Any, user_id: str) -> list[CaseResult]:
         return resp.status_code == 200 and resp.json().get("status") in {"ok", "degraded"}, str(resp.json()), {}
 
     def ingest_analyze_listen_rate_delete():
-        ingest = client.post("/assets/ingest_full", json={"url": "https://music.163.com/song?id=10001", "force_refresh": True})
+        ingest = client.post(
+            "/assets/ingest_full", json={"url": "https://music.163.com/song?id=10001", "force_refresh": True}
+        )
         if ingest.status_code != 200:
             return False, f"ingest status={ingest.status_code}", {}
         asset = ingest.json()
         asset_id = asset["asset_id"]
         state["asset_id"] = asset_id
-        listen = client.post("/listen", json={"user_id": user_id, "asset_id": asset_id, "duration": 180, "completed": True})
+        listen = client.post(
+            "/listen", json={"user_id": user_id, "asset_id": asset_id, "duration": 180, "completed": True}
+        )
         rate = client.post("/rate", json={"user_id": user_id, "asset_id": asset_id, "score": 8})
         ratings = client.get(f"/ratings/{user_id}")
         return (
-            listen.status_code == 200 and rate.status_code == 200 and ratings.status_code == 200 and ratings.json().get("ratings"),
+            listen.status_code == 200
+            and rate.status_code == 200
+            and ratings.status_code == 200
+            and ratings.json().get("ratings"),
             f"asset={asset_id} listen={listen.status_code} rate={rate.status_code}",
             {"asset_id": asset_id, "ratings": ratings.json().get("ratings", [])[:2]},
         )
@@ -488,13 +548,21 @@ def run_api_checks(app: Any, user_id: str) -> list[CaseResult]:
         daily = client.post("/recommend/daily", json={"user_id": user_id, "time_of_day": "evening"})
         search = client.post("/search", json={"user_id": user_id, "query": "深夜 专注", "top_k": 5})
         return (
-            daily.status_code == 200 and bool(daily.json().get("tracks")) and search.status_code == 200 and "summary" in search.json(),
+            daily.status_code == 200
+            and bool(daily.json().get("tracks"))
+            and search.status_code == 200
+            and "summary" in search.json(),
             f"daily={daily.status_code} search={search.status_code}",
-            {"daily_tracks": len(daily.json().get("tracks", [])), "search_external": len(search.json().get("external", []))},
+            {
+                "daily_tracks": len(daily.json().get("tracks", [])),
+                "search_external": len(search.json().get("external", [])),
+            },
         )
 
     def stream_album_events():
-        with client.stream("POST", "/agent/stream", json={"user_id": user_id, "message": "推荐 Taylor Swift 的专辑"}) as resp:
+        with client.stream(
+            "POST", "/agent/stream", json={"user_id": user_id, "message": "推荐 Taylor Swift 的专辑"}
+        ) as resp:
             body = resp.read().decode("utf-8")
         event_types = []
         for chunk in body.split("\n\n"):
@@ -508,7 +576,9 @@ def run_api_checks(app: Any, user_id: str) -> list[CaseResult]:
         )
 
     def stream_taste_experiment_events():
-        with client.stream("POST", "/agent/stream", json={"user_id": user_id, "message": "推荐点不一样的，做个品味实验"}) as resp:
+        with client.stream(
+            "POST", "/agent/stream", json={"user_id": user_id, "message": "推荐点不一样的，做个品味实验"}
+        ) as resp:
             body = resp.read().decode("utf-8")
         event_types = []
         final_payload: dict[str, Any] = {}
@@ -533,14 +603,19 @@ def run_api_checks(app: Any, user_id: str) -> list[CaseResult]:
 
     def artist_and_album_apis():
         info = client.post("/artist/info", json={"artist": "Taylor Swift"})
-        tracks = client.post("/artist/album_tracks", json={"artist": "Taylor Swift", "album": "Smoke Era", "album_id": "alb-001"})
+        tracks = client.post(
+            "/artist/album_tracks", json={"artist": "Taylor Swift", "album": "Smoke Era", "album_id": "alb-001"}
+        )
         return (
             info.status_code == 200
             and bool(info.json().get("top_albums"))
             and tracks.status_code == 200
             and len(tracks.json().get("tracks", [])) == 3,
             f"artist={info.status_code} album_tracks={tracks.status_code}",
-            {"albums": info.json().get("top_albums", [])[:2], "track_titles": [t["title"] for t in tracks.json().get("tracks", [])]},
+            {
+                "albums": info.json().get("top_albums", [])[:2],
+                "track_titles": [t["title"] for t in tracks.json().get("tracks", [])],
+            },
         )
 
     def save_album_cycle():
@@ -551,7 +626,13 @@ def run_api_checks(app: Any, user_id: str) -> list[CaseResult]:
             "artist": "Smoke Artist",
             "track_count": 3,
             "tracks": [
-                {"external_id": "10001", "title": "Opening Smoke", "artist": "Smoke Artist", "source": "netease", "playback_url": "https://music.163.com/song?id=10001"}
+                {
+                    "external_id": "10001",
+                    "title": "Opening Smoke",
+                    "artist": "Smoke Artist",
+                    "source": "netease",
+                    "playback_url": "https://music.163.com/song?id=10001",
+                }
             ],
         }
         save = client.post("/album/save", json=payload)
@@ -559,14 +640,35 @@ def run_api_checks(app: Any, user_id: str) -> list[CaseResult]:
         listing = client.get(f"/albums/saved/{user_id}")
         delete = client.delete(f"/album/saved/{user_id}/alb-001")
         return (
-            save.status_code == 200 and status.json().get("saved") is True and listing.json().get("albums") and delete.json().get("deleted") is True,
+            save.status_code == 200
+            and status.json().get("saved") is True
+            and listing.json().get("albums")
+            and delete.json().get("deleted") is True,
             f"save={save.status_code} saved={status.json()} delete={delete.json()}",
             {"listed": listing.json().get("albums", [])[:1]},
         )
 
     def playback_apis():
-        audio = client.post("/api/playback/audio", json={"user_id": user_id, "track": {"title": "Opening Smoke", "artist": "Smoke Artist", "source": "netease", "source_id": "10001", "playback_url": "https://music.163.com/song?id=10001"}})
-        mv = client.post("/api/playback/mv", json={"user_id": user_id, "track": {"title": "Live", "artist": "Smoke", "source": "bilibili", "source_id": "BVSMOKE01"}})
+        audio = client.post(
+            "/api/playback/audio",
+            json={
+                "user_id": user_id,
+                "track": {
+                    "title": "Opening Smoke",
+                    "artist": "Smoke Artist",
+                    "source": "netease",
+                    "source_id": "10001",
+                    "playback_url": "https://music.163.com/song?id=10001",
+                },
+            },
+        )
+        mv = client.post(
+            "/api/playback/mv",
+            json={
+                "user_id": user_id,
+                "track": {"title": "Live", "artist": "Smoke", "source": "bilibili", "source_id": "BVSMOKE01"},
+            },
+        )
         return (
             audio.status_code == 200 and audio.json().get("url") and mv.status_code == 200 and mv.json().get("url"),
             f"audio={audio.json()} mv={mv.json()}",
@@ -576,7 +678,16 @@ def run_api_checks(app: Any, user_id: str) -> list[CaseResult]:
     def exclusions_and_dislike():
         add = client.post(f"/exclusions/{user_id}", json={"rule": "过度商业化"})
         listing = client.get(f"/exclusions/{user_id}")
-        dislike = client.post("/feedback/dislike", json={"user_id": user_id, "title": "Commercial Song", "artist": "Demo", "source": "netease", "source_id": "bad-1"})
+        dislike = client.post(
+            "/feedback/dislike",
+            json={
+                "user_id": user_id,
+                "title": "Commercial Song",
+                "artist": "Demo",
+                "source": "netease",
+                "source_id": "bad-1",
+            },
+        )
         remove = client.delete(f"/exclusions/{user_id}/过度商业化")
         return (
             add.status_code == 200
@@ -608,10 +719,18 @@ def run_api_checks(app: Any, user_id: str) -> list[CaseResult]:
 
     checks = [
         ("health", health, "检查 /health 依赖探针和 settings 初始化。"),
-        ("ingest_listen_rate", ingest_analyze_listen_rate_delete, "检查入库、分析、听歌记录、评分和 TasteProfile 写入。"),
+        (
+            "ingest_listen_rate",
+            ingest_analyze_listen_rate_delete,
+            "检查入库、分析、听歌记录、评分和 TasteProfile 写入。",
+        ),
         ("daily_and_search", daily_and_search, "检查每日推荐和 search API 候选输出。"),
         ("stream_album_events", stream_album_events, "检查 SSE 是否发出 album_card/final，前端专辑卡依赖该事件。"),
-        ("stream_taste_experiment_events", stream_taste_experiment_events, "检查 SSE final payload 是否带 taste_experiment 三档实验对象。"),
+        (
+            "stream_taste_experiment_events",
+            stream_taste_experiment_events,
+            "检查 SSE final payload 是否带 taste_experiment 三档实验对象。",
+        ),
         ("artist_album_apis", artist_and_album_apis, "检查歌手页专辑 id、专辑详情原始曲序和 album_tracks 契约。"),
         ("save_album_cycle", save_album_cycle, "检查收藏专辑保存、查询、列表和删除。"),
         ("playback_apis", playback_apis, "检查音频播放代理和 MV 播放代理。"),
@@ -678,19 +797,28 @@ def render_report(results: list[CaseResult]) -> str:
         lines.append("- Add the dialogue section as a CI smoke job after dev dependencies are installed.")
     else:
         journey_poisoned = [
-            item for item in failed
+            item
+            for item in failed
             if item.area == "dialogue"
             and any("mock：journey" in line for line in (item.meta.get("trace") or []))
             and "journey" not in item.name
         ]
         if journey_poisoned:
             lines.append("Detected likely root cause: mock query planning is scanning the whole prompt/history,")
-            lines.append("so earlier `journey` words poison later turns and many unrelated requests route to `journey`.")
+            lines.append(
+                "so earlier `journey` words poison later turns and many unrelated requests route to `journey`."
+            )
             lines.append("")
             lines.append("Root-cause fix plan:")
-            lines.append("1. In `app/llm/mock.py`, make `_query_plan` extract only the current `【本轮输入】` or latest `用户：...` query before keyword routing.")
-            lines.append("2. Route mock planning through `match_intent_by_keywords(current_query)` first, then fill `use_web/use_vector/tools` from `INTENT_REGISTRY` so new intents (`artist_albums`, `video`, `artist_info`) stay aligned.")
-            lines.append("3. Add a regression where history contains `音乐旅程/热身/冲刺` but current input is `分析我的音乐品味` and must still route to `taste`.")
+            lines.append(
+                "1. In `app/llm/mock.py`, make `_query_plan` extract only the current `【本轮输入】` or latest `用户：...` query before keyword routing."
+            )
+            lines.append(
+                "2. Route mock planning through `match_intent_by_keywords(current_query)` first, then fill `use_web/use_vector/tools` from `INTENT_REGISTRY` so new intents (`artist_albums`, `video`, `artist_info`) stay aligned."
+            )
+            lines.append(
+                "3. Add a regression where history contains `音乐旅程/热身/冲刺` but current input is `分析我的音乐品味` and must still route to `taste`."
+            )
             lines.append("4. Re-run this script and require `stream_album_events` to include `album_card`.")
             lines.append("")
         lines.append("Prioritize these fixes:")
@@ -745,7 +873,9 @@ def main() -> int:
     results.extend(run_dialogue(agent, user_id))
     results.extend(run_api_checks(app, user_id))
 
-    REPORT_JSON.write_text(json.dumps([serialize_result(r) for r in results], ensure_ascii=False, indent=2), encoding="utf-8")
+    REPORT_JSON.write_text(
+        json.dumps([serialize_result(r) for r in results], ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     REPORT_MD.write_text(render_report(results), encoding="utf-8")
 
     failed = [item for item in results if not item.ok]

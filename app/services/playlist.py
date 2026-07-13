@@ -43,7 +43,9 @@ class PlaylistService:
         seed_tracks: list[Asset | ExternalTrack] | None = None,
         target_count: int | None = None,
         infer_playlist_count: Callable[[str], int | None],
-        playlist_candidates_builder: Callable[[str, list[Asset], list[Asset | ExternalTrack], int], list[Asset | ExternalTrack]],
+        playlist_candidates_builder: Callable[
+            [str, list[Asset], list[Asset | ExternalTrack], int], list[Asset | ExternalTrack]
+        ],
         extract_search_query: Callable[[str], str],
         track_key: Callable[[Any], str],
         dedupe_tracks: Callable[[list[Asset | ExternalTrack]], list[Asset | ExternalTrack]],
@@ -110,12 +112,14 @@ class PlaylistService:
         tracks = dedupe_tracks(tracks)
         allow_variants = query_requests_variant_content(instruction)
         tracks = [
-            track for track in tracks
+            track
+            for track in tracks
             if is_quality_track(track, allow_variants=allow_variants)
             and is_playlist_context_compatible(instruction, track)
         ]
         clean_candidates = [
-            track for track in candidates
+            track
+            for track in candidates
             if is_quality_track(track, allow_variants=allow_variants)
             and is_playlist_context_compatible(instruction, track)
         ]
@@ -141,7 +145,9 @@ class PlaylistService:
         self.save_playlist(user_id, playlist)
         return playlist
 
-    def auto_playlists(self, user_id: str, *, fallback_auto_playlists: Callable[[str, list[Asset]], list[Playlist]]) -> list[Playlist]:
+    def auto_playlists(
+        self, user_id: str, *, fallback_auto_playlists: Callable[[str, list[Asset]], list[Playlist]]
+    ) -> list[Playlist]:
         library = self._list_assets()
         if not library:
             return []
@@ -249,7 +255,8 @@ class PlaylistService:
         relevance_core = extract_search_query(instruction) or instruction
         allow_variants = query_requests_variant_content(instruction)
         clean_seed_tracks = [
-            track for track in seed_tracks
+            track
+            for track in seed_tracks
             if is_quality_track(track, allow_variants=allow_variants)
             and is_playlist_context_compatible(instruction, track)
         ]
@@ -265,7 +272,8 @@ class PlaylistService:
                     tracks_per_playlist=max(target_count, 12),
                 )
                 external.extend(
-                    track for track in curated
+                    track
+                    for track in curated
                     if is_quality_track(track, allow_variants=allow_variants)
                     and is_playlist_context_compatible(instruction, track)
                 )
@@ -281,7 +289,8 @@ class PlaylistService:
                 relevance_query=relevance_core,
             )
             external.extend(
-                track for track in batch
+                track
+                for track in batch
                 if is_quality_track(track, allow_variants=allow_variants)
                 and is_playlist_context_compatible(instruction, track)
             )
@@ -293,14 +302,16 @@ class PlaylistService:
                 limit=max(target_count * 2, 40),
             )
             external.extend(
-                track for track in source_tracks
+                track
+                for track in source_tracks
                 if is_quality_track(track, allow_variants=allow_variants)
                 and is_playlist_context_compatible(instruction, track)
             )
 
         library_ranked = sorted(
             [
-                track for track in library
+                track
+                for track in library
                 if is_quality_track(track, allow_variants=allow_variants)
                 and is_playlist_context_compatible(instruction, track)
             ],
@@ -321,20 +332,27 @@ class PlaylistService:
         save_playlist: Callable[[str, Playlist], None],
         is_quality_track: Callable[[Any], bool],
         query_requests_variant_content: Callable[[str], bool],
-        fill_tracks: Callable[[list[Asset | ExternalTrack], list[Asset | ExternalTrack], int], list[Asset | ExternalTrack]],
+        fill_tracks: Callable[
+            [list[Asset | ExternalTrack], list[Asset | ExternalTrack], int], list[Asset | ExternalTrack]
+        ],
     ) -> Playlist:
         target_count = target_count or 12
         keywords = instruction.lower().split()
         matched = [
-            asset for asset in library
-            if any(term in f"{asset.title} {asset.artist or ''} {' '.join(asset.genre)} {' '.join(asset.mood)}".lower()
-                   for term in keywords)
+            asset
+            for asset in library
+            if any(
+                term in f"{asset.title} {asset.artist or ''} {' '.join(asset.genre)} {' '.join(asset.mood)}".lower()
+                for term in keywords
+            )
         ]
         if not matched:
             matched = sorted(library, key=lambda asset: (asset.energy_level or 0.0, asset.updated_at), reverse=True)
         allow_variants = query_requests_variant_content(instruction)
         matched = [track for track in matched if is_quality_track(track, allow_variants=allow_variants)]
-        clean_candidates = [track for track in (candidates or []) if is_quality_track(track, allow_variants=allow_variants)]
+        clean_candidates = [
+            track for track in (candidates or []) if is_quality_track(track, allow_variants=allow_variants)
+        ]
         tracks = fill_tracks(matched, clean_candidates, target_count)
         playlist = Playlist(
             playlist_id=hashlib.sha1(f"{user_id}-{instruction}".encode()).hexdigest()[:8],

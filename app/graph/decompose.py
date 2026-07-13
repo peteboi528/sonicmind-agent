@@ -37,7 +37,9 @@ async def decompose_compound_async(
     history_text = "\n".join(f"{m.get('role', '')}: {m.get('content', '')}" for m in (history or [])[-6:])
     try:
         raw = await llm.agenerate(
-            DECOMPOSE_USER(query, history_text), system=DECOMPOSE_SYSTEM, temperature=0.1,
+            DECOMPOSE_USER(query, history_text),
+            system=DECOMPOSE_SYSTEM,
+            temperature=0.1,
         )
         metrics = capture_llm_stats(llm)
         data = extract_json_dict(raw)
@@ -64,11 +66,13 @@ def _parse_subtasks(items) -> list[SubTask]:
         task_query = _clean_segment(str(item.get("query", "")))
         if not task_query:
             continue
-        tasks.append(SubTask(
-            intent=str(item.get("intent") or match_intent_by_keywords(task_query) or "recommend"),
-            query=task_query,
-            depends_on_prev=bool(item.get("depends_on_prev")) if index > 0 else False,
-        ))
+        tasks.append(
+            SubTask(
+                intent=str(item.get("intent") or match_intent_by_keywords(task_query) or "recommend"),
+                query=task_query,
+                depends_on_prev=bool(item.get("depends_on_prev")) if index > 0 else False,
+            )
+        )
     return tasks
 
 
@@ -111,5 +115,5 @@ def _clean_segment(segment: str) -> str:
     cleaned = segment.strip(" ，,。；; \n\t")  # noqa: B005 - 刻意按字符集剥离空白/标点
     for token in _STRONG_CHAIN:
         if cleaned.lower().startswith(token.lower()):
-            cleaned = cleaned[len(token):].strip(" ，,。；; \n\t")  # noqa: B005
+            cleaned = cleaned[len(token) :].strip(" ，,。；; \n\t")  # noqa: B005
     return cleaned

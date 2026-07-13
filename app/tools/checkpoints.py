@@ -32,11 +32,22 @@ class ActionCheckpointStore:
         connection.execute("PRAGMA journal_mode=WAL")
         return connection
 
-    def put(self, action_id: str, thread_id: str, user_hash: str, tool: str, arguments: dict[str, Any], query: str) -> bool:
+    def put(
+        self, action_id: str, thread_id: str, user_hash: str, tool: str, arguments: dict[str, Any], query: str
+    ) -> bool:
         with self._lock, self._connect() as connection:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO pending_actions VALUES(?,?,?,?,?,?,?, ?,NULL)",
-                (action_id, thread_id, user_hash, tool, json.dumps(arguments, ensure_ascii=False), query[:200], "pending", datetime.now(UTC).isoformat()),
+                (
+                    action_id,
+                    thread_id,
+                    user_hash,
+                    tool,
+                    json.dumps(arguments, ensure_ascii=False),
+                    query[:200],
+                    "pending",
+                    datetime.now(UTC).isoformat(),
+                ),
             )
             connection.execute(
                 "INSERT OR REPLACE INTO thread_activity(thread_id,updated_at) VALUES(?,?)",
@@ -70,11 +81,16 @@ class ActionCheckpointStore:
         cutoff = (datetime.now(UTC) - timedelta(days=self.retention_days)).isoformat()
         with self._lock, self._connect() as connection:
             connection.execute("DELETE FROM pending_actions WHERE created_at < ?", (cutoff,))
-            stale = [row[0] for row in connection.execute("SELECT thread_id FROM thread_activity WHERE updated_at < ?", (cutoff,))]
+            stale = [
+                row[0]
+                for row in connection.execute("SELECT thread_id FROM thread_activity WHERE updated_at < ?", (cutoff,))
+            ]
             for thread_id in stale:
                 # These tables are created by langgraph-checkpoint-sqlite after first use.
                 for table in ("writes", "checkpoints"):
-                    exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+                    exists = connection.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+                    ).fetchone()
                     if exists:
                         connection.execute(f"DELETE FROM {table} WHERE thread_id=?", (thread_id,))
                 connection.execute("DELETE FROM thread_activity WHERE thread_id=?", (thread_id,))

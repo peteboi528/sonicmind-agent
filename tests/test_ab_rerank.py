@@ -3,6 +3,7 @@
 验证：四个 profile 都能产出 top-5、diversity 落在 [0,1]、纯行为锚会把有行为信号的
 曲目顶上来、settings 权重切换对 rerank 立即生效。
 """
+
 from __future__ import annotations
 
 import pytest

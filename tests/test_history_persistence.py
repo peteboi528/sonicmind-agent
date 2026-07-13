@@ -16,14 +16,17 @@ def test_chat_history_api_saves_and_lists_turn():
     thread_id = "thread-history-api"
     history_service.clear_chat_threads(user_id)
 
-    resp = client.post("/history/chat/turn", json={
-        "user_id": user_id,
-        "thread_id": thread_id,
-        "user_message": "推荐几首深夜 R&B",
-        "assistant_message": "给你 3 首。",
-        "cards": [{"title": "Nights", "artist": "Frank Ocean"}],
-        "trace_summary": {"intent": "recommend", "final_cards": 1},
-    })
+    resp = client.post(
+        "/history/chat/turn",
+        json={
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "user_message": "推荐几首深夜 R&B",
+            "assistant_message": "给你 3 首。",
+            "cards": [{"title": "Nights", "artist": "Frank Ocean"}],
+            "trace_summary": {"intent": "recommend", "final_cards": 1},
+        },
+    )
 
     assert resp.status_code == 200
     body = resp.json()
@@ -42,14 +45,17 @@ def test_recommendation_history_api_saves_with_expiration():
     user_id = "history-user-recs"
     history_service.store.write_models("recommendation_history_full", user_id, [])
 
-    resp = client.post("/history/recommendations", json={
-        "user_id": user_id,
-        "thread_id": "thread-recs",
-        "query": "推荐几首 Future 类似的歌",
-        "answer": "可以从这些开始。",
-        "cards": [{"title": "Mask Off", "artist": "Future"}],
-        "ttl_days": 7,
-    })
+    resp = client.post(
+        "/history/recommendations",
+        json={
+            "user_id": user_id,
+            "thread_id": "thread-recs",
+            "query": "推荐几首 Future 类似的歌",
+            "answer": "可以从这些开始。",
+            "cards": [{"title": "Mask Off", "artist": "Future"}],
+            "ttl_days": 7,
+        },
+    )
 
     assert resp.status_code == 200
     rec = resp.json()["recommendation"]
@@ -89,4 +95,3 @@ def test_recommendation_history_filters_expired_items(tmp_path):
     assert [item.record_id for item in items] == ["active"]
     persisted = store.read_models("recommendation_history_full", "u", RecommendationHistoryItem)
     assert [item.record_id for item in persisted] == ["active"]
-

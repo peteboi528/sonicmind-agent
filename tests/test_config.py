@@ -4,6 +4,7 @@
 里 ${{ secrets.X }} 在 Secret 未配时求值为 ""，曾导致 LLM_BASE_URL/LLM_MODEL 被空串覆盖。
 _env_str 助手对 LLM 端点/模型字段做 strip+回退；llm_api_key 空=mock mode 是既定语义，不回退。
 """
+
 from __future__ import annotations
 
 from app.config import Settings

@@ -8,6 +8,7 @@
 判定三态 accept/maybe/reject：accept 直接入结果；maybe 仅在 allow_maybe 时入；reject 一律挡。
 embedding 不可用时安全降级到「规则 + source」，离线测试确定。
 """
+
 from __future__ import annotations
 
 import re
@@ -21,17 +22,52 @@ from app.retrieval.embeddings import embeddings_available, semantic_scores
 # ── 规则层：高精度拦截明显垃圾 ──────────────────────────────────────────
 # 纯非歌曲/低质片段：教程/解说/合集/歌单/节目/新闻/vlog/广播剧/高潮片段。一律拒。
 HARD_REJECT_PATTERNS = (
-    "教程", "教学", "编曲", "编曲技巧", "怎么做", "如何制作", "合集", "全集", "精选集",
-    "歌单", "playlist", "reaction", "访谈", "解说", "节目", "电台", "混剪",
-    "抖音热播", "抖音热门", "高潮版", "片段版",
-    "广播剧", "原声带", "同人", "警示录", "车祸", "事故", "实录", "监控", "录像",
+    "教程",
+    "教学",
+    "编曲",
+    "编曲技巧",
+    "怎么做",
+    "如何制作",
+    "合集",
+    "全集",
+    "精选集",
+    "歌单",
+    "playlist",
+    "reaction",
+    "访谈",
+    "解说",
+    "节目",
+    "电台",
+    "混剪",
+    "抖音热播",
+    "抖音热门",
+    "高潮版",
+    "片段版",
+    "广播剧",
+    "原声带",
+    "同人",
+    "警示录",
+    "车祸",
+    "事故",
+    "实录",
+    "监控",
+    "录像",
 )
 # DJ / 串烧 / mix 模式（默认拒；query 明确要 mix/DJ/车载/慢摇 时才放行）。
 # 注意：车载/串烧/慢摇/全网最火/低音炮这些放这里(query-aware)，不放 HARD_REJECT，
 # 否则用户明确要「车载DJ串烧」时会被 hard_reject 先拦、永远拿不到。
 MIX_PATTERNS = (
-    "dj", "串烧", "慢摇", "车载", "低音炮", "全网最火", "club mix", "mixset",
-    "remix set", "continuous mix", "dj mix",
+    "dj",
+    "串烧",
+    "慢摇",
+    "车载",
+    "低音炮",
+    "全网最火",
+    "club mix",
+    "mixset",
+    "remix set",
+    "continuous mix",
+    "dj mix",
 )
 # 句子/新闻/节目型标题的强标点——歌曲几乎不用。
 _SENTENCE_PUNCT = ("。", "！", "？", "【", "】")
@@ -97,9 +133,17 @@ QUALITY_PROTOTYPES: dict[str, list[str]] = {
 
 class CandidateQuality(BaseModel):
     """单个候选的质量判定结果。"""
+
     status: Literal["accept", "maybe", "reject"] = "maybe"
     entity_type: Literal[
-        "track", "album", "playlist", "video", "tutorial", "dj_mix", "program", "unknown",
+        "track",
+        "album",
+        "playlist",
+        "video",
+        "tutorial",
+        "dj_mix",
+        "program",
+        "unknown",
     ] = "unknown"
     track_score: float = 0.0
     junk_score: float = 0.0
@@ -109,6 +153,7 @@ class CandidateQuality(BaseModel):
 
 class HygieneReport(BaseModel):
     """一批候选的清洗报告——让 trace/文案能解释「为什么结果变少」。"""
+
     requested_count: int = 0
     raw_count: int = 0
     accepted_count: int = 0
@@ -190,37 +235,57 @@ def _structural_quality(track: Any, query: str = "") -> CandidateQuality | None:
     if not title:
         return CandidateQuality(status="reject", entity_type="unknown", confidence=1.0, reasons=["missing_title"])
     if not artist and source in {"bilibili", "youtube"}:
-        return CandidateQuality(status="reject", entity_type="video", confidence=0.8, reasons=["missing_artist_for_video_source"])
+        return CandidateQuality(
+            status="reject", entity_type="video", confidence=0.8, reasons=["missing_artist_for_video_source"]
+        )
 
     # candidate_kind 七分类里明确非单曲的实体直接拒。
     if kind in {"playlist", "compilation", "long_mix", "lyrics_video"}:
-        return CandidateQuality(status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=[f"candidate_kind:{kind}"])
+        return CandidateQuality(
+            status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=[f"candidate_kind:{kind}"]
+        )
 
     text = candidate_text(track)
     lower = text.lower()
 
     # 2. 句子/新闻/节目型标题（。！？【）——歌曲几乎不用。
     if any(p in title for p in _SENTENCE_PUNCT):
-        return CandidateQuality(status="reject", entity_type="program", junk_score=1.0, confidence=0.9, reasons=["sentence_punct_title"])
+        return CandidateQuality(
+            status="reject", entity_type="program", junk_score=1.0, confidence=0.9, reasons=["sentence_punct_title"]
+        )
     # 2b. 网易云用户上传的氛围/翻唱/助眠假歌：「曲名 - <氛围|男声|女声|助眠…>」后缀。
     if _MOOD_DESCRIPTOR_RE.search(title):
-        return CandidateQuality(status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=["mood_descriptor_title"])
+        return CandidateQuality(
+            status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=["mood_descriptor_title"]
+        )
     # 2c. 艺人栏本身就是功能音乐描述（轻音乐钢琴曲/纯音乐/咖啡厅音乐…）= 功能音频，非真实艺人。
     if _FUNCTIONAL_ARTIST_RE.search(artist):
-        return CandidateQuality(status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=["functional_artist"])
+        return CandidateQuality(
+            status="reject", entity_type="playlist", junk_score=1.0, confidence=0.9, reasons=["functional_artist"]
+        )
     # bilibili 句子标题（含逗号的长句 vlog/新闻）。
     if source == "bilibili" and ("，" in title or "！" in title):
-        return CandidateQuality(status="reject", entity_type="program", junk_score=0.95, confidence=0.85, reasons=["bilibili_sentence_title"])
+        return CandidateQuality(
+            status="reject",
+            entity_type="program",
+            junk_score=0.95,
+            confidence=0.85,
+            reasons=["bilibili_sentence_title"],
+        )
 
     # 3. 硬拒关键词
     if any(p in lower for p in HARD_REJECT_PATTERNS):
         etype = "tutorial" if any(w in lower for w in ("教程", "教学", "编曲")) else "playlist"
-        return CandidateQuality(status="reject", entity_type=etype, junk_score=1.0, confidence=0.9, reasons=["hard_reject_pattern"])
+        return CandidateQuality(
+            status="reject", entity_type=etype, junk_score=1.0, confidence=0.9, reasons=["hard_reject_pattern"]
+        )
 
     # 4. DJ / mix（query-aware：用户没明确要 mix 就拒）
     is_mix = any(p in lower for p in MIX_PATTERNS)
     if is_mix and not query_allows_mix(query):
-        return CandidateQuality(status="reject", entity_type="dj_mix", junk_score=0.95, confidence=0.9, reasons=["mix_not_allowed_by_query"])
+        return CandidateQuality(
+            status="reject", entity_type="dj_mix", junk_score=0.95, confidence=0.9, reasons=["mix_not_allowed_by_query"]
+        )
     return None
 
 
@@ -236,12 +301,50 @@ def is_structural_reject(track: Any) -> bool:
 # 各重复一份且黑名单已漂移，统一到这里的较全版本，单一事实来源。
 _NON_TRACK_KINDS = {"playlist", "compilation", "long_mix", "lyrics_video"}
 _BAD_TITLE_KEYWORDS = (
-    "教程", "教学", "怎么做", "怎么唱", "编曲技巧", "合集", "全集", "精选集",
-    "歌单", "playlist", "节目", "电台", "混剪", "串烧", "连播", "纯音乐合集",
-    "现场合集", "翻唱合集", "cover合集", "cover 合集", "dj mix", "reaction",
-    "真的好难做", "弹跳全集", "音乐制作", "编曲", "乐理",
-    "广播剧", "原声带", "ost", "bgm", "同人", "警示录", "日记", "纪实", "监控",
-    "录像", "现场实录", "车祸", "事故", "实录", "解说", "旁白", "字幕",
+    "教程",
+    "教学",
+    "怎么做",
+    "怎么唱",
+    "编曲技巧",
+    "合集",
+    "全集",
+    "精选集",
+    "歌单",
+    "playlist",
+    "节目",
+    "电台",
+    "混剪",
+    "串烧",
+    "连播",
+    "纯音乐合集",
+    "现场合集",
+    "翻唱合集",
+    "cover合集",
+    "cover 合集",
+    "dj mix",
+    "reaction",
+    "真的好难做",
+    "弹跳全集",
+    "音乐制作",
+    "编曲",
+    "乐理",
+    "广播剧",
+    "原声带",
+    "ost",
+    "bgm",
+    "同人",
+    "警示录",
+    "日记",
+    "纪实",
+    "监控",
+    "录像",
+    "现场实录",
+    "车祸",
+    "事故",
+    "实录",
+    "解说",
+    "旁白",
+    "字幕",
 )
 
 
@@ -263,7 +366,9 @@ def is_valid_music_track(track: Any) -> bool:
     if any(kw in text for kw in _BAD_TITLE_KEYWORDS):
         return False
     source = str(getattr(track, "source", "") or "").strip().lower()
-    if source == "bilibili" and any(w in title for w in ("，", "？", "?", "怎么", "为什么", "教你", "如何", "技巧", "！")):
+    if source == "bilibili" and any(
+        w in title for w in ("，", "？", "?", "怎么", "为什么", "教你", "如何", "技巧", "！")
+    ):
         return False
     return True
 
@@ -295,10 +400,24 @@ def classify_candidate(track: Any, query: str = "") -> CandidateQuality:
             best_junk_label, best_junk_score = max(junk.items(), key=lambda kv: kv[1])
         semantic_junk = best_junk_score > track_score + settings.hygiene_junk_margin
         if semantic_junk and source in {"bilibili", "youtube"}:
-            return CandidateQuality(status="reject", entity_type=best_junk_label or "unknown", track_score=track_score, junk_score=best_junk_score, confidence=0.7, reasons=[f"semantic_junk:{best_junk_label}"])
+            return CandidateQuality(
+                status="reject",
+                entity_type=best_junk_label or "unknown",
+                track_score=track_score,
+                junk_score=best_junk_score,
+                confidence=0.7,
+                reasons=[f"semantic_junk:{best_junk_label}"],
+            )
         # 用户明确要 mix 时，语义判 dj_mix 降为 maybe（出口 allow_maybe=True 时可入）。
         if semantic_junk and best_junk_label == "dj_mix" and query_allows_mix(query):
-            return CandidateQuality(status="maybe", entity_type="dj_mix", track_score=track_score, junk_score=best_junk_score, confidence=0.6, reasons=["semantic_mix_allowed"])
+            return CandidateQuality(
+                status="maybe",
+                entity_type="dj_mix",
+                track_score=track_score,
+                junk_score=best_junk_score,
+                confidence=0.6,
+                reasons=["semantic_mix_allowed"],
+            )
         # 可信源不因语义硬拒；继续回落到 source 兜底。
 
     # 6. source 兜底：网云带艺人 → accept；视频源 → maybe；其余 maybe。
@@ -330,7 +449,7 @@ def filter_music_tracks(
     rejected_examples: list[str] = []
     reasons: dict[str, int] = {}
 
-    for track in (tracks or []):
+    for track in tracks or []:
         quality = classify_candidate(track, query)
         for reason in quality.reasons:
             reasons[reason] = reasons.get(reason, 0) + 1

@@ -21,8 +21,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 AUX_TOOL_NAMES = {
-    "feedback", "listening_history", "list_my_playlists", "find_on_platform",
-    "lyrics", "audio_features", "save_to_playlist", "favorite_track", "concert_events",
+    "feedback",
+    "listening_history",
+    "list_my_playlists",
+    "find_on_platform",
+    "lyrics",
+    "audio_features",
+    "save_to_playlist",
+    "favorite_track",
+    "concert_events",
 }
 
 
@@ -92,14 +99,17 @@ def _feedback(agent: AudioVisualAgent, user_id: str, args: dict[str, Any], prior
 
     if action == "dislike":
         source = getattr(track, "source", "") if track else ""
-        source_id = (
-            getattr(track, "external_id", "") or getattr(track, "asset_id", "")
-            if track else ""
+        source_id = getattr(track, "external_id", "") or getattr(track, "asset_id", "") if track else ""
+        agent.record_dislike(
+            DislikeRequest(
+                user_id=user_id,
+                title=title,
+                artist=artist,
+                source=source,
+                source_id=source_id,
+                reason=reason,
+            )
         )
-        agent.record_dislike(DislikeRequest(
-            user_id=user_id, title=title, artist=artist,
-            source=source, source_id=source_id, reason=reason,
-        ))
         if artist and not title:
             agent.memory.add_exclusion(user_id, artist)
         summary = f"已记录不喜欢：{target}，后续推荐将排除或显著降权。"
@@ -114,10 +124,7 @@ def _feedback(agent: AudioVisualAgent, user_id: str, args: dict[str, Any], prior
             agent.library.update_ts_feedback(track, positive=False, weight=0.3)
         summary = f"已记录跳过：{target}（弱负反馈）。"
     else:
-        track_id = (
-            getattr(track, "asset_id", "") or getattr(track, "external_id", "")
-            if track else ""
-        )
+        track_id = getattr(track, "asset_id", "") or getattr(track, "external_id", "") if track else ""
         if track_id:
             agent.memory.record_listen(user_id, track_id, 0, False, context="agent_feedback")
             summary = f"已记录播放：{target}。"
@@ -125,8 +132,12 @@ def _feedback(agent: AudioVisualAgent, user_id: str, args: dict[str, Any], prior
             summary = f"未定位到真实曲目，仅保留了播放意图：{target}。"
 
     return {
-        "type": "feedback", "action": action, "title": title, "artist": artist,
-        "resolved": bool(track), "summary": summary,
+        "type": "feedback",
+        "action": action,
+        "title": title,
+        "artist": artist,
+        "resolved": bool(track),
+        "summary": summary,
     }, summary
 
 
@@ -155,7 +166,9 @@ def _listening_history(agent: AudioVisualAgent, user_id: str, args: dict[str, An
         counts[key] += 1
         labels[key] = {"label": label, "title": title, "artist": artist, "asset_id": event.asset_id}
     items = [{**labels[key], "count": count} for key, count in counts.most_common(top_k)]
-    summary = f"{window} 听歌历史共 {len(events)} 次，按{('歌手' if group_by == 'artist' else '曲目')}汇总 {len(items)} 项。"
+    summary = (
+        f"{window} 听歌历史共 {len(events)} 次，按{('歌手' if group_by == 'artist' else '曲目')}汇总 {len(items)} 项。"
+    )
     return {"type": "listening_history", "window": window, "group_by": group_by, "items": items}, summary
 
 
@@ -195,7 +208,8 @@ def _find_on_platform(agent: AudioVisualAgent, args: dict[str, Any]):
     result_tracks = matched[:3]
     summary = (
         f"已在 {platform} 找到 {len(result_tracks)} 个可追溯结果。"
-        if result_tracks else f"未在 {platform} 找到可核实的《{title}》结果。"
+        if result_tracks
+        else f"未在 {platform} 找到可核实的《{title}》结果。"
     )
     return {"type": "find_on_platform", "platform": platform, "tracks": result_tracks}, summary
 
@@ -216,7 +230,11 @@ def _lyrics(agent: AudioVisualAgent, args: dict[str, Any]):
                 song_id = str(candidate.get("song_id", ""))
                 break
     lines = fetch_netease_lyrics(song_id) if song_id else []
-    summary = f"已获取《{title or (resolved or {}).get('title', song_id)}》歌词 {len(lines)} 行。" if lines else "没有获取到可核实的歌词。"
+    summary = (
+        f"已获取《{title or (resolved or {}).get('title', song_id)}》歌词 {len(lines)} 行。"
+        if lines
+        else "没有获取到可核实的歌词。"
+    )
     return {"type": "lyrics", "song_id": song_id, "title": title, "artist": artist, "lines": lines}, summary
 
 
@@ -257,7 +275,8 @@ def _audio_features(agent: AudioVisualAgent, args: dict[str, Any]):
 def _preview_account_write(name: str, user_id: str, args: dict[str, Any]):
     confirm = bool(args.get("confirm", False))
     action = {
-        "tool": name, "playlist_id": str(args.get("playlist_id", "")),
+        "tool": name,
+        "playlist_id": str(args.get("playlist_id", "")),
         "track_ids": [str(item) for item in args.get("track_ids", [])],
         "track_id": str(args.get("track_id", "")),
     }
@@ -265,11 +284,19 @@ def _preview_account_write(name: str, user_id: str, args: dict[str, Any]):
         summary = "这是账号写操作预览；请明确确认后再执行。"
         return {"type": "confirmation_required", "confirmed": False, "action": action}, summary
     from app import netease_auth
+
     info = netease_auth.load_cookie(user_id)
     if not info or not info.get("cookie"):
-        return {"type": "auth_required", "what": "netease_login", "action": action}, "尚未登录网易云，未执行任何写操作。"
+        return {
+            "type": "auth_required",
+            "what": "netease_login",
+            "action": action,
+        }, "尚未登录网易云，未执行任何写操作。"
     return {
-        "type": "unsupported_write", "confirmed": True, "executed": False, "action": action,
+        "type": "unsupported_write",
+        "confirmed": True,
+        "executed": False,
+        "action": action,
     }, "当前版本尚无经过验证的网易云写接口，已安全拒绝，账号未发生变化。"
 
 
@@ -309,20 +336,22 @@ def _concert_events(agent: AudioVisualAgent, args: dict[str, Any]):
             if dedupe_key in seen_weak:
                 continue
             seen_weak.add(dedupe_key)
-            unverified_sources.append({
-                "title": title or "未命名线索页",
-                "source_name": host,
-                "source_url": url,
-                "reason": weak_reason,
-            })
+            unverified_sources.append(
+                {
+                    "title": title or "未命名线索页",
+                    "source_name": host,
+                    "source_url": url,
+                    "reason": weak_reason,
+                }
+            )
     events.sort(key=_concert_event_sort_key)
     concrete = [event for event in events if event.get("kind") == "event"]
     pages = [event for event in events if event.get("kind") != "event"]
     events = [*concrete, *pages]
     summary = (
         f"整理出 {len(events)} 条可核实演出事件，另有 {len(unverified_sources)} 条弱线索来源。"
-        if events or unverified_sources else
-        "暂未找到可核实的演出信息。"
+        if events or unverified_sources
+        else "暂未找到可核实的演出信息。"
     )
     return {
         "type": "concert_events",
@@ -360,14 +389,23 @@ def _extract_venue_text(text: str) -> str:
     return ""
 
 
-def _looks_like_verified_event_signal(title: str, content: str, url: str, *, artist: str = "", city: str = "") -> tuple[bool, str]:
+def _looks_like_verified_event_signal(
+    title: str, content: str, url: str, *, artist: str = "", city: str = ""
+) -> tuple[bool, str]:
     from urllib.parse import urlparse
 
     text = " ".join([title or "", content or "", url or ""]).lower()
     host = urlparse(url or "").netloc.lower().removeprefix("www.")
     weak_hosts = {
-        "music.apple.com", "open.spotify.com", "threads.com", "instagram.com",
-        "x.com", "twitter.com", "facebook.com", "wikipedia.org", "en.wikipedia.org",
+        "music.apple.com",
+        "open.spotify.com",
+        "threads.com",
+        "instagram.com",
+        "x.com",
+        "twitter.com",
+        "facebook.com",
+        "wikipedia.org",
+        "en.wikipedia.org",
     }
     weak_terms = ("歌单", "playlist", "粉丝团", "threads", "forum", "讨论")
     event_terms = ("tour", "concert", "live", "巡演", "演出", "场馆", "门票", "tickets", "stadium", "arena")

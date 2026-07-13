@@ -51,7 +51,9 @@ class AsyncSourceTransport:
                 try:
                     response = await self.client.request(method, url, **kwargs)
                     if response.status_code == 429 or response.status_code >= 500:
-                        raise httpx.HTTPStatusError("retryable source response", request=response.request, response=response)
+                        raise httpx.HTTPStatusError(
+                            "retryable source response", request=response.request, response=response
+                        )
                     circuit.failures = 0
                     return response
                 except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.HTTPStatusError):
@@ -68,4 +70,3 @@ class AsyncSourceTransport:
 
 
 source_transport = AsyncSourceTransport()
-

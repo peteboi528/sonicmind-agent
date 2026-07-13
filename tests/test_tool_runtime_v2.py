@@ -90,6 +90,7 @@ def test_async_runtime_times_out_sync_handler_without_retry():
     spec.handler = slow_handler
     spec.timeout_seconds = 0.03
     spec.max_retries = 2
+
     async def execute():
         started = time.monotonic()
         result = await ToolRuntime().execute(
@@ -123,6 +124,7 @@ def test_runtime_deadline_caps_tool_timeout():
 
     spec.handler = slow_handler
     spec.timeout_seconds = 1.0
+
     async def execute():
         started = time.monotonic()
         result = await ToolRuntime().execute(

@@ -77,19 +77,21 @@ class HistoryService:
             if user_message:
                 thread.messages.append(ChatHistoryMessage(role="user", content=user_message, created_at=now))
             if assistant_message:
-                thread.messages.append(ChatHistoryMessage(
-                    role="assistant",
-                    content=assistant_message,
-                    created_at=now,
-                    cards=list(cards or []),
-                    trace_summary=dict(trace_summary or {}),
-                ))
-            thread.messages = thread.messages[-settings.chat_history_max_messages_per_thread:]
+                thread.messages.append(
+                    ChatHistoryMessage(
+                        role="assistant",
+                        content=assistant_message,
+                        created_at=now,
+                        cards=list(cards or []),
+                        trace_summary=dict(trace_summary or {}),
+                    )
+                )
+            thread.messages = thread.messages[-settings.chat_history_max_messages_per_thread :]
             thread.updated_at = now
             if not thread.title:
                 thread.title = _title_from_message(user_message)
 
-            kept = sorted(threads, key=lambda item: item.updated_at, reverse=True)[:settings.chat_history_max_threads]
+            kept = sorted(threads, key=lambda item: item.updated_at, reverse=True)[: settings.chat_history_max_threads]
             self.store.write_models(CHAT_COLLECTION, user_id, kept)
             return thread
 
@@ -140,7 +142,9 @@ class HistoryService:
             items = self.store.read_models(RECOMMENDATION_COLLECTION, user_id, RecommendationHistoryItem)
             active = [old for old in items if _parse_iso(old.expires_at) > now]
             active.append(item)
-            active = sorted(active, key=lambda old: old.created_at, reverse=True)[:settings.recommendation_history_max_items]
+            active = sorted(active, key=lambda old: old.created_at, reverse=True)[
+                : settings.recommendation_history_max_items
+            ]
             self.store.write_models(RECOMMENDATION_COLLECTION, user_id, active)
         return item
 
@@ -150,4 +154,3 @@ class HistoryService:
             kept = [item for item in items if item.record_id != record_id]
             self.store.write_models(RECOMMENDATION_COLLECTION, user_id, kept)
             return len(kept) != len(items)
-

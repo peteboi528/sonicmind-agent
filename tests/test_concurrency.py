@@ -31,6 +31,7 @@ def test_failing_task_falls_back_to_default():
 
 def test_timeout_task_takes_default():
     started = time.monotonic()
+
     def hang():
         time.sleep(5.0)
         return "never"

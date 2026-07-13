@@ -2,6 +2,7 @@
 
 nodes.py 仅作为门面 re-export 本模块的符号，业务逻辑收敛于此。
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
@@ -29,22 +30,37 @@ async def web_fallback_async(agent: AudioVisualAgent, state: AgentState) -> Agen
     call = ToolCall(name="web_music_search", arguments=_planned_arguments("web_music_search", query, plan, top_k))
     local_results: list[dict[str, Any]] = []
     runtime_result = await _run_tool_async_safely(
-        agent, call, plan, query, user_id, top_k, results,
-        local_results, trace, events,
-        state.get("thread_id") or f"{user_id}:default", state.get("run_id") or "",
+        agent,
+        call,
+        plan,
+        query,
+        user_id,
+        top_k,
+        results,
+        local_results,
+        trace,
+        events,
+        state.get("thread_id") or f"{user_id}:default",
+        state.get("run_id") or "",
         bool(state.get("_interrupt_enabled")),
     )
     results.extend(local_results)
     if runtime_result is not None:
         outcomes.append(_tool_outcome(call, runtime_result, state.get("_refine_count", 0)))
     return {
-        **state, "results": results, "trace": trace, "events": events,
-        "tool_outcomes": outcomes, "_need_web_fallback": False,
+        **state,
+        "results": results,
+        "trace": trace,
+        "events": events,
+        "tool_outcomes": outcomes,
+        "_need_web_fallback": False,
     }
+
 
 def route_after_execute(state: AgentState) -> str:
     """条件路由：候选不足 → web_fallback，否则 → reflect。"""
     return "web_fallback" if state.get("_need_web_fallback") else "reflect"
+
 
 def _needs_web_fallback(plan: AgentPlan, results: list[dict[str, Any]], executed: set[str]) -> bool:
     if "web_music_search" in executed or not plan.online_required:
@@ -52,11 +68,11 @@ def _needs_web_fallback(plan: AgentPlan, results: list[dict[str, Any]], executed
     if plan.intent not in {"recommend", "search", "playlist"}:
         return False
     verified = [
-        t for t in _collect_tracks(results)
-        if getattr(t, "source", "local") in {"netease", "bilibili", "youtube"}
+        t for t in _collect_tracks(results) if getattr(t, "source", "local") in {"netease", "bilibili", "youtube"}
     ]
     need = plan.target_count or 3
     return len(verified) < need
+
 
 def _record_runtime_result(
     handler: str,
@@ -78,28 +94,36 @@ def _record_runtime_result(
     if runtime_result.status == ToolStatus.ERROR:
         error_message = runtime_result.error.message if runtime_result.error else f"{handler} failed"
         trace.append(f"[tool_error] {handler} 失败，已跳过：{error_message}")
-        events.append(StreamEvent(
-            type="error",
-            content=f"{handler} 暂时不可用，已跳过该工具。",
-            payload={"tool": handler, "error": error_message},
-        ))
+        events.append(
+            StreamEvent(
+                type="error",
+                content=f"{handler} 暂时不可用，已跳过该工具。",
+                payload={"tool": handler, "error": error_message},
+            )
+        )
     else:
         trace.append(f"[{handler}] {summary}")
         if handler == "import_netease_playlist":
             trace.append(f"[import] {summary}")
     trace.append(
-        f"[tool_status] tool={handler} status={runtime_result.status.value} "
-        f"candidates={len(runtime_result.cards)}"
+        f"[tool_status] tool={handler} status={runtime_result.status.value} candidates={len(runtime_result.cards)}"
     )
     if runtime_result.status == ToolStatus.CONFIRMATION_REQUIRED:
         checkpoint_store.put(
-            call.call_id, thread_id, user_id, handler, arguments, query,
+            call.call_id,
+            thread_id,
+            user_id,
+            handler,
+            arguments,
+            query,
         )
-        events.append(StreamEvent(
-            type="confirmation_required",
-            content=summary,
-            payload={"action_id": call.call_id, "tool": handler, "arguments": arguments},
-        ))
+        events.append(
+            StreamEvent(
+                type="confirmation_required",
+                content=summary,
+                payload={"action_id": call.call_id, "tool": handler, "arguments": arguments},
+            )
+        )
     if handler == "artist_albums":
         for album in runtime_result.data.get("albums", []):
             events.append(StreamEvent(type="album_card", content=album.get("name", ""), payload={"album": album}))
@@ -107,11 +131,13 @@ def _record_runtime_result(
         for artist in runtime_result.data.get("artists", []):
             events.append(StreamEvent(type="artist_card", content=artist.get("name", ""), payload=artist))
     if handler == "build_music_dossier" and runtime_result.data.get("dossier"):
-        events.append(StreamEvent(
-            type="dossier",
-            content=runtime_result.data.get("answer", "已生成音乐档案。"),
-            payload={"dossier": runtime_result.data.get("dossier")},
-        ))
+        events.append(
+            StreamEvent(
+                type="dossier",
+                content=runtime_result.data.get("answer", "已生成音乐档案。"),
+                payload={"dossier": runtime_result.data.get("dossier")},
+            )
+        )
         for artist in runtime_result.data.get("artist_cards", []) or []:
             events.append(StreamEvent(type="artist_card", content=artist.get("name", ""), payload=artist))
         dossier = runtime_result.data.get("dossier") or {}
@@ -146,28 +172,38 @@ def _record_runtime_result(
         for album in dossier.get("related_albums", []):
             events.append(StreamEvent(type="album_card", content=album.get("name", ""), payload={"album": album}))
     if handler == "build_sample_dossier" and runtime_result.data.get("sample_dossier"):
-        events.append(StreamEvent(
-            type="sample_relations",
-            content=runtime_result.data.get("answer", "已生成采样溯源结果。"),
-            payload={
-                "sample_dossier": runtime_result.data.get("sample_dossier"),
-                "relations": runtime_result.data.get("sample_relations") or [],
-                "source_cards": runtime_result.data.get("source_cards") or [],
-            },
-        ))
+        events.append(
+            StreamEvent(
+                type="sample_relations",
+                content=runtime_result.data.get("answer", "已生成采样溯源结果。"),
+                payload={
+                    "sample_dossier": runtime_result.data.get("sample_dossier"),
+                    "relations": runtime_result.data.get("sample_relations") or [],
+                    "source_cards": runtime_result.data.get("source_cards") or [],
+                },
+            )
+        )
     if runtime_result.cards:
         payload: dict[str, Any] = {"count": len(runtime_result.cards), "cards": runtime_result.cards}
         if handler == "taste_experiment":
             experiment = runtime_result.data.get("experiment")
-            payload["taste_experiment"] = experiment.model_dump(mode="json") if hasattr(experiment, "model_dump") else experiment
+            payload["taste_experiment"] = (
+                experiment.model_dump(mode="json") if hasattr(experiment, "model_dump") else experiment
+            )
         if handler == "journey":
             payload["journey"] = runtime_result.data.get("journey")
-        events.append(StreamEvent(type="candidates", content=f"{handler} {len(runtime_result.cards)} 个结果", payload=payload))
-    events.append(StreamEvent(
-        type="tool_result", content=summary,
-        payload={"tool": handler, "status": runtime_result.status.value},
-    ))
+        events.append(
+            StreamEvent(type="candidates", content=f"{handler} {len(runtime_result.cards)} 个结果", payload=payload)
+        )
+    events.append(
+        StreamEvent(
+            type="tool_result",
+            content=summary,
+            payload={"tool": handler, "status": runtime_result.status.value},
+        )
+    )
     return runtime_result
+
 
 async def execute_tools_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     """Native async stage executor used by the streaming LangGraph."""
@@ -193,9 +229,20 @@ async def execute_tools_async(agent: AudioVisualAgent, state: AgentState) -> Age
         local_trace: list[str] = []
         local_events: list[StreamEvent] = []
         result = await _run_tool_async_safely(
-            agent, call, plan, query, user_id, top_k, shared_results,
-            local_results, local_trace, local_events,
-            thread_id, run_id, interrupt_enabled, state_context,
+            agent,
+            call,
+            plan,
+            query,
+            user_id,
+            top_k,
+            shared_results,
+            local_results,
+            local_trace,
+            local_events,
+            thread_id,
+            run_id,
+            interrupt_enabled,
+            state_context,
         )
         return call, result, local_results, local_trace, local_events
 
@@ -233,6 +280,7 @@ async def execute_tools_async(agent: AudioVisualAgent, state: AgentState) -> Age
         "_evaluated": False,
     }
 
+
 async def _run_tool_async_safely(
     agent: AudioVisualAgent,
     call: ToolCall,
@@ -253,8 +301,20 @@ async def _run_tool_async_safely(
 
     try:
         return await _run_tool_async(
-            agent, call, plan, query, user_id, top_k, prior_results,
-            results, trace, events, thread_id, run_id, interrupt_enabled, state_context,
+            agent,
+            call,
+            plan,
+            query,
+            user_id,
+            top_k,
+            prior_results,
+            results,
+            trace,
+            events,
+            thread_id,
+            run_id,
+            interrupt_enabled,
+            state_context,
         )
     except asyncio.CancelledError:
         raise
@@ -263,18 +323,25 @@ async def _run_tool_async_safely(
             raise
         handler = get_handler(call.name) or call.name
         result = ToolResult(
-            tool=handler, status=ToolStatus.ERROR,
+            tool=handler,
+            status=ToolStatus.ERROR,
             error=ToolError(kind=type(exc).__name__, message=str(exc)),
         )
-        trace.extend([
-            f"[tool_error] {handler} 失败，已跳过：{exc}",
-            f"[tool_status] tool={handler} status=error candidates=0",
-        ])
-        events.append(StreamEvent(
-            type="error", content=f"{handler} 暂时不可用，已跳过该工具。",
-            payload={"tool": handler, "error": str(exc)},
-        ))
+        trace.extend(
+            [
+                f"[tool_error] {handler} 失败，已跳过：{exc}",
+                f"[tool_status] tool={handler} status=error candidates=0",
+            ]
+        )
+        events.append(
+            StreamEvent(
+                type="error",
+                content=f"{handler} 暂时不可用，已跳过该工具。",
+                payload={"tool": handler, "error": str(exc)},
+            )
+        )
         return result
+
 
 async def _run_tool_async(
     agent: AudioVisualAgent,
@@ -318,18 +385,27 @@ async def _run_tool_async(
             from langgraph.types import interrupt
 
             action_payload = {
-                "action_id": call.call_id, "tool": handler,
-                "arguments": arguments, "query": query[:200],
+                "action_id": call.call_id,
+                "tool": handler,
+                "arguments": arguments,
+                "query": query[:200],
             }
             created = checkpoint_store.put(
-                call.call_id, thread_id, user_id, handler, arguments, query,
+                call.call_id,
+                thread_id,
+                user_id,
+                handler,
+                arguments,
+                query,
             )
             if created:
-                get_stream_writer()(StreamEvent(
-                    type="confirmation_required",
-                    content="这是外部账号写操作，需要明确确认后执行。",
-                    payload=action_payload,
-                ).model_dump(mode="json"))
+                get_stream_writer()(
+                    StreamEvent(
+                        type="confirmation_required",
+                        content="这是外部账号写操作，需要明确确认后执行。",
+                        payload=action_payload,
+                    ).model_dump(mode="json")
+                )
             decision = interrupt(action_payload)
             approved = (
                 isinstance(decision, dict)
@@ -338,7 +414,8 @@ async def _run_tool_async(
             )
             if not approved:
                 runtime_result = ToolResult(
-                    tool=handler, status=ToolStatus.CANCELLED,
+                    tool=handler,
+                    status=ToolStatus.CANCELLED,
                     summary="用户已拒绝该外部写操作。",
                     data={"action_id": call.call_id},
                 )
@@ -354,18 +431,35 @@ async def _run_tool_async(
     if budget_degrade_level:
         latency_budget["budget_degrade_level"] = budget_degrade_level
     if runtime_result is None:
-        runtime_result = await tool_runtime.execute(call, ToolContext(
-            thread_id=thread_id, user_id=user_id, query=query, plan=plan_payload,
-            prior_results=prior_results, confirmation=confirmation, agent=agent,
-            deadline_at=state_context.get("deadline_at"),
-            latency_budget=latency_budget,
-            **context_kwargs,
-        ))
+        runtime_result = await tool_runtime.execute(
+            call,
+            ToolContext(
+                thread_id=thread_id,
+                user_id=user_id,
+                query=query,
+                plan=plan_payload,
+                prior_results=prior_results,
+                confirmation=confirmation,
+                agent=agent,
+                deadline_at=state_context.get("deadline_at"),
+                latency_budget=latency_budget,
+                **context_kwargs,
+            ),
+        )
     return _record_runtime_result(
-        handler, call, arguments, runtime_result, results, trace, events,
-        checkpoint_store=checkpoint_store, thread_id=thread_id,
-        user_id=user_id, query=query,
+        handler,
+        call,
+        arguments,
+        runtime_result,
+        results,
+        trace,
+        events,
+        checkpoint_store=checkpoint_store,
+        thread_id=thread_id,
+        user_id=user_id,
+        query=query,
     )
+
 
 def _tool_outcome(call: ToolCall, result: ToolResult, attempt: int) -> dict[str, Any]:
     return ToolOutcome(
@@ -380,6 +474,7 @@ def _tool_outcome(call: ToolCall, result: ToolResult, attempt: int) -> dict[str,
         metrics=result.metrics,
         attempt=attempt,
     ).model_dump(mode="json")
+
 
 def _infer_aux_arguments(handler: str, query: str, plan: AgentPlan) -> dict[str, Any]:
     """Deterministic fallback arguments, materialized into ToolCall during planning."""
@@ -396,13 +491,33 @@ def _infer_aux_arguments(handler: str, query: str, plan: AgentPlan) -> dict[str,
             action = "like"
         return {"action": action, "title": entities[0] if entities else "", "reason": query}
     if handler == "listening_history":
-        window = "week" if "上周" in query or "最近一周" in query else "month" if "本月" in query or "最近一个月" in query else "recent"
-        return {"window": window, "group_by": "artist" if "歌手" in query else "track", "top_k": plan.target_count or 10}
+        window = (
+            "week"
+            if "上周" in query or "最近一周" in query
+            else "month"
+            if "本月" in query or "最近一个月" in query
+            else "recent"
+        )
+        return {
+            "window": window,
+            "group_by": "artist" if "歌手" in query else "track",
+            "top_k": plan.target_count or 10,
+        }
     if handler == "list_my_playlists":
         return {}
     if handler == "find_on_platform":
-        platform = "youtube" if "youtube" in lowered else "bilibili" if any(token in lowered for token in ("b站", "bilibili")) else "netease"
-        return {"title": entities[0] if entities else query, "artist": entities[1] if len(entities) > 1 else "", "platform": platform}
+        platform = (
+            "youtube"
+            if "youtube" in lowered
+            else "bilibili"
+            if any(token in lowered for token in ("b站", "bilibili"))
+            else "netease"
+        )
+        return {
+            "title": entities[0] if entities else query,
+            "artist": entities[1] if len(entities) > 1 else "",
+            "platform": platform,
+        }
     if handler == "lyrics":
         return {"title": entities[0] if entities else query, "artist": entities[1] if len(entities) > 1 else ""}
     if handler == "audio_features":

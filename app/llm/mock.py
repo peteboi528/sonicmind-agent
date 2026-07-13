@@ -93,7 +93,9 @@ class MockLLM:
             "provider": f"mock:{kind}",
         }
 
-    def generate(self, prompt: str, system: str | None = None, temperature: float = 0.7, thinking: bool | None = None) -> str:
+    def generate(
+        self, prompt: str, system: str | None = None, temperature: float = 0.7, thinking: bool | None = None
+    ) -> str:
         self._mark_call("generate")
         return self._dispatch(prompt, system)
 
@@ -118,7 +120,9 @@ class MockLLM:
             return self._intent(prompt)
         return self._chat(prompt)
 
-    def generate_stream(self, prompt: str, system: str | None = None, temperature: float = 0.7, thinking: bool | None = None) -> Any:
+    def generate_stream(
+        self, prompt: str, system: str | None = None, temperature: float = 0.7, thinking: bool | None = None
+    ) -> Any:
         """Mock 流式：先算出整段，再按块 yield（mock 无真实网络，模拟首字即可）。
 
         注意不走 generate()，避免重复 _mark_call；直接复用 _dispatch 同一份派发逻辑，
@@ -128,13 +132,11 @@ class MockLLM:
         text = self._dispatch(prompt, system)
         step = max(1, len(text) // 8)
         for i in range(0, len(text), step):
-            yield text[i:i + step]
+            yield text[i : i + step]
 
     def chat(self, messages: list[dict[str, Any]], temperature: float = 0.7, thinking: bool | None = None) -> str:
         self._mark_call("chat")
-        last_user = next(
-            (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
-        )
+        last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
         return self.generate(last_user)
 
     def chat_with_tools(
@@ -148,9 +150,7 @@ class MockLLM:
         self._mark_call("chat_with_tools")
         """Mock 实现：第一轮根据关键词选 1 个 tool 调用，第二轮收到工具结果后给最终答案。"""
         # 找到最后一条 user 消息（原始 query）
-        last_user = next(
-            (m["content"] for m in reversed(messages) if m.get("role") == "user"), ""
-        )
+        last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
         # 检查对话里已经发生的工具调用，避免重复
         called_tools = [
             tc.get("function", {}).get("name", "")
@@ -185,12 +185,24 @@ class MockLLM:
             kw in lowered
             for kw in ["recommend", "suggest", "推荐", "搜索", "找歌", "歌单", "playlist", "chill", "适合", "跑步"]
         )
-        if wants_music_candidates and TOOL_WEB_MUSIC_SEARCH in available and TOOL_WEB_MUSIC_SEARCH not in already_called:
+        if (
+            wants_music_candidates
+            and TOOL_WEB_MUSIC_SEARCH in available
+            and TOOL_WEB_MUSIC_SEARCH not in already_called
+        ):
             return TOOL_WEB_MUSIC_SEARCH
         if TOOL_WEB_MUSIC_SEARCH in already_called:
-            if any(kw in lowered for kw in ["playlist", "歌单", "合集"]) and TOOL_PLAYLIST in available and TOOL_PLAYLIST not in already_called:
+            if (
+                any(kw in lowered for kw in ["playlist", "歌单", "合集"])
+                and TOOL_PLAYLIST in available
+                and TOOL_PLAYLIST not in already_called
+            ):
                 return TOOL_PLAYLIST
-            if any(kw in lowered for kw in ["搜索", "找歌", "search"]) and TOOL_SEARCH in available and TOOL_SEARCH not in already_called:
+            if (
+                any(kw in lowered for kw in ["搜索", "找歌", "search"])
+                and TOOL_SEARCH in available
+                and TOOL_SEARCH not in already_called
+            ):
                 return TOOL_SEARCH
             if TOOL_RECOMMEND in available and TOOL_RECOMMEND not in already_called:
                 return TOOL_RECOMMEND
@@ -241,13 +253,21 @@ class MockLLM:
         entities = _mock_entities(current_query, intent)
         search_query, language = self._mock_search_query(query_for_rewrite, intent, entities)
         search_variants = _mock_search_variants(current_query, search_query, intent, entities)
-        return _json.dumps({
-            "intent": intent, "entities": entities, "use_local": use_local,
-            "use_vector": use_vector, "use_web": use_web,
-            "search_query": search_query, "search_variants": search_variants, "language": language,
-            "target_count": target,
-            "reasoning": f"mock：{intent} 意图",
-        }, ensure_ascii=False)
+        return _json.dumps(
+            {
+                "intent": intent,
+                "entities": entities,
+                "use_local": use_local,
+                "use_vector": use_vector,
+                "use_web": use_web,
+                "search_query": search_query,
+                "search_variants": search_variants,
+                "language": language,
+                "target_count": target,
+                "reasoning": f"mock：{intent} 意图",
+            },
+            ensure_ascii=False,
+        )
 
     def _decompose(self, prompt: str) -> str:
         import json as _json
@@ -262,17 +282,21 @@ class MockLLM:
         subtasks = []
         for idx, part in enumerate(parts):
             intent = match_intent_by_keywords(part) or "recommend"
-            subtasks.append({
-                "intent": intent,
-                "query": part,
-                "depends_on_prev": idx > 0 and any(token in part for token in ["再", "类似", "基于", "继续"]),
-            })
+            subtasks.append(
+                {
+                    "intent": intent,
+                    "query": part,
+                    "depends_on_prev": idx > 0 and any(token in part for token in ["再", "类似", "基于", "继续"]),
+                }
+            )
         return _json.dumps({"subtasks": subtasks}, ensure_ascii=False)
 
     def _compound_synthesis(self, prompt: str) -> str:
         query_match = re.search(r"用户原始请求：(.*?)\n\n", prompt, re.S)
         query = query_match.group(1).strip() if query_match else "这次请求"
-        steps = re.findall(r"子任务 \d+（.*?）\n任务：(.+?)\n结果摘要：(.+?)(?:\n主要答复：(.+?))?(?=\n\n子任务 |\Z)", prompt, re.S)
+        steps = re.findall(
+            r"子任务 \d+（.*?）\n任务：(.+?)\n结果摘要：(.+?)(?:\n主要答复：(.+?))?(?=\n\n子任务 |\Z)", prompt, re.S
+        )
         if not steps:
             return f"我已经完成“{query}”的处理，并整理好了结果。"
         lines = [f"我已经把“{query}”分步处理好了。"]
@@ -425,7 +449,7 @@ def _extract_current_query(prompt: str) -> str:
         re.finditer(r"(?:^|\n)\s*(?:assistant|助手)\s*[:：][^\n]*(?:\n|$)", text, flags=re.IGNORECASE)
     )
     if assistant_matches:
-        trailing = text[assistant_matches[-1].end():].strip()
+        trailing = text[assistant_matches[-1].end() :].strip()
         if trailing:
             return trailing
     matches = re.findall(r"(?:^|\n)\s*(?:用户|user)\s*[:：]\s*(.+)", text, flags=re.IGNORECASE)
@@ -437,10 +461,7 @@ def _extract_current_query(prompt: str) -> str:
 def _mock_intent_for_query(query: str) -> str:
     lowered = query.lower()
     stripped = lowered.strip()
-    if (
-        any(k in query for k in ["你好", "嗨", "在吗"])
-        or re.fullmatch(r"(hi|hello|hey)[!！。.\s]*", stripped)
-    ):
+    if any(k in query for k in ["你好", "嗨", "在吗"]) or re.fullmatch(r"(hi|hello|hey)[!！。.\s]*", stripped):
         return "chat"
     if any(k in lowered for k in ["网易云歌单", "导入歌单", "playlist?id", "导入"]):
         return "import"
@@ -462,25 +483,68 @@ def _mock_entities(query: str, intent: str) -> list[str]:
     if any(token in query for token in ("不要", "别", "换成", "改成")):
         return []
     english_stop = {
-        "mv", "video", "live", "concert", "playlist", "album", "albums",
-        "recommend", "suggest", "search", "find", "about", "biography",
+        "mv",
+        "video",
+        "live",
+        "concert",
+        "playlist",
+        "album",
+        "albums",
+        "recommend",
+        "suggest",
+        "search",
+        "find",
+        "about",
+        "biography",
     }
-    english = [
-        token for token in re.findall(r"[A-Za-z][A-Za-z0-9'&\-]*", query)
-        if token.lower() not in english_stop
-    ]
+    english = [token for token in re.findall(r"[A-Za-z][A-Za-z0-9'&\-]*", query) if token.lower() not in english_stop]
     entities: list[str] = []
     if english:
         entities.append(" ".join(english))
 
     cleaned = query
     cjk_noise = [
-        "帮我", "给我", "推荐", "搜索", "搜一下", "找", "找一下", "一些",
-        "几首", "一首", "的歌", "歌曲", "音乐", "专辑", "唱片", "大碟",
-        "有哪些", "有哪几张", "哪几张", "几张", "介绍一下", "介绍",
-        "背景", "成员", "出道", "简介", "资料", "百科", "是谁", "这个团体",
-        "牛逼吗", "怎么样", "评价", "风格", "什么水平", "视频", "现场",
-        "演唱会", "导入", "网易云歌单", "歌单",
+        "帮我",
+        "给我",
+        "推荐",
+        "搜索",
+        "搜一下",
+        "找",
+        "找一下",
+        "一些",
+        "几首",
+        "一首",
+        "的歌",
+        "歌曲",
+        "音乐",
+        "专辑",
+        "唱片",
+        "大碟",
+        "有哪些",
+        "有哪几张",
+        "哪几张",
+        "几张",
+        "介绍一下",
+        "介绍",
+        "背景",
+        "成员",
+        "出道",
+        "简介",
+        "资料",
+        "百科",
+        "是谁",
+        "这个团体",
+        "牛逼吗",
+        "怎么样",
+        "评价",
+        "风格",
+        "什么水平",
+        "视频",
+        "现场",
+        "演唱会",
+        "导入",
+        "网易云歌单",
+        "歌单",
     ]
     for noise in sorted(cjk_noise, key=len, reverse=True):
         cleaned = cleaned.replace(noise, " ")

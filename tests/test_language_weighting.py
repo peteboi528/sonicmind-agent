@@ -2,6 +2,7 @@
 
 用户需求(2026-06)："曲库中英文歌比较多就多推荐英文歌，但不是完全不推荐中文歌曲。"
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -87,13 +88,15 @@ class TestRerankLanguageWeighting:
         from app.recommend.rerank import rerank_candidates
 
         tracks = [
-            SimpleNamespace(title="晴天", artist="周杰伦", genre=["流行"], mood=["浪漫"], external_id="zh1", source="mock"),
-            SimpleNamespace(title="Nights", artist="Frank Ocean", genre=["流行"], mood=["浪漫"], external_id="en1", source="mock"),
+            SimpleNamespace(
+                title="晴天", artist="周杰伦", genre=["流行"], mood=["浪漫"], external_id="zh1", source="mock"
+            ),
+            SimpleNamespace(
+                title="Nights", artist="Frank Ocean", genre=["流行"], mood=["浪漫"], external_id="en1", source="mock"
+            ),
         ]
         lang_pref = {"en": 0.8, "zh": 0.2}
-        ranked = rerank_candidates(
-            "推荐", tracks, taste=None, lang_pref=lang_pref, top_k=5, apply_mmr=False
-        )
+        ranked = rerank_candidates("推荐", tracks, taste=None, lang_pref=lang_pref, top_k=5, apply_mmr=False)
         titles = [getattr(t, "title", "") for t, _ in ranked]
         # 英文候选排第一，但中文候选仍在结果中（未被排除）
         assert titles[0] == "Nights"

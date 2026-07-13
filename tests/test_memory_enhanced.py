@@ -7,10 +7,12 @@ from app.storage import JsonStore
 def test_structured_preferences_created(tmp_path):
     agent = CineSonicAgent(JsonStore(tmp_path / "store"))
 
-    agent.update_memory(MemoryUpdateRequest(
-        user_id="test-user",
-        event="I like cinematic tension and strong bass.",
-    ))
+    agent.update_memory(
+        MemoryUpdateRequest(
+            user_id="test-user",
+            event="I like cinematic tension and strong bass.",
+        )
+    )
     memory = agent.memory.get_memory("test-user")
     assert memory.structured_preferences
     assert memory.structured_preferences[0].text == "cinematic tension and strong bass"
@@ -41,10 +43,12 @@ def test_feedback_reinforces_preference(tmp_path):
     asset = agent.ingest_video("https://example.com/feedback-test")
     _, segments = agent.analyze_media(asset.asset_id)
 
-    agent.update_memory(MemoryUpdateRequest(
-        user_id="test-user",
-        event="I like cinematic tension.",
-    ))
+    agent.update_memory(
+        MemoryUpdateRequest(
+            user_id="test-user",
+            event="I like cinematic tension.",
+        )
+    )
 
     seg_with_tension = None
     for seg in segments:
@@ -53,11 +57,13 @@ def test_feedback_reinforces_preference(tmp_path):
             break
 
     if seg_with_tension:
-        agent.record_feedback(FeedbackRequest(
-            user_id="test-user",
-            segment_id=seg_with_tension.segment_id,
-            accepted=True,
-        ))
+        agent.record_feedback(
+            FeedbackRequest(
+                user_id="test-user",
+                segment_id=seg_with_tension.segment_id,
+                accepted=True,
+            )
+        )
         memory = agent.memory.get_memory("test-user")
         entry = next(e for e in memory.structured_preferences if "cinematic tension" in e.text)
         assert entry.frequency >= 2
@@ -163,20 +169,32 @@ def test_refresh_preserves_genre_mood_when_library_has_no_tags(tmp_path):
     agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
 
     # 1) 有 genre/mood 标签的库 → 建立 taste
-    tagged = [Asset(
-        asset_id="t1", source_url="x", title="t", duration_seconds=200,
-        status=AssetStatus.ANALYZED, genre=["说唱"], mood=["治愈"],
-    )]
+    tagged = [
+        Asset(
+            asset_id="t1",
+            source_url="x",
+            title="t",
+            duration_seconds=200,
+            status=AssetStatus.ANALYZED,
+            genre=["说唱"],
+            mood=["治愈"],
+        )
+    ]
     agent.memory.refresh_taste_profile("u", tagged)
     saved_genres = [g for g, _ in agent.memory.get_memory("u").taste_profile.top_genres]
     saved_moods = [m for m, _ in agent.memory.get_memory("u").taste_profile.top_moods]
     assert saved_genres and saved_moods
 
     # 2) 换成无 genre/mood 标签的库（如网易云导入缺失）→ 不该清空
-    untagged = [Asset(
-        asset_id="u1", source_url="x", title="u", duration_seconds=200,
-        status=AssetStatus.ANALYZED,
-    )]
+    untagged = [
+        Asset(
+            asset_id="u1",
+            source_url="x",
+            title="u",
+            duration_seconds=200,
+            status=AssetStatus.ANALYZED,
+        )
+    ]
     agent.memory.refresh_taste_profile("u", untagged)
     after = agent.memory.get_memory("u").taste_profile
     assert [g for g, _ in after.top_genres] == saved_genres

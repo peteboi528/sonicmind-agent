@@ -2,6 +2,7 @@
 
 nodes.py 仅作为门面 re-export 本模块的符号，业务逻辑收敛于此。
 """
+
 from __future__ import annotations
 
 import logging
@@ -45,8 +46,10 @@ def route_after_reflect(state: AgentState) -> str:
     """reflect 后条件路由：候选不足且仍可补量时回 execute_tools。"""
     return "refine" if state.get("_need_refine") else "finalize"
 
+
 def evaluate(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     return _ensure_evaluated_state(state)
+
 
 def _ensure_evaluated_state(state: AgentState) -> AgentState:
     if state.get("_evaluated"):
@@ -67,6 +70,7 @@ def _ensure_evaluated_state(state: AgentState) -> AgentState:
         "_evaluated": True,
     }
 
+
 async def reflect_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     state = _ensure_evaluated_state(state)
     state = _apply_turn_budget_degradation(state)
@@ -75,6 +79,7 @@ async def reflect_async(agent: AudioVisualAgent, state: AgentState) -> AgentStat
     try:
         # 从 nodes 模块读取，使外部对 nodes._prepare_empty_result_recovery_async 的 monkeypatch 生效。
         from app.graph.nodes import _prepare_empty_result_recovery_async
+
         recovery = await _prepare_empty_result_recovery_async(agent, state)
         if recovery is not None:
             return recovery
@@ -93,12 +98,17 @@ async def reflect_async(agent: AudioVisualAgent, state: AgentState) -> AgentStat
         return {
             **state,
             "trace": [*state.get("trace", []), f"[reflect_error] 自省节点失败，已跳过：{exc}"],
-            "events": [*state.get("events", []), StreamEvent(
-                type="eval", content="自省节点暂时不可用，已跳过并继续生成回答。",
-                payload={"error": str(exc)},
-            )],
+            "events": [
+                *state.get("events", []),
+                StreamEvent(
+                    type="eval",
+                    content="自省节点暂时不可用，已跳过并继续生成回答。",
+                    payload={"error": str(exc)},
+                ),
+            ],
             "_need_refine": False,
         }
+
 
 def _apply_reflection_result(
     state: AgentState,
@@ -146,7 +156,15 @@ def _apply_reflection_result(
         note += f" [prompt] candidate_reflection={CANDIDATE_REFLECTION_VERSION}"
     trace.append(note)
     events.append(StreamEvent(type="eval", content=note))
-    return {**state, "results": results, "trace": trace, "events": events, "context": context, "_need_refine": need_refine}
+    return {
+        **state,
+        "results": results,
+        "trace": trace,
+        "events": events,
+        "context": context,
+        "_need_refine": need_refine,
+    }
+
 
 async def _knowledge_reflect_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     """知识意图自省（Reflexion）：确定性核对工具结果，决定是否补量重试。
@@ -173,8 +191,10 @@ async def _knowledge_reflect_async(agent: AudioVisualAgent, state: AgentState) -
     is_parametric = bool(dossier.get("is_parametric"))
     summary = str(dossier.get("summary") or "")
     # 真正降级：partial 且非 parametric（parametric 是完整直答，不算降级），正文为机械兜底/空。
-    degraded = bool(dossier.get("partial")) and not is_parametric and (
-        not summary or "未能合成" in summary or "证据归属不一致" in summary
+    degraded = (
+        bool(dossier.get("partial"))
+        and not is_parametric
+        and (not summary or "未能合成" in summary or "证据归属不一致" in summary)
     )
 
     if degraded:
@@ -190,12 +210,7 @@ async def _knowledge_reflect_async(agent: AudioVisualAgent, state: AgentState) -
     events = [*state.get("events", []), StreamEvent(type="eval", content=verdict)]
 
     # 补量重试：仅档案真正降级 + 开关开 + 没重试过 + 有预算。重跑知识链路较重（~20-40s），故默认关。
-    if (
-        degraded
-        and settings.enable_knowledge_refine
-        and attempt < 1
-        and not _turn_budget_exceeded(state)
-    ):
+    if degraded and settings.enable_knowledge_refine and attempt < 1 and not _turn_budget_exceeded(state):
         entities = list(getattr(plan.retrieval_plan, "entities", []) or [])
         cleaned = next((e.strip() for e in entities if e and e.strip()), state["query"])
         revised = _revise_knowledge_plan_for_retry(plan, cleaned, state.get("top_k", 5))
@@ -204,23 +219,30 @@ async def _knowledge_reflect_async(agent: AudioVisualAgent, state: AgentState) -
             **state,
             "plan": revised,
             "trace": [*state.get("trace", []), note],
-            "events": [*events, StreamEvent(
-                type="refine",
-                content="知识结果不足，用清洗后的实体名重试 resolve。",
-                payload={"search_query": cleaned, "attempt": attempt + 1},
-            )],
+            "events": [
+                *events,
+                StreamEvent(
+                    type="refine",
+                    content="知识结果不足，用清洗后的实体名重试 resolve。",
+                    payload={"search_query": cleaned, "attempt": attempt + 1},
+                ),
+            ],
             "_need_refine": True,
         }
     return {**state, "trace": trace, "events": events, "_need_refine": False}
 
+
 def _revise_knowledge_plan_for_retry(plan: AgentPlan, cleaned_query: str, top_k: int) -> AgentPlan:
     """重试知识链路：把检索词换成清洗后的实体名，重建 [resolve→metadata→web_knowledge→build] stages。"""
     retrieval = plan.retrieval_plan.model_copy(update={"search_query": cleaned_query})
-    revised = plan.model_copy(update={
-        "retrieval_plan": retrieval,
-        "reasoning_summary": f"{plan.reasoning_summary}；知识自省：resolve 首轮空，用实体名「{cleaned_query}」重试。",
-    })
+    revised = plan.model_copy(
+        update={
+            "retrieval_plan": retrieval,
+            "reasoning_summary": f"{plan.reasoning_summary}；知识自省：resolve 首轮空，用实体名「{cleaned_query}」重试。",
+        }
+    )
     return _materialize_tool_stages(revised, cleaned_query, top_k)
+
 
 _RECOVERY_INTENTS = {"recommend", "search", "playlist"}
 _NO_AUTO_RECOVERY = {
@@ -230,9 +252,15 @@ _NO_AUTO_RECOVERY = {
     ToolStatus.CANCELLED.value,
 }
 _NETWORK_ERROR_KINDS = {
-    "timeout", "timeouterror", "connectionerror", "connecterror", "readerror",
-    "remoteprotocolerror", "oserror",
+    "timeout",
+    "timeouterror",
+    "connectionerror",
+    "connecterror",
+    "readerror",
+    "remoteprotocolerror",
+    "oserror",
 }
+
 
 async def _prepare_empty_result_recovery_async(
     agent: AudioVisualAgent,
@@ -265,6 +293,7 @@ async def _prepare_empty_result_recovery_async(
         return None
     return _apply_recovery_decision(state, current, decision, context)
 
+
 def _apply_recovery_decision(
     state: AgentState,
     current: list[dict[str, Any]],
@@ -287,14 +316,16 @@ def _apply_recovery_decision(
     retrieval = plan.retrieval_plan.model_copy(update={"search_query": search_query})
     network_calls = {"web_music_search", "web_info_search", "video_search"}
     online = any((get_handler(name) or name) in network_calls for name in calls)
-    revised = plan.model_copy(update={
-        "tools_needed": calls,
-        "stages": [],
-        "strategy": "online_first" if online else "library_first",
-        "online_required": online,
-        "retrieval_plan": retrieval.model_copy(update={"use_web": online}),
-        "reasoning_summary": f"{plan.reasoning_summary}；恢复策略：{decision.reason}",
-    })
+    revised = plan.model_copy(
+        update={
+            "tools_needed": calls,
+            "stages": [],
+            "strategy": "online_first" if online else "library_first",
+            "online_required": online,
+            "retrieval_plan": retrieval.model_copy(update={"use_web": online}),
+            "reasoning_summary": f"{plan.reasoning_summary}；恢复策略：{decision.reason}",
+        }
+    )
     revised = _materialize_tool_stages(revised, state["query"], state.get("top_k", 5))
     event_payload = {
         "reason": decision.reason,
@@ -309,11 +340,17 @@ def _apply_recovery_decision(
         "plan": revised,
         "context": context,
         "trace": [*state.get("trace", []), note],
-        "events": [*state.get("events", []), StreamEvent(
-            type="refine", content=decision.reason, payload=event_payload,
-        )],
+        "events": [
+            *state.get("events", []),
+            StreamEvent(
+                type="refine",
+                content=decision.reason,
+                payload=event_payload,
+            ),
+        ],
         "_need_refine": True,
     }
+
 
 def _deterministic_recovery_decision(
     state: AgentState,
@@ -326,8 +363,10 @@ def _deterministic_recovery_decision(
     recommend_outcome = by_tool.get("recommend")
     if tracks and recommend_outcome and recommend_outcome.get("status") == ToolStatus.EMPTY.value:
         return RecoveryDecision(
-            action="retry", reason="搜索候选已存在，仅重新执行推荐排序。",
-            search_query=_query_with_entities(state["query"], plan), calls=["recommend"],
+            action="retry",
+            reason="搜索候选已存在，仅重新执行推荐排序。",
+            search_query=_query_with_entities(state["query"], plan),
+            calls=["recommend"],
         )
 
     failures = [item for item in outcomes if item.get("status") == ToolStatus.ERROR.value]
@@ -345,8 +384,7 @@ def _deterministic_recovery_decision(
         )
 
     web_empty = any(
-        item.get("tool") == "web_music_search" and item.get("status") == ToolStatus.EMPTY.value
-        for item in outcomes
+        item.get("tool") == "web_music_search" and item.get("status") == ToolStatus.EMPTY.value for item in outcomes
     )
     all_empty = not tracks and any(item.get("status") == ToolStatus.EMPTY.value for item in outcomes)
     if web_empty or all_empty:
@@ -359,7 +397,8 @@ def _deterministic_recovery_decision(
             )
         attempted = {
             str((item.get("arguments") or {}).get("query") or "").strip().lower()
-            for item in state.get("tool_outcomes", []) if item.get("tool") == "web_music_search"
+            for item in state.get("tool_outcomes", [])
+            if item.get("tool") == "web_music_search"
         }
         candidates = [_positive_recovery_query(state), *plan.retrieval_plan.search_variants]
         revised_query = next(
@@ -369,14 +408,19 @@ def _deterministic_recovery_decision(
         if revised_query:
             calls = ["web_music_search", *_downstream_recovery_calls(plan.intent)]
             return RecoveryDecision(
-                action="retry", reason="首轮没有候选，使用正向检索词和未尝试变体重新搜索。",
-                search_query=revised_query, calls=calls,
+                action="retry",
+                reason="首轮没有候选，使用正向检索词和未尝试变体重新搜索。",
+                search_query=revised_query,
+                calls=calls,
             )
         return RecoveryDecision(
-            action="retry", reason="在线检索无候选，切换到可追溯的本地检索。",
-            search_query=_positive_recovery_query(state), calls=_local_recovery_calls(plan.intent),
+            action="retry",
+            reason="在线检索无候选，切换到可追溯的本地检索。",
+            search_query=_positive_recovery_query(state),
+            calls=_local_recovery_calls(plan.intent),
         )
     return None
+
 
 def _positive_recovery_query(state: AgentState) -> str:
     plan = state["plan"]
@@ -412,11 +456,14 @@ def _positive_recovery_query(state: AgentState) -> str:
             seen.add(key)
     return " ".join(values).strip()
 
+
 def _downstream_recovery_calls(intent: str) -> list[str]:
     return {"recommend": ["recommend"], "search": ["search"], "playlist": ["playlist"]}.get(intent, [])
 
+
 def _local_recovery_calls(intent: str) -> list[str]:
     return {"recommend": ["recommend"], "search": ["search"], "playlist": ["search", "playlist"]}.get(intent, [])
+
 
 def _safe_recovery_calls(calls: list[str]) -> list[str]:
     safe: list[str] = []
@@ -428,6 +475,7 @@ def _safe_recovery_calls(calls: list[str]) -> list[str]:
             safe.append(spec.name)
     return safe
 
+
 async def _llm_recovery_decision_async(
     agent: AudioVisualAgent,
     state: AgentState,
@@ -436,7 +484,8 @@ async def _llm_recovery_decision_async(
     if settings.mock_mode:
         return None
     allowed = [
-        name for name in ("web_music_search", "search", "recommend", "playlist")
+        name
+        for name in ("web_music_search", "search", "recommend", "playlist")
         if (spec := get_tool_spec(name)) is not None and spec.risk == ToolRisk.READ
     ]
     prompt = (
@@ -452,6 +501,7 @@ async def _llm_recovery_decision_async(
     try:
         # 从 nodes 模块读取，使外部对 nodes.select_llm 的 monkeypatch 生效。
         from app.graph.nodes import select_llm
+
         llm = select_llm(agent, "fast")
         payload = extract_json_dict(await llm.agenerate(prompt, system=system, temperature=0.0))
         decision = RecoveryDecision.model_validate(payload)
@@ -459,6 +509,7 @@ async def _llm_recovery_decision_async(
         return None
     decision.calls = _safe_recovery_calls(decision.calls)
     return decision if decision.action == "finalize" or decision.calls else None
+
 
 def _gather_constraints(agent: AudioVisualAgent, state: AgentState) -> list[str]:
     """收集用户约束：排除规则 + query 里的负面偏好 + plan 的正面偏好。"""
@@ -481,16 +532,19 @@ def _gather_constraints(agent: AudioVisualAgent, state: AgentState) -> list[str]
         constraints.append(f"情绪偏好：{'/'.join(plan.mood_filter)}")
     return [c for c in constraints if c]
 
+
 def _track_key(track: Any) -> str:
     title = (getattr(track, "title", "") or "").strip().lower()
-    src = (getattr(track, "source", "") or "")
-    sid = (getattr(track, "external_id", "") or getattr(track, "asset_id", "") or "")
+    src = getattr(track, "source", "") or ""
+    sid = getattr(track, "external_id", "") or getattr(track, "asset_id", "") or ""
     return f"{title}|{src}|{sid}".lower()
+
 
 def _track_label(track: Any) -> str:
     title = getattr(track, "title", "") or "?"
     artist = getattr(track, "artist", "") or ""
     return f"{title}" + (f"-{artist}" if artist else "")
+
 
 def _track_to_excluded_item(track: Any) -> dict[str, str]:
     return {
@@ -499,6 +553,7 @@ def _track_to_excluded_item(track: Any) -> dict[str, str]:
         "source": getattr(track, "source", "") or "",
         "source_id": getattr(track, "external_id", "") or getattr(track, "asset_id", "") or "",
     }
+
 
 async def _llm_reflect_tracks_async(
     agent: AudioVisualAgent,
@@ -514,6 +569,7 @@ async def _llm_reflect_tracks_async(
     prompt = CANDIDATE_REFLECTION_USER.format(catalog=catalog, constraints=cons)
     # 从 nodes 模块读取，使外部对 nodes.select_llm 的 monkeypatch 生效。
     from app.graph.nodes import select_llm
+
     llm = select_llm(agent, "strong")
     try:
         raw = await llm.agenerate(prompt, system=CANDIDATE_REFLECTION_SYSTEM, temperature=0.0)
@@ -525,6 +581,7 @@ async def _llm_reflect_tracks_async(
     except Exception:
         logger.debug("reflect async LLM 核对失败，跳过", exc_info=True)
     return [], True, capture_llm_stats(llm)
+
 
 def _drop_tracks_from_results(results: list[dict[str, Any]], drop_keys: set[str]) -> list[dict[str, Any]]:
     """从 results 的各类型结果里移除命中 drop_keys 的曲目（reflect 拒绝的）。
@@ -546,17 +603,14 @@ def _drop_tracks_from_results(results: list[dict[str, Any]], drop_keys: set[str]
         elif t == "search":
             response = r.get("response")
             if response is not None:
-                response.external = [
-                    tr for tr in response.external if _track_key(tr) not in drop_keys
-                ]
-                response.local = [
-                    tr for tr in response.local if _track_key(tr) not in drop_keys
-                ]
+                response.external = [tr for tr in response.external if _track_key(tr) not in drop_keys]
+                response.local = [tr for tr in response.local if _track_key(tr) not in drop_keys]
         elif t == "journey":
             journey = r.get("journey") or {}
             for phase in journey.get("phases", []):
                 phase["tracks"] = [
-                    tr for tr in phase.get("tracks", [])
+                    tr
+                    for tr in phase.get("tracks", [])
                     if _track_key(ExternalTrack.model_validate(tr)) not in drop_keys
                 ]
     return results

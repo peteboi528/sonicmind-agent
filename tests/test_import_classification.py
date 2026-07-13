@@ -84,9 +84,7 @@ def test_playlist_tags_map_to_genres(agent):
 
 def test_playlist_genre_fallback_when_llm_empty(agent):
     """LLM 没分出来时，用歌单 tags 映射的曲风兜底，而非瞎猜。"""
-    genre, _ = agent._ensure_track_tags(
-        "Some English Title", "Unknown", [], [], playlist_genres=["R&B"]
-    )
+    genre, _ = agent._ensure_track_tags("Some English Title", "Unknown", [], [], playlist_genres=["R&B"])
     assert genre == ["R&B"]
 
 
@@ -98,6 +96,7 @@ def test_unclassified_when_nothing_known(agent):
 
 def test_invalid_llm_genre_filtered(agent, monkeypatch):
     """LLM 返回词表外的风格（如 K-Pop）必须被过滤。"""
+
     class FakeLLM:
         def generate(self, prompt, **kw):
             return '[{"genre":"K-Pop","mood":"欢快"},{"genre":"R&B","mood":"浪漫"}]'
@@ -110,6 +109,7 @@ def test_invalid_llm_genre_filtered(agent, monkeypatch):
 
 def test_playlist_tags_used_on_import(agent, monkeypatch):
     """整单 tags 为 R&B 时，LLM 分不出的歌应落到 R&B 而非「未分类」。"""
+
     def _fetch(pid, cookie="", limit=200):
         return {
             "name": "我的 R&B 歌单",

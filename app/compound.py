@@ -10,14 +10,26 @@
 可选的 LLM 分类器作为后续加强（处理「分析曲风比例再…」这类隐性复合）；当前启发式
 零依赖、确定性，进 CI 可测。
 """
+
 from __future__ import annotations
 
 import re
 
 # 强链式词：出现即高置信度复合
 _STRONG_CHAIN = [
-    "然后", "之后", "接着", "随后", "最后", "下一步", "再然后", "并最后",
-    "and then", "after that", "then ", "finally", "next,",
+    "然后",
+    "之后",
+    "接着",
+    "随后",
+    "最后",
+    "下一步",
+    "再然后",
+    "并最后",
+    "and then",
+    "after that",
+    "then ",
+    "finally",
+    "next,",
 ]
 
 # 动作类别（同组词互为同义，只计一次）。词用 re.search 匹配，故可含 .* 等正则。
@@ -25,7 +37,10 @@ _ACTION_CATEGORIES: list[tuple[str, list[str]]] = [
     ("import", ["导入", "import "]),
     ("search", ["搜索", "搜一下", "帮我搜", "search "]),
     ("recommend", ["推荐", "recommend"]),
-    ("playlist", ["做歌单", "生成歌单", "建歌单", "整理歌单", "做个歌单", "做.*歌单", "generate playlist", "make a playlist"]),
+    (
+        "playlist",
+        ["做歌单", "生成歌单", "建歌单", "整理歌单", "做个歌单", "做.*歌单", "generate playlist", "make a playlist"],
+    ),
     ("taste", ["分析品味", "分析.*品味", "我的品味", "品味分析", "taste profile"]),
     ("journey", ["音乐旅程", "做.*旅程", "个.*旅程", "journey"]),
     ("video", ["找.*mv", "找.*现场", "找.*演唱会", "music video"]),

@@ -76,12 +76,15 @@ def test_empty_web_result_rewrites_query_and_replans_stage(tmp_path, monkeypatch
 def test_recovery_removes_multilingual_aliases_from_all_seed_sources(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "enable_empty_result_recovery", True)
     plan = AgentPlan(
-        intent="recommend", tools_needed=["web_music_search", "recommend"],
+        intent="recommend",
+        tools_needed=["web_music_search", "recommend"],
         retrieval_plan=RetrievalPlan(search_query="不要越南语", mood_filter=["放松"]),
     )
     state = _state(plan, [_outcome("web_music_search", "empty", query="不要越南语")], query="不要越南语")
     state["context"]["dialogue_state"] = {
-        "entities": ["Vietnamese"], "genre_tags": ["R&B"], "mood_tags": ["chill"],
+        "entities": ["Vietnamese"],
+        "genre_tags": ["R&B"],
+        "mood_tags": ["chill"],
     }
 
     out = asyncio.run(reflect_async(_agent(tmp_path), state))
@@ -98,9 +101,18 @@ def test_network_error_switches_to_local_without_retrying_web(tmp_path, monkeypa
         tools_needed=["web_music_search", "recommend"],
         retrieval_plan=RetrievalPlan(search_query="深夜 放松"),
     )
-    state = _state(plan, [_outcome(
-        "web_music_search", "error", query="深夜 放松", kind="timeout", message="timed out",
-    )])
+    state = _state(
+        plan,
+        [
+            _outcome(
+                "web_music_search",
+                "error",
+                query="深夜 放松",
+                kind="timeout",
+                message="timed out",
+            )
+        ],
+    )
 
     out = asyncio.run(reflect_async(_agent(tmp_path), state))
 
@@ -141,7 +153,10 @@ def test_terminal_statuses_and_second_attempt_do_not_recover(tmp_path, monkeypat
 def test_trace_summary_prefers_structured_outcomes():
     plan = AgentPlan(intent="recommend", tools_needed=["recommend"])
     summary = _trace_summary(
-        plan, [], ["[tool_status] tool=recommend status=ok candidates=9"], [],
+        plan,
+        [],
+        ["[tool_status] tool=recommend status=ok candidates=9"],
+        [],
         [_outcome("recommend", "error", kind="timeout", message="eight seconds")],
     )
 
@@ -163,6 +178,7 @@ def test_stream_emits_refine_and_executes_rewritten_stage(tmp_path, monkeypatch)
         ),
     )
     plan = nodes._materialize_tool_stages(plan, "来点深夜放松的歌曲", 1)
+
     async def fake_plan(_agent, state):
         return {
             **state,
@@ -190,9 +206,15 @@ def test_stream_emits_refine_and_executes_rewritten_stage(tmp_path, monkeypatch)
     monkeypatch.setattr(agent, "recommend_for_query", recommend)
 
     async def collect():
-        return [event async for event in AgentGraphRunner(agent).astream(
-            "u", None, "来点深夜放松的歌曲", top_k=1,
-        )]
+        return [
+            event
+            async for event in AgentGraphRunner(agent).astream(
+                "u",
+                None,
+                "来点深夜放松的歌曲",
+                top_k=1,
+            )
+        ]
 
     events = asyncio.run(collect())
 

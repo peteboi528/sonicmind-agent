@@ -33,7 +33,7 @@ def build_cooccurrence(histories: list[list[str]]) -> dict[str, dict[str, int]]:
     for history in histories:
         items = sorted(set(h for h in history if h))  # 去重 + 定序，保证确定性
         for i, a in enumerate(items):
-            for b in items[i + 1:]:
+            for b in items[i + 1 :]:
                 matrix[a][b] += 1
                 matrix[b][a] += 1
     return {k: dict(v) for k, v in matrix.items()}

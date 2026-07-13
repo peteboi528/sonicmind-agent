@@ -140,34 +140,42 @@ class DailyRecommender:
                     source="llm",
                 )
                 cat = "familiar" if i < familiar_cutoff else "discovery"
-                tracks.append(RecommendedTrack(
-                    asset=track,
-                    score=round(1.0 - i * 0.03, 4),
-                    reason=item.reason or f"{item.genre}风格推荐",
-                    category=cat,
-                ))
+                tracks.append(
+                    RecommendedTrack(
+                        asset=track,
+                        score=round(1.0 - i * 0.03, 4),
+                        reason=item.reason or f"{item.genre}风格推荐",
+                        category=cat,
+                    )
+                )
             return tracks
         except Exception:
             logger.debug("LLM recommendation generation failed; using fallback recommender", exc_info=True)
             return []
 
-    def _fallback_recommend(self, user: UserMemory, library: list[Asset], taste: TasteProfile, bucket: str, count: int) -> list[RecommendedTrack]:
+    def _fallback_recommend(
+        self, user: UserMemory, library: list[Asset], taste: TasteProfile, bucket: str, count: int
+    ) -> list[RecommendedTrack]:
         moods = TIME_MOODS.get(bucket, TIME_MOODS["afternoon"])
         seed_genres = [g for g, _ in taste.top_genres[:3]] or ["流行"]
         external = self.source.get_recommendations(seed_genres, moods[:2], limit=count)
         recent_ids = {ev.asset_id for ev in user.listening_history[-50:]}
         # Phase 1：把真实收听行为回灌成排序奖励（Spotify BaRT 思想）
         from app.memory import compute_behavior_scores
+
         asset_durations = {a.asset_id: a.duration_seconds for a in library}
         behavior_scores = compute_behavior_scores(user.listening_history, asset_durations)
         ranked = self.engine.rank_tracks(external, taste, moods, recent_ids, behavior_scores)
         tracks: list[RecommendedTrack] = []
         for track, score in ranked[:count]:
-            tracks.append(RecommendedTrack(
-                asset=track, score=round(score, 4),
-                reason=f"{track.genre[0] if track.genre else '流行'}风格推荐",
-                category="discovery",
-            ))
+            tracks.append(
+                RecommendedTrack(
+                    asset=track,
+                    score=round(score, 4),
+                    reason=f"{track.genre[0] if track.genre else '流行'}风格推荐",
+                    category="discovery",
+                )
+            )
         return tracks
 
     def _generate_summary(self, tracks: list[RecommendedTrack], bucket: str, taste: TasteProfile) -> str:
@@ -178,9 +186,7 @@ class DailyRecommender:
             genres.update(t.asset.genre if hasattr(t.asset, "genre") else [])
         genre_str = "、".join(list(genres)[:3]) or "多种风格"
         try:
-            return self.llm.generate(
-                DAILY_SUMMARY_TEMPLATE(count=len(tracks), genre_str=genre_str, bucket=bucket)
-            )
+            return self.llm.generate(DAILY_SUMMARY_TEMPLATE(count=len(tracks), genre_str=genre_str, bucket=bucket))
         except Exception:
             logger.debug("Daily summary generation failed; using template fallback", exc_info=True)
             return f"今日为你精选{len(tracks)}首{genre_str}音乐，适合{bucket}聆听。"
@@ -222,11 +228,7 @@ class DailyRecommender:
             return track.model_copy(update={"reason": reason})
 
         similar_asset = next(
-            (
-                lib
-                for lib in library
-                if set(lib.genre) & track_genres or set(lib.mood) & track_moods
-            ),
+            (lib for lib in library if set(lib.genre) & track_genres or set(lib.mood) & track_moods),
             None,
         )
         if similar_asset is not None:

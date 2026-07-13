@@ -131,8 +131,13 @@ def test_listening_external_track_reshapes_taste(tmp_path):
     user_id = "ext-listener"
 
     track = SimpleNamespace(
-        title="Nights", artist="Frank Ocean", source="netease",
-        external_id="123456", source_url="", cover_url=None, duration_seconds=300,
+        title="Nights",
+        artist="Frank Ocean",
+        source="netease",
+        external_id="123456",
+        source_url="",
+        cover_url=None,
+        duration_seconds=300,
     )
     asset = agent.library_svc.ensure_asset_from_track(track)
     assert asset is not None and asset.status == "ingested"  # 在线曲不做假分析

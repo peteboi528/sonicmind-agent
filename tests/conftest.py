@@ -11,14 +11,17 @@ from tests.offline_fakes import (
 
 def pytest_addoption(parser):
     parser.addoption(
-        "--run-network", action="store_true", default=False,
+        "--run-network",
+        action="store_true",
+        default=False,
         help="跑标了 @pytest.mark.network 的用例（真联网集成测试）",
     )
 
 
 def pytest_configure(config):
     config.addinivalue_line(
-        "markers", "network: 依赖真实网络（web_search/musicbrainz/lastfm/discogs），默认 skip",
+        "markers",
+        "network: 依赖真实网络（web_search/musicbrainz/lastfm/discogs），默认 skip",
     )
 
 
@@ -38,6 +41,7 @@ def _reset_netease_album_cache():
     """专辑详情缓存是进程级全局的，测试间共享会互相污染（A 缓存的 "18893" 让 B 拿不到
     它打桩的 urlopen）。每个测试前清空，保证隔离。"""
     from app.sources.netease import clear_album_detail_cache
+
     clear_album_detail_cache()
     yield
 

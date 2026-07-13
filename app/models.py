@@ -150,7 +150,9 @@ class UserMemory(BaseModel):
     listening_history: list[ListeningEvent] = Field(default_factory=list)
     ratings: list[RatingEntry] = Field(default_factory=list)
     dislikes: list[str] = Field(default_factory=list)
-    exclusion_rules: list[str] = Field(default_factory=list)  # 用户明确排除的风格/类型，如 ["抖音热歌", "中文孟菲斯说唱"]
+    exclusion_rules: list[str] = Field(
+        default_factory=list
+    )  # 用户明确排除的风格/类型，如 ["抖音热歌", "中文孟菲斯说唱"]
     taste_profile: TasteProfile | None = None
     # P1-G 记忆升级：情景记忆（跨会语义召回）+ 巩固画像（一句话稳定口味）。
     # exclude=True：真正落盘在独立 collection "memory_episodic"（见 MemoryManager），
@@ -245,6 +247,7 @@ class DialogueState(BaseModel):
     意图与实体，话题切换时清空。load_context 读取，plan_intent 在 LLM 未抽到实体
     的延续指令上程序化继承，finalize 写回。
     """
+
     user_id: str
     last_intent: str = "chat"
     last_query: str = ""
@@ -270,19 +273,20 @@ class RetrievalPlan(BaseModel):
     分工：LLM 只负责判意图 + 抽实体名（entities）；genre/mood/scenario 等标签
     由确定性规则（app/graph/tag_rules.py）填充，降低幻觉与成本。
     """
-    use_local: bool = False        # 检索本地库 / 候选资源库
-    use_vector: bool = False       # 启用语义向量检索（sentence-transformers / TF 降级）
-    use_web: bool = False          # 联网搜索真实平台候选
-    entities: list[str] = Field(default_factory=list)        # LLM 抽取的实体（歌手/歌名）
-    genre_filter: list[str] = Field(default_factory=list)    # 规则填充
-    mood_filter: list[str] = Field(default_factory=list)     # 规则填充
-    scenario_filter: list[str] = Field(default_factory=list) # 规则填充
+
+    use_local: bool = False  # 检索本地库 / 候选资源库
+    use_vector: bool = False  # 启用语义向量检索（sentence-transformers / TF 降级）
+    use_web: bool = False  # 联网搜索真实平台候选
+    entities: list[str] = Field(default_factory=list)  # LLM 抽取的实体（歌手/歌名）
+    genre_filter: list[str] = Field(default_factory=list)  # 规则填充
+    mood_filter: list[str] = Field(default_factory=list)  # 规则填充
+    scenario_filter: list[str] = Field(default_factory=list)  # 规则填充
     # LLM 合成的自包含正向检索词：把对话历史 + 本轮约束（含"不要中文"这类否定）
     # 改写成可直接喂搜索 API 的正向 query（否定尽量转正向，如"不要中文"→"英文 欧美"）。
     # 为空时检索层降级回 _extract_search_query 关键词切词路径（mock/无 key 不破）。
     search_query: str = ""
     search_variants: list[str] = Field(default_factory=list)
-    language_filter: str = ""      # 语言偏好 zh/en/ja/ko/...，非空时对候选做安全后过滤
+    language_filter: str = ""  # 语言偏好 zh/en/ja/ko/...，非空时对候选做安全后过滤
     excluded_terms: list[str] = Field(default_factory=list)
     """Hard content/language exclusions retained after positive query rewriting."""
 
@@ -338,6 +342,7 @@ class AgentPlan(BaseModel):
     @classmethod
     def _coerce_intent(cls, v: object) -> str:
         from app.intents import is_valid_intent
+
         s = str(v or "chat")
         return s if is_valid_intent(s) else "chat"
 
@@ -369,6 +374,7 @@ class SecondaryIntent(BaseModel):
     intent 非法时归一为空串——由 QueryPlanPayload 的校验器丢弃整个 secondary，
     绝不让一个坏 secondary 影响 primary 主意图（90% 单意图场景的回归保护）。
     """
+
     intent: str = ""
     entities: list[str] = Field(default_factory=list)
     search_query: str = ""
@@ -517,7 +523,9 @@ class ReviewOpinion(BaseModel):
     source: str = ""
     rating: str = ""
     sentiment: Literal["positive", "mixed", "negative", "unknown"] = "unknown"
-    aspects: list[Literal["production", "lyrics", "vocal", "concept", "influence", "replay_value"]] = Field(default_factory=list)
+    aspects: list[Literal["production", "lyrics", "vocal", "concept", "influence", "replay_value"]] = Field(
+        default_factory=list
+    )
     summary: str = ""
     citation_id: int | None = None
 
@@ -692,9 +700,25 @@ class TasteExperiment(BaseModel):
 
 class StreamEvent(BaseModel):
     type: Literal[
-        "plan", "thinking", "tool_start", "tool_result", "candidates",
-        "song_card", "album_card", "artist_card", "dossier", "sample_relations", "eval", "token", "final", "guard", "error",
-        "checkpoint", "confirmation_required", "resumed", "refine",
+        "plan",
+        "thinking",
+        "tool_start",
+        "tool_result",
+        "candidates",
+        "song_card",
+        "album_card",
+        "artist_card",
+        "dossier",
+        "sample_relations",
+        "eval",
+        "token",
+        "final",
+        "guard",
+        "error",
+        "checkpoint",
+        "confirmation_required",
+        "resumed",
+        "refine",
     ]
     content: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -718,8 +742,14 @@ class TasteExperimentFeedbackRequest(BaseModel):
     experiment_id: str
     track_key: str
     signal: Literal[
-        "completed", "skipped", "liked", "disliked", "saved",
-        "rated", "too_safe", "too_far",
+        "completed",
+        "skipped",
+        "liked",
+        "disliked",
+        "saved",
+        "rated",
+        "too_safe",
+        "too_far",
     ]
     score: float | None = Field(default=None, ge=0.0, le=10.0)
 
@@ -781,8 +811,13 @@ class ExternalTrack(BaseModel):
     #   long_mix     长混音/连续播放/DJ mix（过滤）
     #   unknown      无明确信号（兜底保留）
     candidate_kind: Literal[
-        "track", "official_mv", "lyrics_video", "playlist",
-        "compilation", "long_mix", "unknown",
+        "track",
+        "official_mv",
+        "lyrics_video",
+        "playlist",
+        "compilation",
+        "long_mix",
+        "unknown",
     ] = "track"
 
 
@@ -795,6 +830,7 @@ class ResultHygieneReport(BaseModel):
     用于 trace/SSE/评测快速定位：是「没搜到」(raw_count 低) 还是「搜到但被清洗掉」
     (raw_count 高、cleaned_count 低)。区分三类剔除：非歌曲实体 / 排除项 / 语言过滤。
     """
+
     requested_count: int = 0
     raw_count: int = 0
     cleaned_count: int = 0
@@ -816,6 +852,7 @@ class TrackEntity(BaseModel):
     verified=False（尤其 origin='llm_guess'）表示由 LLM 生成、未经核实，
     Answer Guard 默认不允许其出现在面向用户的文本中。
     """
+
     title: str
     artist: str = ""
     source: str = "unknown"
@@ -981,6 +1018,7 @@ class ProfileInsightFeedbackRequest(BaseModel):
     action 取值：confirm（准确）| reject / disable_for_recommendation（不准确/不用于推荐）
     | temporary（只是最近喜欢）| reset（恢复默认）。service 层做归一化校验。
     """
+
     user_id: str = "demo-user"
     action: str
 
@@ -1021,10 +1059,11 @@ class EnrichResponse(BaseModel):
 
 # ── Discover / Browse ──
 
+
 class BrowseRequest(BaseModel):
     user_id: str = "demo-user"
     category: str  # "genre" | "mood" | "scene"
-    value: str     # "摇滚" | "放松" | "深夜"
+    value: str  # "摇滚" | "放松" | "深夜"
     limit: int = Field(default=12, ge=1, le=30)
     seed: int = Field(default=0, ge=0, le=50)  # 换一批：按 seed 轮换关键词/歌单数，让同一分类能取到不同曲目
 
@@ -1080,6 +1119,7 @@ class SavedAlbum(BaseModel):
     无需重新搜索/取网易云。与 Playlist 同构存储（collection=saved_albums，
     key=f"{user_id}_{album_id}"）。只有带真实 album_id 的专辑（网易云源）可收藏，
     故回放可靠。"""
+
     album_id: str
     user_id: str = "demo-user"
     name: str

@@ -3,6 +3,7 @@
 覆盖：scheme/结构校验、SSRF/私网阻断（常开，用字面 IP 不走 DNS）、站点白名单（ALLOW_ANY_URL=false）
 后缀匹配、端点 400 集成。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -16,6 +17,7 @@ def _bypass_ssrf(monkeypatch):
 
 
 # ---- scheme / 结构 ----
+
 
 def test_valid_public_url_passes(monkeypatch):
     _bypass_ssrf(monkeypatch)
@@ -37,15 +39,18 @@ def test_too_long_url_rejected(monkeypatch):
         validate_ingest_url("https://example.com/" + "a" * 2100)
 
 
-@pytest.mark.parametrize("bad", [
-    "file:///etc/passwd",
-    "ftp://example.com/x",
-    "gopher://example.com/x",
-    "javascript:alert(1)",
-    "data:text/html,x",
-    "/etc/passwd",        # 无 scheme
-    "//example.com/x",    # 协议相对
-])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "file:///etc/passwd",
+        "ftp://example.com/x",
+        "gopher://example.com/x",
+        "javascript:alert(1)",
+        "data:text/html,x",
+        "/etc/passwd",  # 无 scheme
+        "//example.com/x",  # 协议相对
+    ],
+)
 def test_bad_scheme_rejected(monkeypatch, bad):
     _bypass_ssrf(monkeypatch)
     with pytest.raises(IngestURLError):
@@ -54,15 +59,19 @@ def test_bad_scheme_rejected(monkeypatch, bad):
 
 # ---- SSRF / 私网阻断（常开，字面 IP 不走 DNS）----
 
-@pytest.mark.parametrize("url", [
-    "http://127.0.0.1/x",
-    "http://10.0.0.1/x",
-    "http://192.168.1.1/x",
-    "http://172.16.0.1/x",
-    "http://169.254.1.1/x",
-    "http://localhost/x",
-    "http://[::1]/x",
-])
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://127.0.0.1/x",
+        "http://10.0.0.1/x",
+        "http://192.168.1.1/x",
+        "http://172.16.0.1/x",
+        "http://169.254.1.1/x",
+        "http://localhost/x",
+        "http://[::1]/x",
+    ],
+)
 def test_private_hosts_blocked(url):
     # 不 bypass SSRF——这是常开校验，ALLOW_ANY_URL=true 也挡
     with pytest.raises(IngestURLError):
@@ -76,6 +85,7 @@ def test_ssrf_blocks_even_when_any_url_true(monkeypatch):
 
 
 # ---- 白名单（ALLOW_ANY_URL=false）----
+
 
 def test_allowlist_rejects_non_allowlist_host(monkeypatch):
     _bypass_ssrf(monkeypatch)
@@ -108,6 +118,7 @@ def test_allowlist_rejects_lookalike_host(monkeypatch):
 
 
 # ---- 端点集成：SSRF URL → 400 ----
+
 
 def test_ingest_endpoint_rejects_ssrf():
     from fastapi.testclient import TestClient

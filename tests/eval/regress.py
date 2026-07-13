@@ -11,6 +11,7 @@ Usage:
     python -m tests.eval.regress --update-baseline  # 用当前结果覆写 baseline.json
     python -m tests.eval.regress --case recommend_basic
 """
+
 from __future__ import annotations
 
 import argparse
@@ -33,12 +34,30 @@ def _seed_assets():
     from app.models import Asset
 
     return [
-        Asset(asset_id="a_seed1", source_url="https://eval/1", title="夜的钢琴曲",
-              duration_seconds=240, artist="石进", genre=["古典"], mood=["治愈", "宁静"],
-              tempo_bpm=72, energy_level=0.3, status="analyzed"),
-        Asset(asset_id="a_seed2", source_url="https://eval/2", title="海阔天空",
-              duration_seconds=326, artist="Beyond", genre=["摇滚"], mood=["励志"],
-              tempo_bpm=85, energy_level=0.8, status="analyzed"),
+        Asset(
+            asset_id="a_seed1",
+            source_url="https://eval/1",
+            title="夜的钢琴曲",
+            duration_seconds=240,
+            artist="石进",
+            genre=["古典"],
+            mood=["治愈", "宁静"],
+            tempo_bpm=72,
+            energy_level=0.3,
+            status="analyzed",
+        ),
+        Asset(
+            asset_id="a_seed2",
+            source_url="https://eval/2",
+            title="海阔天空",
+            duration_seconds=326,
+            artist="Beyond",
+            genre=["摇滚"],
+            mood=["励志"],
+            tempo_bpm=85,
+            energy_level=0.8,
+            status="analyzed",
+        ),
     ]
 
 
@@ -50,9 +69,19 @@ def _setup(agent: Any, case: EvalCase) -> None:
             from app.models import Asset
 
             artists = [
-                "Drake", "Future", "Molly Santana", "A$AP Rocky", "BROCKHAMPTON",
-                "Don Toliver", "Fetty Wap", "Lil Uzi Vert", "Metro Boomin",
-                "PARTYNEXTDOOR", "Playboi Carti", "SZA", "Travis Scott",
+                "Drake",
+                "Future",
+                "Molly Santana",
+                "A$AP Rocky",
+                "BROCKHAMPTON",
+                "Don Toliver",
+                "Fetty Wap",
+                "Lil Uzi Vert",
+                "Metro Boomin",
+                "PARTYNEXTDOOR",
+                "Playboi Carti",
+                "SZA",
+                "Travis Scott",
             ]
             for idx, artist in enumerate(artists, 1):
                 asset = Asset(
@@ -100,9 +129,12 @@ def _setup(agent: Any, case: EvalCase) -> None:
     agent.library.sync_assets(agent.list_assets())
     for action in case.setup_actions:
         if action.get("type") == "listen":
-            agent.record_listen(case.user_id, action["asset_id"],
-                                duration=action.get("duration", 100),
-                                completed=action.get("completed", True))
+            agent.record_listen(
+                case.user_id,
+                action["asset_id"],
+                duration=action.get("duration", 100),
+                completed=action.get("completed", True),
+            )
         elif action.get("type") == "rate":
             agent.rate_asset(case.user_id, action["asset_id"], action["score"])
         elif action.get("type") == "chat":
@@ -171,9 +203,11 @@ def collect(case_filter: str | None = None, *, with_llm_judge: bool = False) -> 
             continue
         answer, metrics = _run_case(case, judge)
         per_case[case.case_id] = metrics
-        print(f"  [{i}/{len(cases)}] {case.case_id}: intent={metrics['intent_hit']} "
-              f"anti_halluc={metrics['anti_halluc_pass']} local={metrics['local_ratio']} mm_hit={metrics['must_mention_hit']} "
-              f"pv={metrics['prompt_signature'] or '-'} ({mode}, {len(answer.agent_trace)} steps)")
+        print(
+            f"  [{i}/{len(cases)}] {case.case_id}: intent={metrics['intent_hit']} "
+            f"anti_halluc={metrics['anti_halluc_pass']} local={metrics['local_ratio']} mm_hit={metrics['must_mention_hit']} "
+            f"pv={metrics['prompt_signature'] or '-'} ({mode}, {len(answer.agent_trace)} steps)"
+        )
     per_case["__aggregate__"] = aggregate(per_case)
     return per_case
 
@@ -203,7 +237,9 @@ def print_diff(current: dict[str, Any], baseline: dict[str, Any]) -> None:
     agg_cur = current.get("__aggregate__", {})
     agg_base = baseline.get("__aggregate__", {})
     print("\n" + "=" * 82)
-    print(f"{'case':<22} {'intent':<16} {'anti_halluc':<14} {'junk':<8} {'local':<8} {'mm_hit':<10} {'diversity':<12} {'relevance'}")
+    print(
+        f"{'case':<22} {'intent':<16} {'anti_halluc':<14} {'junk':<8} {'local':<8} {'mm_hit':<10} {'diversity':<12} {'relevance'}"
+    )
     print("-" * 82)
     for cid, m in current.items():
         if cid.startswith("__"):
@@ -224,21 +260,32 @@ def print_diff(current: dict[str, Any], baseline: dict[str, Any]) -> None:
         )
     print("-" * 82)
     print("AGGREGATE (current vs baseline):")
-    for k in ("intent_hit_rate", "anti_halluc_rate", "avg_junk_rate", "avg_local_ratio", "local_ratio_pass_rate", "avg_must_mention_hit", "avg_diversity", "avg_relevance"):
+    for k in (
+        "intent_hit_rate",
+        "anti_halluc_rate",
+        "avg_junk_rate",
+        "avg_local_ratio",
+        "local_ratio_pass_rate",
+        "avg_must_mention_hit",
+        "avg_diversity",
+        "avg_relevance",
+    ):
         print(f"  {k:<24} {_fmt(agg_cur.get(k))}{_delta(agg_cur.get(k), agg_base.get(k))}")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Eval 回归护栏")
     parser.add_argument("--case", help="只跑某个 case_id")
-    parser.add_argument("--update-baseline", action="store_true",
-                        help="用当前结果覆写 baseline.json")
-    parser.add_argument("--online", action="store_true",
-                        help="允许真实外部源/embedding（默认关闭，保证离线确定）")
-    parser.add_argument("--with-llm-judge", action="store_true",
-                        help="有 LLM key 时启用 judge 相关性评分（默认关闭）")
-    parser.add_argument("--set", action="append", default=[], metavar="KEY=VAL",
-                        help="覆盖 settings 参数做 ablation，如 --set RERANK_PROFILE_CORE_DELTA=0.08（可多次；KEY 用 env 名或属性名）")
+    parser.add_argument("--update-baseline", action="store_true", help="用当前结果覆写 baseline.json")
+    parser.add_argument("--online", action="store_true", help="允许真实外部源/embedding（默认关闭，保证离线确定）")
+    parser.add_argument("--with-llm-judge", action="store_true", help="有 LLM key 时启用 judge 相关性评分（默认关闭）")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VAL",
+        help="覆盖 settings 参数做 ablation，如 --set RERANK_PROFILE_CORE_DELTA=0.08（可多次；KEY 用 env 名或属性名）",
+    )
     args = parser.parse_args()
 
     if not args.online:

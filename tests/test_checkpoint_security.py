@@ -9,11 +9,13 @@ def test_checkpoint_sanitizer_removes_lyrics_credentials_binary_and_old_history(
     payload = {
         "plan": AgentPlan(intent="recommend", tools_needed=["recommend"]),
         "history": history,
-        "results": [{
-            "type": "lyrics",
-            "title": "Song",
-            "lines": ["secret lyric line one", "secret lyric line two"],
-        }],
+        "results": [
+            {
+                "type": "lyrics",
+                "title": "Song",
+                "lines": ["secret lyric line one", "secret lyric line two"],
+            }
+        ],
         "context": {"cookie": "MUSIC_U=secret-cookie", "api_key": "secret-key"},
         "raw_audio": b"audio-secret-bytes",
         "answer": AgentAnswer(answer="complete lyric response", evidences=[]),
@@ -36,11 +38,13 @@ def test_checkpoint_sanitizer_removes_lyrics_credentials_binary_and_old_history(
 
 def test_checkpoint_serializer_round_trip_keeps_models_without_secret_text():
     serializer = SanitizingCheckpointSerializer()
-    kind, data = serializer.dumps_typed({
-        "plan": AgentPlan(intent="recommend", tools_needed=["recommend"]),
-        "results": [{"type": "lyrics", "lines": ["do-not-persist-this-lyric"]}],
-        "authorization": "Bearer do-not-persist-this-token",
-    })
+    kind, data = serializer.dumps_typed(
+        {
+            "plan": AgentPlan(intent="recommend", tools_needed=["recommend"]),
+            "results": [{"type": "lyrics", "lines": ["do-not-persist-this-lyric"]}],
+            "authorization": "Bearer do-not-persist-this-token",
+        }
+    )
     loaded = serializer.loads_typed((kind, data))
 
     assert isinstance(loaded["plan"], AgentPlan)

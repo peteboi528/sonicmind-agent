@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from app.agent import AudioVisualAgent
     from app.graph.state import AgentState
 
+
 def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     memory = agent.memory.get_memory(state["user_id"])
     goal = agent.memory.get_active_goal(state["user_id"])
@@ -111,6 +112,7 @@ async def plan_intent_async(agent: AudioVisualAgent, state: AgentState) -> Agent
     )
     # 从 nodes 模块读取，使外部对 nodes.plan_with_llm_with_meta_async 的 monkeypatch 生效。
     from app.graph.nodes import plan_with_llm_with_meta_async
+
     timeout = None
     deadline_at = context.get("deadline_at")
     if deadline_at:
@@ -143,10 +145,14 @@ async def plan_intent_async(agent: AudioVisualAgent, state: AgentState) -> Agent
         state = {
             **state,
             "trace": [*state.get("trace", []), "[budget] 规划超时，改用确定性计划。"],
-            "events": [*state.get("events", []), StreamEvent(
-                type="eval", content="规划耗时过长，已使用快速确定性路径。",
-                payload={"planning_timed_out": True},
-            )],
+            "events": [
+                *state.get("events", []),
+                StreamEvent(
+                    type="eval",
+                    content="规划耗时过长，已使用快速确定性路径。",
+                    payload={"planning_timed_out": True},
+                ),
+            ],
         }
     return _finish_plan_intent(agent, state, plan, prompt_versions, runtime_metrics)
 
@@ -167,23 +173,27 @@ def _finish_plan_intent(
         plan = build_agent_plan(query)
     if match_intent_by_keywords(query) == "similar_artists" and plan.intent != "similar_artists":
         spec = get_intent("similar_artists")
-        plan = plan.model_copy(update={
-            "intent": "similar_artists",
-            "strategy": spec.strategy_for(False),
-            "tools_needed": spec.tools_for(False),
-            "online_required": False,
-            "reasoning_summary": spec.summary,
-        })
+        plan = plan.model_copy(
+            update={
+                "intent": "similar_artists",
+                "strategy": spec.strategy_for(False),
+                "tools_needed": spec.tools_for(False),
+                "online_required": False,
+                "reasoning_summary": spec.summary,
+            }
+        )
     keyword_intent = match_intent_by_keywords(query)
     if keyword_intent and _is_knowledge_intent(keyword_intent) and plan.intent != keyword_intent:
         spec = get_intent(keyword_intent)
-        plan = plan.model_copy(update={
-            "intent": keyword_intent,
-            "strategy": spec.strategy_for(True),
-            "tools_needed": spec.tools_for(True),
-            "online_required": True,
-            "reasoning_summary": spec.summary,
-        })
+        plan = plan.model_copy(
+            update={
+                "intent": keyword_intent,
+                "strategy": spec.strategy_for(True),
+                "tools_needed": spec.tools_for(True),
+                "online_required": True,
+                "reasoning_summary": spec.summary,
+            }
+        )
     plan, inherited = _apply_dialogue_continuation(plan, query, context.get("dialogue_state"))
     # 安全网：LLM 可能把介绍/百科类问题误判为 discuss，检查关键词自动升级
     plan = _upgrade_artist_info(plan, query)
@@ -196,9 +206,7 @@ def _finish_plan_intent(
     context = dict(state.get("context") or {})
     # primary 是知识意图，或（多意图下）某个 sub_plan 是知识意图，都要挂知识延迟预算，
     # 让 build_music_dossier / web_knowledge_search 拿到 deadline，避免跑满无界。
-    _has_knowledge = _is_knowledge_intent(plan.intent) or any(
-        _is_knowledge_intent(sp.intent) for sp in plan.sub_plans
-    )
+    _has_knowledge = _is_knowledge_intent(plan.intent) or any(_is_knowledge_intent(sp.intent) for sp in plan.sub_plans)
     if _has_knowledge:
         from app.knowledge import knowledge_deadline
 
@@ -234,15 +242,54 @@ def _finish_plan_intent(
 
 
 _GENERIC_ENTITY_WORDS = {
-    "随便", "好听", "歌曲", "音乐", "推荐", "来点", "来几首", "一些",
-    "深夜", "放松", "专注", "学习", "工作", "跑步", "睡前", "chill",
+    "随便",
+    "好听",
+    "歌曲",
+    "音乐",
+    "推荐",
+    "来点",
+    "来几首",
+    "一些",
+    "深夜",
+    "放松",
+    "专注",
+    "学习",
+    "工作",
+    "跑步",
+    "睡前",
+    "chill",
     # 延续/反重复指令词不是音乐实体（mock 或 LLM 偶把"再来"抽成 entity）。
-    "再来", "再来几首", "再来点", "再来些", "换一批", "换几首", "多来", "多来几首",
-    "继续", "更多", "还要", "还想", "再推", "再给",
+    "再来",
+    "再来几首",
+    "再来点",
+    "再来些",
+    "换一批",
+    "换几首",
+    "多来",
+    "多来几首",
+    "继续",
+    "更多",
+    "还要",
+    "还想",
+    "再推",
+    "再给",
 }
 
 
-_ENTITY_REQUEST_SIGNALS = ("来点", "来些", "推荐", "适合", "搜索", "搜一下", "找点", "歌曲", "音乐", "再来", "换一批", "多来")
+_ENTITY_REQUEST_SIGNALS = (
+    "来点",
+    "来些",
+    "推荐",
+    "适合",
+    "搜索",
+    "搜一下",
+    "找点",
+    "歌曲",
+    "音乐",
+    "再来",
+    "换一批",
+    "多来",
+)
 
 
 def _sanitize_retrieval_entities(plan: AgentPlan) -> AgentPlan:
@@ -260,9 +307,11 @@ def _sanitize_retrieval_entities(plan: AgentPlan) -> AgentPlan:
         entities.append(value)
     if entities == plan.retrieval_plan.entities:
         return plan
-    return plan.model_copy(update={
-        "retrieval_plan": plan.retrieval_plan.model_copy(update={"entities": entities}),
-    })
+    return plan.model_copy(
+        update={
+            "retrieval_plan": plan.retrieval_plan.model_copy(update={"entities": entities}),
+        }
+    )
 
 
 def _inject_preference_seeds(
@@ -316,44 +365,76 @@ def _inject_preference_seeds(
             merged.append(value)
             seen.add(key)
     revised_query = " ".join(merged).strip()
-    revised = retrieval.model_copy(update={
-        "use_vector": retrieval.use_vector or bool(seeds),
-        "search_query": revised_query,
-        "search_variants": _cap_search_variants([*retrieval.search_variants, " ".join(seeds)], revised_query),
-    })
+    revised = retrieval.model_copy(
+        update={
+            "use_vector": retrieval.use_vector or bool(seeds),
+            "search_query": revised_query,
+            "search_variants": _cap_search_variants([*retrieval.search_variants, " ".join(seeds)], revised_query),
+        }
+    )
     return plan.model_copy(update={"retrieval_plan": revised}), seeds
 
 
 def _materialize_tool_stages(plan: AgentPlan, query: str, top_k: int) -> AgentPlan:
     """Turn compatibility tool names into explicit calls and dependency stages."""
     if plan.intent == "sample_lookup":
-        resolve = ToolCall(name="resolve_music_entity", arguments=_planned_arguments("resolve_music_entity", query, plan, top_k))
-        search = ToolCall(name="sample_relation_search", arguments=_planned_arguments("sample_relation_search", query, plan, top_k))
-        locate = ToolCall(name="locate_sample_sources", arguments=_planned_arguments("locate_sample_sources", query, plan, top_k))
-        build = ToolCall(name="build_sample_dossier", arguments=_planned_arguments("build_sample_dossier", query, plan, top_k))
-        return plan.model_copy(update={
-            "tools_needed": ["resolve_music_entity", "sample_relation_search", "locate_sample_sources", "build_sample_dossier"],
-            "stages": [
-                ToolStage(calls=[resolve], parallel=False),
-                ToolStage(calls=[search], parallel=False),
-                ToolStage(calls=[locate], parallel=False),
-                ToolStage(calls=[build], parallel=False),
-            ],
-        })
+        resolve = ToolCall(
+            name="resolve_music_entity", arguments=_planned_arguments("resolve_music_entity", query, plan, top_k)
+        )
+        search = ToolCall(
+            name="sample_relation_search", arguments=_planned_arguments("sample_relation_search", query, plan, top_k)
+        )
+        locate = ToolCall(
+            name="locate_sample_sources", arguments=_planned_arguments("locate_sample_sources", query, plan, top_k)
+        )
+        build = ToolCall(
+            name="build_sample_dossier", arguments=_planned_arguments("build_sample_dossier", query, plan, top_k)
+        )
+        return plan.model_copy(
+            update={
+                "tools_needed": [
+                    "resolve_music_entity",
+                    "sample_relation_search",
+                    "locate_sample_sources",
+                    "build_sample_dossier",
+                ],
+                "stages": [
+                    ToolStage(calls=[resolve], parallel=False),
+                    ToolStage(calls=[search], parallel=False),
+                    ToolStage(calls=[locate], parallel=False),
+                    ToolStage(calls=[build], parallel=False),
+                ],
+            }
+        )
     if _is_knowledge_intent(plan.intent):
-        resolve = ToolCall(name="resolve_music_entity", arguments=_planned_arguments("resolve_music_entity", query, plan, top_k))
-        metadata = ToolCall(name="music_metadata_lookup", arguments=_planned_arguments("music_metadata_lookup", query, plan, top_k))
+        resolve = ToolCall(
+            name="resolve_music_entity", arguments=_planned_arguments("resolve_music_entity", query, plan, top_k)
+        )
+        metadata = ToolCall(
+            name="music_metadata_lookup", arguments=_planned_arguments("music_metadata_lookup", query, plan, top_k)
+        )
         # 强搜索 provider 取代 review_search 作主检索：claims+sources+citations，web 空时内部回退 review_search。
-        web_knowledge = ToolCall(name="web_knowledge_search", arguments=_planned_arguments("web_knowledge_search", query, plan, top_k))
-        build = ToolCall(name="build_music_dossier", arguments=_planned_arguments("build_music_dossier", query, plan, top_k))
-        return plan.model_copy(update={
-            "tools_needed": ["resolve_music_entity", "music_metadata_lookup", "web_knowledge_search", "build_music_dossier"],
-            "stages": [
-                ToolStage(calls=[resolve], parallel=False),
-                ToolStage(calls=[metadata, web_knowledge], parallel=True),
-                ToolStage(calls=[build], parallel=False),
-            ],
-        })
+        web_knowledge = ToolCall(
+            name="web_knowledge_search", arguments=_planned_arguments("web_knowledge_search", query, plan, top_k)
+        )
+        build = ToolCall(
+            name="build_music_dossier", arguments=_planned_arguments("build_music_dossier", query, plan, top_k)
+        )
+        return plan.model_copy(
+            update={
+                "tools_needed": [
+                    "resolve_music_entity",
+                    "music_metadata_lookup",
+                    "web_knowledge_search",
+                    "build_music_dossier",
+                ],
+                "stages": [
+                    ToolStage(calls=[resolve], parallel=False),
+                    ToolStage(calls=[metadata, web_knowledge], parallel=True),
+                    ToolStage(calls=[build], parallel=False),
+                ],
+            }
+        )
     stages: list[ToolStage] = []
     parallel_calls: list[ToolCall] = []
     previous: list[str] = []
@@ -442,24 +523,42 @@ def _planned_arguments(name: str, query: str, plan: AgentPlan, top_k: int) -> di
     if handler == "recommend_explainer":
         return {"query": query}
     if handler in {
-        "resolve_music_entity", "music_metadata_lookup", "review_search", "web_knowledge_search", "build_music_dossier",
-        "sample_relation_search", "locate_sample_sources", "build_sample_dossier",
+        "resolve_music_entity",
+        "music_metadata_lookup",
+        "review_search",
+        "web_knowledge_search",
+        "build_music_dossier",
+        "sample_relation_search",
+        "locate_sample_sources",
+        "build_sample_dossier",
     }:
         # 知识/对比工具必须保留用户原句；LLM 改写后的 search_query 可能把
         # “A 和 B 的区别”压成一个搜索串，导致实体切分失败。
         return {"query": query, "intent": plan.intent}
     if handler in {"artist_albums", "video_search", "web_info_search"}:
-        return {"query": plan.retrieval_plan.entities[0] if handler == "artist_albums" and plan.retrieval_plan.entities else entity_query}
+        return {
+            "query": plan.retrieval_plan.entities[0]
+            if handler == "artist_albums" and plan.retrieval_plan.entities
+            else entity_query
+        }
     if handler == "similar_artists":
         artist = plan.retrieval_plan.entities[0] if plan.retrieval_plan.entities else ""
         return {"artist": artist, "top_k": plan.target_count or 6}
     if handler == "import_netease_playlist":
         return {"playlist_ref": query, "limit": plan.target_count or 100}
     if handler in {
-        "feedback", "listening_history", "list_my_playlists", "find_on_platform",
-        "lyrics", "audio_features", "save_to_playlist", "favorite_track", "concert_events",
+        "feedback",
+        "listening_history",
+        "list_my_playlists",
+        "find_on_platform",
+        "lyrics",
+        "audio_features",
+        "save_to_playlist",
+        "favorite_track",
+        "concert_events",
     }:
         from app.graph.nodes import _infer_aux_arguments
+
         return _infer_aux_arguments(handler, query, plan)
     return {}
 
@@ -491,9 +590,25 @@ def _attach_semantic_recall_if_needed(agent: AudioVisualAgent, state: AgentState
 
 
 _ARTIST_INFO_SIGNALS = (
-    "介绍", "背景", "成员", "出道", "简介", "资料", "百科", "是谁", "什么团",
-    "来头", "历史", "故事", "怎么火", "怎么出", "经历", "生平",
-    "biography", "about", "history",
+    "介绍",
+    "背景",
+    "成员",
+    "出道",
+    "简介",
+    "资料",
+    "百科",
+    "是谁",
+    "什么团",
+    "来头",
+    "历史",
+    "故事",
+    "怎么火",
+    "怎么出",
+    "经历",
+    "生平",
+    "biography",
+    "about",
+    "history",
 )
 
 
@@ -504,13 +619,15 @@ def _upgrade_artist_info(plan: AgentPlan, query: str) -> AgentPlan:
     lowered = query.lower()
     if any(sig in lowered or sig in query for sig in _ARTIST_INFO_SIGNALS):
         spec = get_intent("artist_info")
-        return plan.model_copy(update={
-            "intent": "artist_info",
-            "strategy": spec.strategy_for(True),
-            "tools_needed": spec.tools_for(True),
-            "online_required": True,
-            "reasoning_summary": f"检测到百科类信号，升级为 artist_info。{plan.reasoning_summary}",
-        })
+        return plan.model_copy(
+            update={
+                "intent": "artist_info",
+                "strategy": spec.strategy_for(True),
+                "tools_needed": spec.tools_for(True),
+                "online_required": True,
+                "reasoning_summary": f"检测到百科类信号，升级为 artist_info。{plan.reasoning_summary}",
+            }
+        )
     return plan
 
 
@@ -521,8 +638,7 @@ def _tool_depends_on_prior_results(tool: str, prior_tools: list[str] | None = No
     # 推荐消费前置 web 候选并做来源平衡；若并行执行，12 秒批次超时可能静默丢掉
     # 较慢的 recommend，只剩一个空的 web_music_search 结果。
     return handler == "recommend" and any(
-        get_handler(previous) in {"web_music_search", "import_netease_playlist"}
-        for previous in (prior_tools or [])
+        get_handler(previous) in {"web_music_search", "import_netease_playlist"} for previous in (prior_tools or [])
     )
 
 
@@ -549,30 +665,29 @@ async def plan_with_llm_with_meta_async(
         if history_text.strip():
             sections.append(f"【最近对话】\n{history_text}")
         if memory_text.strip() and not settings.mock_mode:
-            sections.append(
-                "【长期音乐偏好（仅作软参考，不得覆盖本轮明确要求）】\n"
-                f"{memory_text[:500]}"
-            )
+            sections.append(f"【长期音乐偏好（仅作软参考，不得覆盖本轮明确要求）】\n{memory_text[:500]}")
         # 画像仪表盘（app/profile/）：与听歌历史互补，带场景偏好/探索风格/画像级排除，
         # 让 LLM 规划 search_query/entities 时参考「专辑品位」。同样软参考、不覆盖本轮明确要求。
         if profile_text.strip() and not settings.mock_mode:
-            sections.append(
-                "【用户画像·品味仪表盘（软参考，不得覆盖本轮明确要求）】\n"
-                f"{profile_text[:400]}"
-            )
+            sections.append(f"【用户画像·品味仪表盘（软参考，不得覆盖本轮明确要求）】\n{profile_text[:400]}")
         sections.append(f"【本轮输入】\n{query}" if sections else query)
         # 从 nodes 模块读取，使外部对 nodes.select_llm 的 monkeypatch 生效。
         from app.graph.nodes import select_llm
+
         llm = select_llm(agent, "fast")
         raw = await llm.agenerate(
-            "\n\n".join(sections), system=QUERY_PLAN_SYSTEM, temperature=0.1,
+            "\n\n".join(sections),
+            system=QUERY_PLAN_SYSTEM,
+            temperature=0.1,
         )
     except Exception as _plan_exc:
         import httpx as _httpx
+
         if isinstance(_plan_exc, _httpx.HTTPStatusError) and _plan_exc.response.status_code in (401, 403):
             logger.error(
                 "[LLM_AUTH_ERROR] LLM API key 无效或无权限（%s %s）——检查 .env 的 LLM_API_KEY",
-                _plan_exc.response.status_code, _plan_exc.response.text[:120],
+                _plan_exc.response.status_code,
+                _plan_exc.response.text[:120],
             )
         return None, {}, empty_runtime_metrics()
     payload = _parse_query_plan_payload(raw)
@@ -635,14 +750,16 @@ def _build_secondary_sub_plans(payload: QueryPlanPayload, primary_intent: str, q
         entities=entities,
         search_query=search_query,
     )
-    return [AgentPlan(
-        intent=secondary.intent,
-        strategy=spec.strategy_for(retrieval.use_web),
-        tools_needed=spec.tools_for(retrieval.use_web),
-        online_required=retrieval.use_web,
-        reasoning_summary=spec.summary,
-        retrieval_plan=retrieval,
-    )]
+    return [
+        AgentPlan(
+            intent=secondary.intent,
+            strategy=spec.strategy_for(retrieval.use_web),
+            tools_needed=spec.tools_for(retrieval.use_web),
+            online_required=retrieval.use_web,
+            reasoning_summary=spec.summary,
+            retrieval_plan=retrieval,
+        )
+    ]
 
 
 def _parse_query_plan_payload(raw: str) -> QueryPlanPayload | None:

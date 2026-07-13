@@ -19,6 +19,7 @@ DeepSeek **API 无 web-search 工具**（只有训练知识），所以 ``deepse
 - 只对时效性低、训练知识扎实的意图启用（album/artist/review_summary/compare）；
 - ``concert_events`` / ``music_fact_check`` 等时效/精确性意图**禁用**——必须真来源或诚实拒答。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -41,14 +42,19 @@ _PARAMETRIC_ALLOWED_INTENTS = {"album_deep_dive", "artist_deep_dive", "review_su
 
 # web provider（openai/tavily）允许的意图——v1 只接 tavily(=asearch_web_info)，openai 留 P2。
 _WEB_ALLOWED_INTENTS = {
-    "album_deep_dive", "artist_deep_dive", "review_summary", "music_compare",
-    "concert_events", "music_fact_check",
+    "album_deep_dive",
+    "artist_deep_dive",
+    "review_summary",
+    "music_compare",
+    "concert_events",
+    "music_fact_check",
 }
 
 
 # ---------------------------------------------------------------------------
 # 结构化结果契约
 # ---------------------------------------------------------------------------
+
 
 class Source(BaseModel):
     id: str
@@ -92,6 +98,7 @@ class WebKnowledgeResult(BaseModel):
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
+
 
 def _to_float(value: Any, default: float = 0.0) -> float:
     try:
@@ -183,6 +190,7 @@ def clear_cache() -> None:
 # Provider 实现
 # ---------------------------------------------------------------------------
 
+
 async def _deepseek_agenerate(prompt: str, system: str | None = None, temperature: float = 0.3) -> str:
     """调 DeepSeek 取文本。模块级接缝，测试 monkeypatch 它即可，不打真网络。"""
     from app.llm.client import build_llm
@@ -232,7 +240,8 @@ def _gate_parametric(query: str, intent: str) -> WebKnowledgeResult | None:
         return WebKnowledgeResult(provider="deepseek_parametric", query=query, degraded_reason="DeepSeek 先验未启用")
     if intent not in _PARAMETRIC_ALLOWED_INTENTS:
         return WebKnowledgeResult(
-            provider="deepseek_parametric", query=query,
+            provider="deepseek_parametric",
+            query=query,
             degraded_reason=f"DeepSeek 先验不适用于 {intent}（需真来源/时效性）",
         )
     return None
@@ -241,6 +250,7 @@ def _gate_parametric(query: str, intent: str) -> WebKnowledgeResult | None:
 def _parametric_prompt(*, query: str, intent: str, entities: list[str], mode: str) -> str:
     # entity 可能源自封面 OCR 等不可信文本，剔除注入话术防越权。
     from app.prompts.untrusted_boundary import strip_directive_phrases
+
     entity_label = " / ".join(e for e in entities if e) or query
     return _PARAMETRIC_PROMPT.format(
         entity=strip_directive_phrases(entity_label), intent=intent, mode=mode or "background"
@@ -256,7 +266,9 @@ def _build_parametric_result(*, query: str, text: str) -> WebKnowledgeResult:
     answer = str(parsed.get("answer") or "").strip()
     style_tags = [str(t).strip() for t in (parsed.get("style_tags") or []) if str(t).strip()][:8]
     if not answer:
-        return WebKnowledgeResult(provider="deepseek_parametric", query=query, degraded_reason="DeepSeek 未产出可用回答")
+        return WebKnowledgeResult(
+            provider="deepseek_parametric", query=query, degraded_reason="DeepSeek 未产出可用回答"
+        )
     cap = settings.deepseek_parametric_confidence_cap
     return WebKnowledgeResult(
         provider="deepseek_parametric",
@@ -285,7 +297,9 @@ async def deepseek_parametric_search(
         text = await _deepseek_agenerate(prompt, system=_PARAMETRIC_SYSTEM, temperature=0.4)
     except Exception as exc:
         logger.warning("DeepSeek 先验调用失败：%s", exc)
-        return WebKnowledgeResult(provider="deepseek_parametric", query=query, degraded_reason=f"DeepSeek 调用失败：{exc}")
+        return WebKnowledgeResult(
+            provider="deepseek_parametric", query=query, degraded_reason=f"DeepSeek 调用失败：{exc}"
+        )
     return _build_parametric_result(query=query, text=text)
 
 
@@ -306,7 +320,9 @@ def deepseek_parametric_search_sync(
         text = _deepseek_generate(prompt, system=_PARAMETRIC_SYSTEM, temperature=0.4)
     except Exception as exc:
         logger.warning("DeepSeek 先验(同步兜底)调用失败：%s", exc)
-        return WebKnowledgeResult(provider="deepseek_parametric", query=query, degraded_reason=f"DeepSeek 调用失败：{exc}")
+        return WebKnowledgeResult(
+            provider="deepseek_parametric", query=query, degraded_reason=f"DeepSeek 调用失败：{exc}"
+        )
     return _build_parametric_result(query=query, text=text)
 
 
@@ -348,7 +364,9 @@ async def tavily_web_search(
         return WebKnowledgeResult(provider="tavily", query=query, degraded_reason=f"web 检索不适用于 {intent}")
     try:
         results = await web_search_source.asearch_web_info(
-            query, max_results=settings.web_knowledge_max_sources, api_key=settings.tavily_api_key,
+            query,
+            max_results=settings.web_knowledge_max_sources,
+            api_key=settings.tavily_api_key,
         )
     except Exception as exc:
         logger.warning("web provider (tavily/ddg) 失败：%s", exc)
@@ -360,10 +378,24 @@ async def tavily_web_search(
         title = str(r.get("title") or "")
         url = str(r.get("url") or "")
         excerpt = str(r.get("content") or "")[:400]
-        sources.append(Source(id=sid, title=title, url=url, source_name=_domain(url), excerpt=excerpt, tier="B", provenance="web"))
-        citations.append({"source": _domain(url), "title": title, "url": url, "excerpt": excerpt, "kind": "review", "confidence": 0.5})
+        sources.append(
+            Source(id=sid, title=title, url=url, source_name=_domain(url), excerpt=excerpt, tier="B", provenance="web")
+        )
+        citations.append(
+            {
+                "source": _domain(url),
+                "title": title,
+                "url": url,
+                "excerpt": excerpt,
+                "kind": "review",
+                "confidence": 0.5,
+            }
+        )
     return WebKnowledgeResult(
-        provider="tavily", query=query, sources=sources, citations=citations,
+        provider="tavily",
+        query=query,
+        sources=sources,
+        citations=citations,
         confidence=(0.5 if sources else 0.0),
         degraded_reason=(None if sources else "web 检索无结果"),
     )
@@ -384,12 +416,32 @@ async def duckduckgo_search(
     for i, r in enumerate(results or []):
         sid = f"ddg_{i}"
         url = str(r.get("url") or "")
-        sources.append(Source(id=sid, title=str(r.get("title") or ""), url=url, source_name=_domain(url),
-                              excerpt=str(r.get("content") or "")[:400], tier="C", provenance="duckduckgo"))
-        citations.append({"source": _domain(url), "title": str(r.get("title") or ""), "url": url,
-                          "excerpt": str(r.get("content") or "")[:400], "kind": "review", "confidence": 0.4})
+        sources.append(
+            Source(
+                id=sid,
+                title=str(r.get("title") or ""),
+                url=url,
+                source_name=_domain(url),
+                excerpt=str(r.get("content") or "")[:400],
+                tier="C",
+                provenance="duckduckgo",
+            )
+        )
+        citations.append(
+            {
+                "source": _domain(url),
+                "title": str(r.get("title") or ""),
+                "url": url,
+                "excerpt": str(r.get("content") or "")[:400],
+                "kind": "review",
+                "confidence": 0.4,
+            }
+        )
     return WebKnowledgeResult(
-        provider="duckduckgo", query=query, sources=sources, citations=citations,
+        provider="duckduckgo",
+        query=query,
+        sources=sources,
+        citations=citations,
         confidence=min(0.45, 0.4 if sources else 0.0),
         degraded_reason=(None if sources else "DDG 无结果"),
     )
@@ -403,6 +455,7 @@ def _domain(url: str) -> str:
 # ---------------------------------------------------------------------------
 # auto 编排：按配置选 provider 链，首个 usable 胜出
 # ---------------------------------------------------------------------------
+
 
 def _provider_chain(setting: str, intent: str) -> list[tuple[str, Any]]:
     """返回 [(name, search_fn), ...]。

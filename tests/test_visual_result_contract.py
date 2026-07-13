@@ -1,4 +1,5 @@
 """可视结果契约：有曲目/专辑的工具必须贯通 SSE、final cards 与 trace。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -27,7 +28,10 @@ from app.tools.contracts import ToolCall, ToolResult, ToolStatus
 
 def _track(index: int, source: str = "netease") -> ExternalTrack:
     return ExternalTrack(
-        external_id=str(index), title=f"Track {index}", artist="Artist", source=source,
+        external_id=str(index),
+        title=f"Track {index}",
+        artist="Artist",
+        source=source,
     )
 
 
@@ -43,10 +47,23 @@ def _plan(intent: str, target: int | None = None) -> AgentPlan:
 
 def _run(fake_agent, tool: str, plan: AgentPlan):
     results, trace, events = [], [], []
-    asyncio.run(_run_tool_async(
-        fake_agent, ToolCall(name=tool), plan, "test", "u1", 5,
-        [], results, trace, events, "thread", "run", False,
-    ))
+    asyncio.run(
+        _run_tool_async(
+            fake_agent,
+            ToolCall(name=tool),
+            plan,
+            "test",
+            "u1",
+            5,
+            [],
+            results,
+            trace,
+            events,
+            "thread",
+            "run",
+            False,
+        )
+    )
     return results, trace, events
 
 
@@ -108,10 +125,12 @@ def test_shared_collector_uses_authoritative_results_before_raw_web_results():
         tracks=[RecommendedTrack(asset=reranked, score=0.9, reason="reranked")],
     )
 
-    selected = _collect_track_candidates([
-        {"type": "web_music_search", "tracks": [raw]},
-        {"type": "daily_recommend", "recommendation": recommendation},
-    ])
+    selected = _collect_track_candidates(
+        [
+            {"type": "web_music_search", "tracks": [raw]},
+            {"type": "daily_recommend", "recommendation": recommendation},
+        ]
+    )
 
     assert {track.external_id for track in selected[:2]} == {"1", "2"}
 
@@ -120,7 +139,10 @@ def test_import_emits_candidates_and_final_tracks():
     class Agent:
         def import_netease_playlist(self, *args, **kwargs):
             return {
-                "name": "Imported", "imported": 2, "skipped": 0, "total": 2,
+                "name": "Imported",
+                "imported": 2,
+                "skipped": 0,
+                "total": 2,
                 "tracks": [_track(1), _track(2)],
             }
 
@@ -139,7 +161,10 @@ def test_import_normalizes_dict_tracks_and_keeps_import_trace_alias():
     class Agent:
         def import_netease_playlist(self, *args, **kwargs):
             return {
-                "name": "Imported", "imported": 2, "skipped": 0, "total": 2,
+                "name": "Imported",
+                "imported": 2,
+                "skipped": 0,
+                "total": 2,
                 "tracks": [_track(1).model_dump(mode="json"), _track(2).model_dump(mode="json")],
             }
 
@@ -171,7 +196,8 @@ def test_album_cards_are_counted_in_trace_summary():
 
 def test_trace_summary_distinguishes_empty_execution_from_no_tool():
     plan = AgentPlan(
-        intent="recommend", strategy="online_first",
+        intent="recommend",
+        strategy="online_first",
         tools_needed=["web_music_search", "recommend"],
     )
     summary = _trace_summary(
@@ -209,7 +235,10 @@ def test_reflection_removes_search_tracks_from_response_shape():
 
 def test_finalize_fallback_preserves_previously_streamed_cards():
     card = {
-        "title": "Track 1", "artist": "Artist", "source": "netease", "source_id": "1",
+        "title": "Track 1",
+        "artist": "Artist",
+        "source": "netease",
+        "source_id": "1",
     }
     state = {
         "query": "test",
@@ -248,9 +277,13 @@ def _record(handler: str, data: dict):
         ToolCall(name=handler, arguments={}),
         {},
         ToolResult(tool=handler, status=ToolStatus.OK, data=data, summary=handler),
-        [], [], events,
+        [],
+        [],
+        events,
         checkpoint_store=_NullCheckpointStore(),
-        thread_id="t", user_id="u", query="q",
+        thread_id="t",
+        user_id="u",
+        query="q",
     )
     return events
 
@@ -261,21 +294,27 @@ def test_compare_does_not_emit_bogus_main_album_card():
     旧逻辑据此下发一张「主专辑卡」：name=The Weeknd、artist 空→前端渲染「未知歌手」错卡。
     compare 的 entity 是两个比较对象之一，不该作为专辑卡下发。
     """
-    events = _record("build_music_dossier", {
-        "type": "music_compare",
-        "dossier": {"entity": {"type": "album", "name": "The Weeknd", "artist": ""}},
-        "answer": "The Weeknd 和 drake 的区别：...",
-    })
+    events = _record(
+        "build_music_dossier",
+        {
+            "type": "music_compare",
+            "dossier": {"entity": {"type": "album", "name": "The Weeknd", "artist": ""}},
+            "answer": "The Weeknd 和 drake 的区别：...",
+        },
+    )
     assert not [e for e in events if e.type == "album_card"]
 
 
 def test_album_deep_dive_still_emits_main_album_card():
     """album_deep_dive 的主专辑卡仍正常下发——compare 的守卫不得误伤专辑解读。"""
-    events = _record("build_music_dossier", {
-        "type": "music_dossier",
-        "dossier": {"entity": {"type": "album", "name": "Blonde", "artist": "Frank Ocean"}},
-        "answer": "Blonde 解读",
-    })
+    events = _record(
+        "build_music_dossier",
+        {
+            "type": "music_dossier",
+            "dossier": {"entity": {"type": "album", "name": "Blonde", "artist": "Frank Ocean"}},
+            "answer": "Blonde 解读",
+        },
+    )
     album_cards = [e for e in events if e.type == "album_card"]
     assert len(album_cards) == 1
     assert album_cards[0].payload["album"]["name"] == "Blonde"

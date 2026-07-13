@@ -7,6 +7,7 @@
 
 凭证为空时适配器不会实例化，路由注册但不生效。
 """
+
 from __future__ import annotations
 
 import asyncio

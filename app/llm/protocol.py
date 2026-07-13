@@ -12,6 +12,7 @@ class LLMError(Exception):
 @dataclass
 class ToolCall:
     """LLM 发起的一次工具调用。"""
+
     id: str
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
@@ -20,6 +21,7 @@ class ToolCall:
 @dataclass
 class LLMResponse:
     """统一的 LLM 响应封装。"""
+
     content: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     # 可观测性字段

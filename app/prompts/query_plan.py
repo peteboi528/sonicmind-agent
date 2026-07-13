@@ -192,9 +192,4 @@ intent, entities, use_local, use_vector, use_web, search_query, search_variants,
 
 def QUERY_PLAN_REPAIR_USER(query: str, history_text: str, raw_output: str) -> str:
     history_block = f"最近对话：\n{history_text}\n\n" if history_text.strip() else ""
-    return (
-        f"{history_block}"
-        f"用户输入：{query}\n\n"
-        f"待修复原始输出：\n{raw_output}\n\n"
-        "请输出修复后的 JSON。"
-    )
+    return f"{history_block}用户输入：{query}\n\n待修复原始输出：\n{raw_output}\n\n请输出修复后的 JSON。"

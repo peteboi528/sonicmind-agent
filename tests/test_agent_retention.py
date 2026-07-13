@@ -10,8 +10,13 @@ def test_trace_cleanup_removes_expired_run_spans_and_events(tmp_path):
     store = LocalTraceStore(tmp_path / "trace.sqlite", retention_days=30)
     store.start_run("old", "thread-old", "user", "old query")
     store.span(
-        span_id="span-old", run_id="old", name="tool", kind="tool", status="ok",
-        started_at=datetime.now(UTC).isoformat(), duration_ms=1,
+        span_id="span-old",
+        run_id="old",
+        name="tool",
+        kind="tool",
+        status="ok",
+        started_at=datetime.now(UTC).isoformat(),
+        duration_ms=1,
     )
     store.event("old", "fallback")
     store.start_run("fresh", "thread-fresh", "user", "fresh query")
@@ -44,8 +49,12 @@ def test_checkpoint_cleanup_removes_expired_actions_and_thread_state(tmp_path):
     store.cleanup()
 
     with store._connect() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM pending_actions WHERE action_id='old-action'").fetchone()[0] == 0
-        assert connection.execute("SELECT COUNT(*) FROM pending_actions WHERE action_id='fresh-action'").fetchone()[0] == 1
+        assert (
+            connection.execute("SELECT COUNT(*) FROM pending_actions WHERE action_id='old-action'").fetchone()[0] == 0
+        )
+        assert (
+            connection.execute("SELECT COUNT(*) FROM pending_actions WHERE action_id='fresh-action'").fetchone()[0] == 1
+        )
         assert connection.execute("SELECT COUNT(*) FROM checkpoints WHERE thread_id='old-thread'").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM writes WHERE thread_id='old-thread'").fetchone()[0] == 0
         assert connection.execute("SELECT COUNT(*) FROM checkpoints WHERE thread_id='fresh-thread'").fetchone()[0] == 1

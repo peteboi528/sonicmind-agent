@@ -5,6 +5,7 @@
 设计要点（P1.5）：DeepSeek parametric 改为**直答**（产出 answer_summary 全文，不再 claims→再合成），
 且在 auto 链里对知识意图**提为首选**——名盘模型知识扎实，直答质量胜过稀疏网页检索。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -49,7 +50,9 @@ class TestDeepSeekParametric:
             return _ANSWER_JSON
 
         monkeypatch.setattr(wk, "_deepseek_agenerate", fake_gen)
-        r = await wk.deepseek_parametric_search(query="Blonde", intent="album_deep_dive", entities=["Blonde", "Frank Ocean"])
+        r = await wk.deepseek_parametric_search(
+            query="Blonde", intent="album_deep_dive", entities=["Blonde", "Frank Ocean"]
+        )
         assert r.provider == "deepseek_parametric"
         assert r.usable and r.answer_summary  # 直答全文
         assert "Blonde" in r.answer_summary
@@ -67,7 +70,9 @@ class TestDeepSeekParametric:
 
         monkeypatch.setattr(wk, "_deepseek_agenerate", fake_gen)
         # concert_events / music_fact_check 必须真来源，禁用先验
-        r = await wk.deepseek_parametric_search(query="The Weeknd tour", intent="concert_events", entities=["The Weeknd"])
+        r = await wk.deepseek_parametric_search(
+            query="The Weeknd tour", intent="concert_events", entities=["The Weeknd"]
+        )
         assert not r.usable
         assert called["n"] == 0  # 根本没调 LLM
         assert "不适用" in (r.degraded_reason or "")
@@ -108,7 +113,9 @@ class TestDeepSeekParametricSync:
             return _ANSWER_JSON
 
         monkeypatch.setattr(wk, "_deepseek_generate", fake_gen)
-        r = wk.deepseek_parametric_search_sync(query="Blonde", intent="album_deep_dive", entities=["Blonde", "Frank Ocean"])
+        r = wk.deepseek_parametric_search_sync(
+            query="Blonde", intent="album_deep_dive", entities=["Blonde", "Frank Ocean"]
+        )
         assert r.provider == "deepseek_parametric"
         assert r.usable and r.answer_summary
         assert "Blonde" in r.answer_summary
@@ -124,7 +131,9 @@ class TestDeepSeekParametricSync:
             return "{}"
 
         monkeypatch.setattr(wk, "_deepseek_generate", fake_gen)
-        r = wk.deepseek_parametric_search_sync(query="The Weeknd tour", intent="concert_events", entities=["The Weeknd"])
+        r = wk.deepseek_parametric_search_sync(
+            query="The Weeknd tour", intent="concert_events", entities=["The Weeknd"]
+        )
         assert not r.usable
         assert called["n"] == 0  # intent 门控挡掉，根本没调 LLM
         assert "不适用" in (r.degraded_reason or "")
@@ -157,16 +166,28 @@ class TestParametricRescue:
         def fake_sync(**k):
             calls.append(k)
             return wk.WebKnowledgeResult(
-                provider="deepseek_parametric", query=k["query"], answer_summary="直答正文……",
-                style_tags=["R&B"], confidence=0.45, degraded_reason="DeepSeek 模型先验知识，未联网核实")
+                provider="deepseek_parametric",
+                query=k["query"],
+                answer_summary="直答正文……",
+                style_tags=["R&B"],
+                confidence=0.45,
+                degraded_reason="DeepSeek 模型先验知识，未联网核实",
+            )
+
         monkeypatch.setattr(wk, "deepseek_parametric_search_sync", fake_sync)
 
     def test_disallowed_intent_skips(self, monkeypatch):
         calls: list = []
         self._spy(monkeypatch, calls)
         # concert_events/fact_check 必须真来源，不在兜底白名单 → 不兜底
-        assert wk.maybe_parametric_rescue(query="tour", intent="concert_events", entities=["The Weeknd"], remaining=40.0) is None
-        assert wk.maybe_parametric_rescue(query="核验", intent="music_fact_check", entities=["Blonde"], remaining=40.0) is None
+        assert (
+            wk.maybe_parametric_rescue(query="tour", intent="concert_events", entities=["The Weeknd"], remaining=40.0)
+            is None
+        )
+        assert (
+            wk.maybe_parametric_rescue(query="核验", intent="music_fact_check", entities=["Blonde"], remaining=40.0)
+            is None
+        )
         assert calls == []
 
     def test_compare_is_rescued(self, monkeypatch):
@@ -174,7 +195,9 @@ class TestParametricRescue:
         self._spy(monkeypatch, calls)
         # music_compare 现在消费直答正文（build_dossier compare 分支不再回落静态模板），
         # 故 web_knowledge 工具失败时也兜底一次直答，与 album/artist 一致。
-        rescued = wk.maybe_parametric_rescue(query="A 和 B", intent="music_compare", entities=["A", "B"], remaining=40.0)
+        rescued = wk.maybe_parametric_rescue(
+            query="A 和 B", intent="music_compare", entities=["A", "B"], remaining=40.0
+        )
         assert rescued is not None and rescued.answer_summary
         assert len(calls) == 1 and calls[0]["intent"] == "music_compare"
 
@@ -182,7 +205,10 @@ class TestParametricRescue:
         calls: list = []
         self._spy(monkeypatch, calls)
         # 剩余预算不足以完成一次生成 → 不启动注定被工具墙杀的调用
-        assert wk.maybe_parametric_rescue(query="Blonde", intent="album_deep_dive", entities=["Blonde"], remaining=5.0) is None
+        assert (
+            wk.maybe_parametric_rescue(query="Blonde", intent="album_deep_dive", entities=["Blonde"], remaining=5.0)
+            is None
+        )
         assert calls == []
 
     def test_no_deadline_allows_attempt(self, monkeypatch):
@@ -246,7 +272,9 @@ class TestAutoOrchestration:
 
         monkeypatch.setattr(wk.web_search_source, "asearch_web_info", fake_asearch)
         monkeypatch.setattr(wk, "_deepseek_agenerate", fake_gen)
-        r = await wk.run_web_knowledge_search(query="Blonde", intent="album_deep_dive", entities=["Blonde", "Frank Ocean"])
+        r = await wk.run_web_knowledge_search(
+            query="Blonde", intent="album_deep_dive", entities=["Blonde", "Frank Ocean"]
+        )
         assert r.provider == "deepseek_parametric" and r.usable and r.answer_summary
         assert asearch_calls["n"] == 0  # parametric 命中，web 没跑
         assert r.cached is False
@@ -320,10 +348,12 @@ class TestWebKnowledgeToolHandler:
 
         async def fake_run(*, query, intent, entities, mode):  # noqa: ARG001
             return wk.WebKnowledgeResult(
-                provider="deepseek_parametric", query=query,
+                provider="deepseek_parametric",
+                query=query,
                 answer_summary="《Blonde》是 Frank Ocean 2016 年专辑……",
                 style_tags=["R&B", "art pop"],
-                confidence=0.45, degraded_reason="DeepSeek 模型先验，未联网核实",
+                confidence=0.45,
+                degraded_reason="DeepSeek 模型先验，未联网核实",
             )
 
         monkeypatch.setattr(wk, "run_web_knowledge_search", fake_run)
@@ -349,10 +379,22 @@ class TestWebKnowledgeToolHandler:
             return wk.WebKnowledgeResult(provider="none", query=query, degraded_reason="无可用 provider")
 
         monkeypatch.setattr(wk, "run_web_knowledge_search", empty_run)
-        monkeypatch.setattr(knowledge, "search_reviews", lambda *a, **k: {
-            "citations": [{"source": "last.fm", "title": "Blonde", "url": "https://last.fm/x", "kind": "review", "confidence": 0.6}],
-            "opinions": [],
-        })
+        monkeypatch.setattr(
+            knowledge,
+            "search_reviews",
+            lambda *a, **k: {
+                "citations": [
+                    {
+                        "source": "last.fm",
+                        "title": "Blonde",
+                        "url": "https://last.fm/x",
+                        "kind": "review",
+                        "confidence": 0.6,
+                    }
+                ],
+                "opinions": [],
+            },
+        )
 
         result = await _web_knowledge_search_async(
             {"query": "Blonde", "intent": "album_deep_dive"},

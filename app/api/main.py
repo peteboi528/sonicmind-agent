@@ -93,6 +93,7 @@ async def _lifespan(_app: FastAPI):
 
         shutdown_shared_executor()
 
+
 app = FastAPI(
     title="智能影音推荐助手 API",
     description="音视频内容分析、个性化推荐、每日歌单、LLM 语义搜索。",
@@ -109,11 +110,13 @@ app.add_middleware(
 
 # 分档限流器（模块级单例，桶状态跨请求保持）。配置在 import 时读取；运行时改 settings
 # 需 monkeypatch 此单例（见 tests/test_rate_limit.py）。
-_rate_limiter = RateLimiter({
-    "chat": settings.chat_rpm,
-    "playback": settings.playback_rpm,
-    "ingest": settings.ingest_rpm,
-})
+_rate_limiter = RateLimiter(
+    {
+        "chat": settings.chat_rpm,
+        "playback": settings.playback_rpm,
+        "ingest": settings.ingest_rpm,
+    }
+)
 
 
 @app.middleware("http")
@@ -321,12 +324,15 @@ async def _localize_artist_bio(artist: str, bio: str, tags: list[str], fallback_
 
     tag_text = "、".join(tags[:5])
     from app.prompts.untrusted_boundary import UNTRUSTED_CONTENT_RULE
+
     system = (
         "你是严谨的音乐资料编辑。只基于给定资料改写，不补充额外事实。"
         "把英文资料整理成自然、完整的中文歌手介绍。" + UNTRUSTED_CONTENT_RULE
     )
+
     async def _rewrite(source: str, timeout: float) -> str:
         from app.prompts.untrusted_boundary import strip_directive_phrases, wrap_untrusted
+
         safe_source = wrap_untrusted(strip_directive_phrases(source), "歌手资料")
         prompt = (
             f"歌手：{artist}\n"
@@ -354,6 +360,7 @@ async def _localize_artist_bio(artist: str, bio: str, tags: list[str], fallback_
             return rewritten
     return _best_bio_fallback(cleaned, fallback_bio)
 
+
 # ---- 挂载 Web 前端 & Bot 路由 ----
 from app.api.web_routes import router as _web_router
 
@@ -361,12 +368,14 @@ app.include_router(_web_router)
 
 try:
     from app.api.bot_routes import router as _bot_router
+
     app.include_router(_bot_router)
 except ImportError:
     pass  # bot_routes 尚未创建时不报错
 
 try:
     from app.api.auth_routes import router as _auth_router
+
     app.include_router(_auth_router)
 except ImportError:
     pass  # auth_routes 尚未创建时不报错
@@ -398,8 +407,10 @@ def health() -> dict[str, Any]:
     details["resource_library_path"] = str(settings.resource_library_path)
     details["frontend_build_hash"] = _frontend_build_hash()
     details["auth_mode"] = (
-        "per_user_key" if settings.auth_enabled and settings.user_api_keys
-        else "shared_key" if settings.auth_enabled
+        "per_user_key"
+        if settings.auth_enabled and settings.user_api_keys
+        else "shared_key"
+        if settings.auth_enabled
         else "disabled"
     )
     details["allowed_origins"] = ",".join(settings.allowed_origins)
@@ -556,7 +567,8 @@ def get_ratings(user_id: str, request: Request):
 @app.post("/recommend/daily")
 def daily_recommend(payload: DailyRequest, request: Request):
     return agent.daily_recommend(
-        _effective_user_id(request, payload.user_id), payload.time_of_day,
+        _effective_user_id(request, payload.user_id),
+        payload.time_of_day,
         no_local=payload.no_local,
     )
 
@@ -577,7 +589,9 @@ def similar_assets(asset_id: str, top_k: int = 5):
 
 @app.post("/search")
 def search(payload: SearchRequest, request: Request):
-    return agent.search(_effective_user_id(request, payload.user_id), payload.query, payload.include_external, payload.top_k)
+    return agent.search(
+        _effective_user_id(request, payload.user_id), payload.query, payload.include_external, payload.top_k
+    )
 
 
 @app.post("/lyrics")
@@ -625,18 +639,20 @@ def list_listening_history(user_id: str, request: Request, limit: int = Query(de
                 artist = asset.artist or ""
                 cover = asset.cover_url or ""
                 available = True
-        items.append({
-            "asset_id": ev.asset_id,
-            "title": title,
-            "artist": artist,
-            "cover_url": cover,
-            "source": ev.source,
-            "source_id": ev.source_id,
-            "timestamp": ev.timestamp,
-            "duration_listened": ev.duration_listened,
-            "completed": ev.completed,
-            "available": available,
-        })
+        items.append(
+            {
+                "asset_id": ev.asset_id,
+                "title": title,
+                "artist": artist,
+                "cover_url": cover,
+                "source": ev.source,
+                "source_id": ev.source_id,
+                "timestamp": ev.timestamp,
+                "duration_listened": ev.duration_listened,
+                "completed": ev.completed,
+                "available": available,
+            }
+        )
     return {"items": items}
 
 
@@ -644,8 +660,10 @@ def list_listening_history(user_id: str, request: Request, limit: int = Query(de
 async def chat(payload: ChatRequest, request: Request):
     history = [{"role": m.role, "content": m.content} for m in payload.history]
     return await agent.chat_async(
-        _effective_user_id(request, payload.user_id), payload.message,
-        history=history or None, thread_id=payload.thread_id,
+        _effective_user_id(request, payload.user_id),
+        payload.message,
+        history=history or None,
+        thread_id=payload.thread_id,
     )
 
 
@@ -653,8 +671,10 @@ async def chat(payload: ChatRequest, request: Request):
 async def agent_run(payload: ChatRequest, request: Request):
     history = [{"role": m.role, "content": m.content} for m in payload.history]
     return await agent.chat_async(
-        _effective_user_id(request, payload.user_id), payload.message,
-        history=history or None, thread_id=payload.thread_id,
+        _effective_user_id(request, payload.user_id),
+        payload.message,
+        history=history or None,
+        thread_id=payload.thread_id,
     )
 
 
@@ -827,6 +847,7 @@ async def agent_resume(payload: AgentResumeRequest, request: Request):
 
 # ── Discover / Browse ──
 
+
 @app.post("/discover/classify", response_model=DiscoverQueryClassification)
 def discover_classify(request: DiscoverQueryRequest):
     """Classify Discover input before the frontend launches expensive detail requests."""
@@ -860,11 +881,12 @@ async def discover_search(payload: SearchRequest, request: Request):
                 ),
                 timeout=12.0,
             )
-            response.external = external[:payload.top_k]
+            response.external = external[: payload.top_k]
             response.agent_trace.append(f"discover_external_hits={len(external)}")
             response.summary = (
                 f"在线找到 {len(response.external)} 首相关曲目。"
-                if response.external else "在线来源这次没有匹配，换个说法试试。"
+                if response.external
+                else "在线来源这次没有匹配，换个说法试试。"
             )
         except TimeoutError:
             response.agent_trace.append("discover_external_timeout=12s")
@@ -877,8 +899,13 @@ async def discover_search(payload: SearchRequest, request: Request):
 
     # 本地专用请求：只读曲库，秒级返回。
     return await asyncio.to_thread(
-        agent.search, user_id, payload.query, False, payload.top_k,
+        agent.search,
+        user_id,
+        payload.query,
+        False,
+        payload.top_k,
     )
+
 
 @app.post("/discover/browse")
 def discover_browse(request: BrowseRequest):
@@ -902,8 +929,13 @@ def discover_browse(request: BrowseRequest):
         return True
 
     # 关键词轮换：seed 决定从哪组词开始，保证"换一批"能拿到不同歌单。
-    keywords = [f"{request.value}音乐", f"{request.value}歌曲", f"{request.value}经典",
-                f"{request.value}热门", f"{request.value}精选"]
+    keywords = [
+        f"{request.value}音乐",
+        f"{request.value}歌曲",
+        f"{request.value}经典",
+        f"{request.value}热门",
+        f"{request.value}精选",
+    ]
     start = request.seed % len(keywords)
     ordered_kw = keywords[start:] + keywords[:start]
     # 候选歌单数随 seed 增长（2/3/4），从更多歌单里收歌，结果更丰富。
@@ -914,12 +946,16 @@ def discover_browse(request: BrowseRequest):
         for kw in ordered_kw:
             extracted = search_and_extract(kw, max_playlists=max_playlists, tracks_per_playlist=request.limit)
             for t in extracted:
-                _dedup_add(t.title, t.artist, {
-                    "source": t.source or "netease",
-                    "source_id": t.external_id or "",
-                    "cover_url": t.cover_url,
-                    "playback_url": t.playback_url,
-                })
+                _dedup_add(
+                    t.title,
+                    t.artist,
+                    {
+                        "source": t.source or "netease",
+                        "source_id": t.external_id or "",
+                        "cover_url": t.cover_url,
+                        "playback_url": t.playback_url,
+                    },
+                )
                 if len(tracks) >= request.limit:
                     break
             if len(tracks) >= request.limit:
@@ -932,14 +968,28 @@ def discover_browse(request: BrowseRequest):
         try:
             lfm = LastfmClient(settings.lastfm_api_key)
             _GENRE_EN = {
-                "流行": "pop", "摇滚": "rock", "电子": "electronic", "说唱": "hip-hop",
-                "R&B": "r&b", "爵士": "jazz", "民谣": "folk", "古典": "classical",
-                "国风": "chinese", "金属": "metal",
+                "流行": "pop",
+                "摇滚": "rock",
+                "电子": "electronic",
+                "说唱": "hip-hop",
+                "R&B": "r&b",
+                "爵士": "jazz",
+                "民谣": "folk",
+                "古典": "classical",
+                "国风": "chinese",
+                "金属": "metal",
             }
             _MOOD_EN = {
-                "放松": "chill", "治愈": "healing", "运动": "workout", "专注": "focus",
-                "浪漫": "romantic", "伤感": "sad", "深夜": "night", "清晨": "morning",
-                "通勤": "commute", "派对": "party",
+                "放松": "chill",
+                "治愈": "healing",
+                "运动": "workout",
+                "专注": "focus",
+                "浪漫": "romantic",
+                "伤感": "sad",
+                "深夜": "night",
+                "清晨": "morning",
+                "通勤": "commute",
+                "派对": "party",
             }
             tag = (_GENRE_EN if request.category == "genre" else _MOOD_EN).get(request.value, "")
             # 未映射的 value（如新加的曲风/场景）用 value 自身做 tag 兜底，
@@ -948,15 +998,20 @@ def discover_browse(request: BrowseRequest):
                 tag = request.value.strip().lower()
             if tag:
                 for t in lfm.get_tag_top_tracks(tag, limit=request.limit):
-                    _dedup_add(t["title"], t.get("artist", ""), {
-                        "source": "lastfm", "cover_url": None,
-                    })
+                    _dedup_add(
+                        t["title"],
+                        t.get("artist", ""),
+                        {
+                            "source": "lastfm",
+                            "cover_url": None,
+                        },
+                    )
                     if len(tracks) >= request.limit:
                         break
         except Exception:
             logger.debug("Browse Last.fm tag search failed for %s", request.value, exc_info=True)
 
-    result = tracks[:request.limit]
+    result = tracks[: request.limit]
     # 两路皆空时给明确提示，前端据此显示"换一批试试"，而不是一张白板。
     if not result:
         summary = "该分类暂时没搜到结果，可能是接口限流，点「换一批」再试试。"
@@ -993,7 +1048,9 @@ def discover_trending(request: TrendingRequest):
                 if actual_name != expected_name:
                     logger.warning(
                         "Trending chart id=%s expected %r but received %r; skipping mismatched data",
-                        chart_def["id"], chart_def["expected"], detail["name"],
+                        chart_def["id"],
+                        chart_def["expected"],
+                        detail["name"],
                     )
                     return None
                 return {
@@ -1003,13 +1060,17 @@ def discover_trending(request: TrendingRequest):
                     "source": "netease",
                     "source_name": detail["name"],
                     "updated_at": detail["updated_at"],
-                    "tracks": [{
-                        "title": t.title, "artist": t.artist,
-                        "source": t.source or "netease",
-                        "source_id": t.external_id or "",
-                        "cover_url": t.cover_url,
-                        "playback_url": t.playback_url,
-                    } for t in detail["tracks"]],
+                    "tracks": [
+                        {
+                            "title": t.title,
+                            "artist": t.artist,
+                            "source": t.source or "netease",
+                            "source_id": t.external_id or "",
+                            "cover_url": t.cover_url,
+                            "playback_url": t.playback_url,
+                        }
+                        for t in detail["tracks"]
+                    ],
                 }
         except Exception:
             logger.debug("Trending chart %s failed", chart_def["name"], exc_info=True)
@@ -1027,19 +1088,27 @@ def discover_trending(request: TrendingRequest):
             lfm = LastfmClient(settings.lastfm_api_key)
             raw = lfm.get_chart_top_tracks(limit=per_chart)
             if raw:
-                charts.append({
-                    "name": "Last.fm 全球榜",
-                    "icon": "🌐",
-                    "chart_id": "lastfm-global",
-                    "source": "lastfm",
-                    "source_name": "Last.fm Global Top Tracks",
-                    "updated_at": None,
-                    "tracks": [{
-                        "title": t["title"], "artist": t.get("artist", ""),
-                        "source": "lastfm", "source_id": "",
-                        "cover_url": None, "playback_url": None,
-                    } for t in raw],
-                })
+                charts.append(
+                    {
+                        "name": "Last.fm 全球榜",
+                        "icon": "🌐",
+                        "chart_id": "lastfm-global",
+                        "source": "lastfm",
+                        "source_name": "Last.fm Global Top Tracks",
+                        "updated_at": None,
+                        "tracks": [
+                            {
+                                "title": t["title"],
+                                "artist": t.get("artist", ""),
+                                "source": "lastfm",
+                                "source_id": "",
+                                "cover_url": None,
+                                "playback_url": None,
+                            }
+                            for t in raw
+                        ],
+                    }
+                )
         except Exception:
             logger.debug("Trending Last.fm global chart failed", exc_info=True)
 
@@ -1058,13 +1127,20 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
     from app.models import ExternalTrack
 
     info = {
-        "name": request.artist, "requested_name": request.artist, "matched": False,
-        "image": "", "bio": "", "tags": [], "top_albums": [], "top_tracks": [],
+        "name": request.artist,
+        "requested_name": request.artist,
+        "matched": False,
+        "image": "",
+        "bio": "",
+        "tags": [],
+        "top_albums": [],
+        "top_tracks": [],
     }
 
     lfm = None
     if settings.lastfm_api_key:
         from app.sources.lastfm_client import LastfmClient
+
         lfm = LastfmClient(settings.lastfm_api_key)
 
     async def _artist_data():
@@ -1090,6 +1166,7 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
         # 点进去还得按名字二次猜匹配（容易猜错）。网易云优先，Last.fm 仅补位。
         try:
             from app.sources.netease import search_netease_artist_albums
+
             return await asyncio.to_thread(search_netease_artist_albums, request.artist, 12)
         except Exception:
             logger.debug("NetEase artist albums failed", exc_info=True)
@@ -1104,9 +1181,12 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
             return [
                 ExternalTrack(
                     external_id=t.external_id or "",
-                    title=t.title, artist=t.artist or "",
-                    cover_url=t.cover_url, source=t.source,
-                    playback_url=t.playback_url, candidate_kind=t.candidate_kind,
+                    title=t.title,
+                    artist=t.artist or "",
+                    cover_url=t.cover_url,
+                    source=t.source,
+                    playback_url=t.playback_url,
+                    candidate_kind=t.candidate_kind,
                 )
                 for t in raw_tracks
                 if agent.artist_name_matches(request.artist, t.artist or "")
@@ -1123,6 +1203,7 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
         # 网易云歌手头像（type=100）比 Last.fm 的 image 字段可靠得多——直接去搜一张图。
         try:
             from app.sources.netease import search_netease_artist_image
+
             return await asyncio.to_thread(search_netease_artist_image, request.artist)
         except Exception:
             logger.debug("NetEase artist image failed", exc_info=True)
@@ -1133,16 +1214,21 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
         当 Last.fm 误识或无 bio 时，用搜索引擎抓一段背景简介，避免张冠李戴或空白。"""
         queries = (
             [f"{artist} 歌手 简介 生涯 风格 代表作", f"{artist} singer rapper biography career style"]
-            if prefer_cjk else
-            [f"{artist} singer rapper 歌手 简介 背景"]
+            if prefer_cjk
+            else [f"{artist} singer rapper 歌手 简介 背景"]
         )
         items: list[dict[str, str]] = []
         try:
             from app.sources.web_search import search_web_info
+
             for query in queries:
                 items = await asyncio.wait_for(
                     asyncio.to_thread(
-                        search_web_info, query, 4, settings.tavily_api_key, 8,
+                        search_web_info,
+                        query,
+                        4,
+                        settings.tavily_api_key,
+                        8,
                     ),
                     timeout=4.0,
                 )
@@ -1151,7 +1237,7 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
         except Exception:
             return ""
         candidates: list[tuple[int, str]] = []
-        for it in (items or []):
+        for it in items or []:
             content = _clean_artist_bio_text(it.get("content", ""))
             if len(content) < 40:
                 continue
@@ -1181,8 +1267,7 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
 
     netease_artist = next((a.get("artist") for a in (netease_albums_raw or []) if a.get("artist")), "")
     lfm_mismatch = bool(
-        artist_data and netease_artist
-        and _norm_name(artist_data.get("name", "")) != _norm_name(netease_artist)
+        artist_data and netease_artist and _norm_name(artist_data.get("name", "")) != _norm_name(netease_artist)
     )
     if artist_data and not lfm_mismatch:
         info["name"] = artist_data.get("name") or request.artist
@@ -1217,7 +1302,7 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
     # 按归一化名称去重，避免两源同名专辑重复展示。
     top_albums: list[dict[str, Any]] = []
     seen_names: set[str] = set()
-    for a in (netease_albums_raw or []):
+    for a in netease_albums_raw or []:
         name = (a.get("name") or "").strip()
         if not name:
             continue
@@ -1225,14 +1310,16 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
         if key in seen_names:
             continue
         seen_names.add(key)
-        top_albums.append({
-            "id": a.get("id", ""),
-            "name": name,
-            "image": a.get("image", ""),
-            "artist": a.get("artist") or info["name"],
-            "track_count": a.get("track_count"),
-        })
-    for a in (lfm_albums or []):  # Last.fm: {name, image}，无 id，仅补位
+        top_albums.append(
+            {
+                "id": a.get("id", ""),
+                "name": name,
+                "image": a.get("image", ""),
+                "artist": a.get("artist") or info["name"],
+                "track_count": a.get("track_count"),
+            }
+        )
+    for a in lfm_albums or []:  # Last.fm: {name, image}，无 id，仅补位
         name = (a.get("name") or "").strip()
         if not name:
             continue
@@ -1240,10 +1327,15 @@ async def artist_info(request: ArtistInfoRequest) -> ArtistInfoResponse:
         if key in seen_names:
             continue
         seen_names.add(key)
-        top_albums.append({
-            "id": "", "name": name, "image": a.get("image", ""),
-            "artist": info["name"], "track_count": None,
-        })
+        top_albums.append(
+            {
+                "id": "",
+                "name": name,
+                "image": a.get("image", ""),
+                "artist": info["name"],
+                "track_count": None,
+            }
+        )
         if len(top_albums) >= 12:
             break
     info["top_albums"] = top_albums[:12]
@@ -1306,6 +1398,7 @@ async def artist_album_tracks(request: AlbumTracksRequest) -> AlbumTracksRespons
 
 # ── 收藏专辑 ──
 
+
 @app.post("/album/save")
 def save_album(payload: SaveAlbumRequest, request: Request):
     """收藏一张专辑：保存元数据 + 完整曲目，供「我的库」整张播放。"""
@@ -1313,8 +1406,12 @@ def save_album(payload: SaveAlbumRequest, request: Request):
 
     uid = _effective_user_id(request, payload.user_id)
     album = SavedAlbum(
-        album_id=payload.album_id, user_id=uid, name=payload.name,
-        artist=payload.artist, image=payload.image, track_count=payload.track_count,
+        album_id=payload.album_id,
+        user_id=uid,
+        name=payload.name,
+        artist=payload.artist,
+        image=payload.image,
+        track_count=payload.track_count,
         tags=payload.tags,
         tracks=payload.tracks,
     )
@@ -1324,7 +1421,9 @@ def save_album(payload: SaveAlbumRequest, request: Request):
 
 @app.get("/albums/saved/{user_id}")
 def list_saved_albums(user_id: str, request: Request):
-    return {"albums": [a.model_dump(mode="json") for a in agent.list_saved_albums(_effective_user_id(request, user_id))]}
+    return {
+        "albums": [a.model_dump(mode="json") for a in agent.list_saved_albums(_effective_user_id(request, user_id))]
+    }
 
 
 @app.get("/album/saved/{user_id}/{album_id}")
@@ -1344,6 +1443,7 @@ def taste_profile(user_id: str, request: Request):
 
 
 # ── 用户画像（可解释品味仪表盘）──
+
 
 @app.get("/profile/{user_id}")
 def get_profile(user_id: str, request: Request):
@@ -1465,6 +1565,7 @@ def get_memory(user_id: str, request: Request):
 
 
 # ---- 排除规则（用户偏好设置） ----
+
 
 @app.get("/exclusions/{user_id}")
 def list_exclusions(user_id: str, request: Request):

@@ -10,6 +10,7 @@
 依赖：stdlib（xml.etree, hashlib）+ httpx（已有）
 不依赖微信 SDK。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -50,9 +51,7 @@ class WeChatAdapter:
 
     # ---- BotAdapter 协议方法 ----
 
-    def parse_request(
-        self, body: bytes, headers: dict[str, str]
-    ) -> IncomingMessage | None:
+    def parse_request(self, body: bytes, headers: dict[str, str]) -> IncomingMessage | None:
         """解析微信 XML 消息。"""
         try:
             xml_str = body.decode("utf-8")
@@ -116,12 +115,14 @@ class WeChatAdapter:
         """构建微信图文消息（客服消息 API 格式）。"""
         articles = []
         for card in response.cards[:8]:  # 微信最多 8 条
-            articles.append({
-                "title": card.title,
-                "description": card.reason or card.artist,
-                "url": card.playback_url or "",
-                "picurl": card.cover_url or "",
-            })
+            articles.append(
+                {
+                    "title": card.title,
+                    "description": card.reason or card.artist,
+                    "url": card.playback_url or "",
+                    "picurl": card.cover_url or "",
+                }
+            )
 
         return {
             "touser": openid,

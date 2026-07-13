@@ -115,21 +115,18 @@ def _filter_content_exclusions(tracks: list[Any], exclusions: list[str]) -> list
     from app.recommend.rerank import detect_language
 
     canonical = {normalize_content_negation(item) for item in exclusions if item.strip()}
-    aliases = {
-        alias.lower()
-        for item in canonical
-        for alias in expand_content_negation(item)
-        if alias.strip()
-    }
+    aliases = {alias.lower() for item in canonical for alias in expand_content_negation(item) if alias.strip()}
 
     def blocked(track: Any) -> bool:
-        text = " ".join([
-            str(getattr(track, "title", "") or ""),
-            str(getattr(track, "artist", "") or ""),
-            str(getattr(track, "album", "") or ""),
-            *[str(item) for item in getattr(track, "genre", []) or []],
-            *[str(item) for item in getattr(track, "mood", []) or []],
-        ]).lower()
+        text = " ".join(
+            [
+                str(getattr(track, "title", "") or ""),
+                str(getattr(track, "artist", "") or ""),
+                str(getattr(track, "album", "") or ""),
+                *[str(item) for item in getattr(track, "genre", []) or []],
+                *[str(item) for item in getattr(track, "mood", []) or []],
+            ]
+        ).lower()
         if any(alias in text for alias in aliases):
             return True
         if "中文" in canonical and detect_language(track) == "zh":
@@ -140,7 +137,9 @@ def _filter_content_exclusions(tracks: list[Any], exclusions: list[str]) -> list
             return True
         if "韩语" in canonical and re.search(r"[\uac00-\ud7af]", text):
             return True
-        if "越南" in canonical and re.search(r"[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]", text):
+        if "越南" in canonical and re.search(
+            r"[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]", text
+        ):
             return True
         return False
 
@@ -226,11 +225,21 @@ def _result(
     tracks = tracks or []
     return ToolResult(
         tool=name,
-        status=ToolStatus.EMPTY if expects_tracks and not tracks else ToolStatus.OK if data or tracks else ToolStatus.EMPTY,
+        status=ToolStatus.EMPTY
+        if expects_tracks and not tracks
+        else ToolStatus.OK
+        if data or tracks
+        else ToolStatus.EMPTY,
         data=data,
         summary=summary,
         cards=[song_card(track) for track in tracks],
-        provenance=[{"source": getattr(track, "source", "unknown"), "source_id": getattr(track, "external_id", "") or getattr(track, "asset_id", "")} for track in tracks],
+        provenance=[
+            {
+                "source": getattr(track, "source", "unknown"),
+                "source_id": getattr(track, "external_id", "") or getattr(track, "asset_id", ""),
+            }
+            for track in tracks
+        ],
     )
 
 
@@ -277,17 +286,25 @@ def _compare_search_queries(title: str, artist: str) -> list[str]:
     if not raw_title:
         return []
     normalized_title = re.sub(r"[’`]", "'", raw_title)
+
     def _collapse_spaces(value: str) -> str:
         return re.sub(r"\s+", " ", value).strip()
-    title_variants = list(dict.fromkeys([
-        _collapse_spaces(raw_title),
-        _collapse_spaces(normalized_title),
-        _collapse_spaces(normalized_title.replace("'", "")),
-        _collapse_spaces(re.sub(r"[^\w\s]", " ", normalized_title)),
-    ]))
+
+    title_variants = list(
+        dict.fromkeys(
+            [
+                _collapse_spaces(raw_title),
+                _collapse_spaces(normalized_title),
+                _collapse_spaces(normalized_title.replace("'", "")),
+                _collapse_spaces(re.sub(r"[^\w\s]", " ", normalized_title)),
+            ]
+        )
+    )
     artist_variants = [raw_artist] if raw_artist else [""]
     if raw_artist:
-        artist_variants.extend(part.strip() for part in re.split(r"\s*(?:/|&|,|feat\.?|ft\.?)\s*", raw_artist) if part.strip())
+        artist_variants.extend(
+            part.strip() for part in re.split(r"\s*(?:/|&|,|feat\.?|ft\.?)\s*", raw_artist) if part.strip()
+        )
     artist_variants = list(dict.fromkeys(artist_variants))
     queries: list[str] = []
     for title_item in title_variants:
@@ -301,7 +318,9 @@ def _compare_search_queries(title: str, artist: str) -> list[str]:
     return list(dict.fromkeys(query.strip() for query in queries if query.strip()))
 
 
-def _resolve_compare_cards(ctx: ToolContext, groups: list[dict[str, Any]], collabs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _resolve_compare_cards(
+    ctx: ToolContext, groups: list[dict[str, Any]], collabs: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
     from app.search.verifier import verify_song
     from app.sources.mock_source import MockSource
     from app.sources.netease import search_netease_many
@@ -349,7 +368,14 @@ def _resolve_compare_cards(ctx: ToolContext, groups: list[dict[str, Any]], colla
                     return matched
         except Exception:
             pass
-        mock_hit = next((item for item in mock_source.search(f"{artist} {title}", limit=5) if _match_compare_track(item, title, artist)), None)
+        mock_hit = next(
+            (
+                item
+                for item in mock_source.search(f"{artist} {title}", limit=5)
+                if _match_compare_track(item, title, artist)
+            ),
+            None,
+        )
         return mock_hit or _guide_track(title, artist)
 
     for group in groups:
@@ -392,7 +418,9 @@ def _fallback_compare_entry_groups(entities: list[Any], tracks: list[TrackRef]) 
             if key in seen:
                 continue
             seen.add(key)
-            picked.append(TrackRef(title=title, artist=artist, source=getattr(track, "source", "guide")).model_dump(mode="json"))
+            picked.append(
+                TrackRef(title=title, artist=artist, source=getattr(track, "source", "guide")).model_dump(mode="json")
+            )
             if len(picked) >= 4:
                 break
         groups.append({"artist": getattr(entity, "name", ""), "tracks": picked})
@@ -414,26 +442,34 @@ def _compare_evidence_rows(entities: list[Any], citations: list[Any]) -> list[di
             continue
         if not supports:
             continue
-        rows.append({
-            "source": getattr(citation, "source", ""),
-            "title": label,
-            "url": getattr(citation, "url", ""),
-            "kind": getattr(citation, "kind", ""),
-            "supports": supports,
-            "why_it_matters": f"主要用来支撑 {' / '.join(supports)} 的风格定位。",
-        })
+        rows.append(
+            {
+                "source": getattr(citation, "source", ""),
+                "title": label,
+                "url": getattr(citation, "url", ""),
+                "kind": getattr(citation, "kind", ""),
+                "supports": supports,
+                "why_it_matters": f"主要用来支撑 {' / '.join(supports)} 的风格定位。",
+            }
+        )
     return rows
 
 
 def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if ctx.asset_id:
         answer = ctx.agent.recommend_with_memory(ctx.asset_id, ctx.user_id, args["query"], args.get("top_k", 5))
-        return _result("recommend", {"type": "recommend", "answer": answer}, f"生成 {len(answer.recommended_segments)} 个片段推荐。")
+        return _result(
+            "recommend",
+            {"type": "recommend", "answer": answer},
+            f"生成 {len(answer.recommended_segments)} 个片段推荐。",
+        )
     plan = ctx.plan or {}
     retrieval = plan.get("retrieval_plan") or {}
     search_query_override = args.get("search_query") or retrieval.get("search_query") or None
     recommendation = ctx.agent.recommend_for_query(
-        ctx.user_id, args["query"], top_k=args.get("top_k", 5),
+        ctx.user_id,
+        args["query"],
+        top_k=args.get("top_k", 5),
         search_query_override=search_query_override,
         seed_tracks=_collect_tracks(ctx.prior_results),
         excluded_tracks=plan.get("_excluded_tracks") or None,
@@ -443,22 +479,27 @@ def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     )
     tracks = [item.asset for item in recommendation.tracks]
     raw = len(tracks)
-    hard_exclusions = list(dict.fromkeys([
-        *(retrieval.get("excluded_terms") or []),
-        *extract_content_negations(ctx.query or args["query"]),
-    ]))
+    hard_exclusions = list(
+        dict.fromkeys(
+            [
+                *(retrieval.get("excluded_terms") or []),
+                *extract_content_negations(ctx.query or args["query"]),
+            ]
+        )
+    )
     kept = _filter_content_exclusions(tracks, hard_exclusions)
     if len(kept) != len(tracks):
         allowed = {
-            (getattr(track, "external_id", "") or getattr(track, "asset_id", ""), track.title.lower())
-            for track in kept
+            (getattr(track, "external_id", "") or getattr(track, "asset_id", ""), track.title.lower()) for track in kept
         }
         recommendation.tracks = [
-            item for item in recommendation.tracks
+            item
+            for item in recommendation.tracks
             if (
                 getattr(item.asset, "external_id", "") or getattr(item.asset, "asset_id", ""),
                 item.asset.title.lower(),
-            ) in allowed
+            )
+            in allowed
         ]
         tracks = kept
     after_excl = len(tracks)
@@ -466,46 +507,49 @@ def _recommend(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     kept = _apply_language_filter(tracks, language_filter, int(args.get("top_k") or 5))
     if len(kept) != len(tracks):
         allowed = {
-            (getattr(track, "external_id", "") or getattr(track, "asset_id", ""), track.title.lower())
-            for track in kept
+            (getattr(track, "external_id", "") or getattr(track, "asset_id", ""), track.title.lower()) for track in kept
         }
         recommendation.tracks = [
-            item for item in recommendation.tracks
+            item
+            for item in recommendation.tracks
             if (
                 getattr(item.asset, "external_id", "") or getattr(item.asset, "asset_id", ""),
                 item.asset.title.lower(),
-            ) in allowed
+            )
+            in allowed
         ]
         tracks = kept
     after_lang = len(tracks)
     # 候选质量闸门：把教程/合集/DJ串烧/节目等非歌曲实体剔出推荐结果。
     clean, gate = filter_music_tracks(tracks, ctx.query, allow_maybe=False, target_count=args.get("top_k"))
     if len(clean) != len(tracks):
-        clean_ids = {
-            (getattr(t, "external_id", "") or getattr(t, "asset_id", ""), t.title.lower())
-            for t in clean
-        }
+        clean_ids = {(getattr(t, "external_id", "") or getattr(t, "asset_id", ""), t.title.lower()) for t in clean}
         recommendation.tracks = [
-            item for item in recommendation.tracks
+            item
+            for item in recommendation.tracks
             if (
                 getattr(item.asset, "external_id", "") or getattr(item.asset, "asset_id", ""),
                 item.asset.title.lower(),
-            ) in clean_ids
+            )
+            in clean_ids
         ]
         tracks = clean
     report = ResultHygieneReport(
         requested_count=int(args.get("top_k") or 0),
-        raw_count=raw, cleaned_count=len(tracks),
+        raw_count=raw,
+        cleaned_count=len(tracks),
         removed_by_exclusion=raw - after_excl,
         removed_by_language_filter=after_excl - after_lang,
         removed_invalid_tracks=gate.rejected_count,
-        rejected_examples=gate.rejected_examples, reasons=gate.reasons,
+        rejected_examples=gate.rejected_examples,
+        reasons=gate.reasons,
     )
     return _result(
         "recommend",
         {"type": "daily_recommend", "recommendation": recommendation, "hygiene": report.model_dump()},
         f"生成 {len(tracks)} 首推荐{_hygiene_suffix(report)}。",
-        tracks, expects_tracks=True,
+        tracks,
+        expects_tracks=True,
     )
 
 
@@ -515,8 +559,11 @@ def _search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     excluded = plan.get("_excluded_tracks") or []
     rec_offset = len(excluded) if excluded else 0
     response = ctx.agent.search(
-        ctx.user_id, args["query"],
-        include_external=args.get("include_external", True), top_k=12, offset=rec_offset,
+        ctx.user_id,
+        args["query"],
+        include_external=args.get("include_external", True),
+        top_k=12,
+        offset=rec_offset,
     )
     if excluded:
         response.external = _filter_excluded(response.external, excluded)
@@ -526,38 +573,55 @@ def _search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     response.external, _ = filter_music_tracks(response.external, ctx.query, allow_maybe=False)
     response.local, _ = filter_music_tracks(response.local, ctx.query, allow_maybe=False)
     tracks = [*response.external, *response.local]
-    return _result("search", {"type": "search", "response": response}, f"本地 {len(response.local)} 首，外部 {len(response.external)} 首。", tracks, expects_tracks=True)
+    return _result(
+        "search",
+        {"type": "search", "response": response},
+        f"本地 {len(response.local)} 首，外部 {len(response.external)} 首。",
+        tracks,
+        expects_tracks=True,
+    )
 
 
 def _playlist(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     plan = ctx.plan or {}
     retrieval = plan.get("retrieval_plan") or {}
     excluded = plan.get("_excluded_tracks") or []
-    playlist = ctx.agent.generate_playlist(ctx.user_id, args["instruction"], seed_tracks=_collect_tracks(ctx.prior_results), target_count=args.get("target_count"))
+    playlist = ctx.agent.generate_playlist(
+        ctx.user_id,
+        args["instruction"],
+        seed_tracks=_collect_tracks(ctx.prior_results),
+        target_count=args.get("target_count"),
+    )
     raw = len(playlist.tracks)
     if excluded and playlist.tracks:
         playlist.tracks = _filter_excluded(playlist.tracks, excluded)
     playlist.tracks = _filter_content_exclusions(
-        list(playlist.tracks), retrieval.get("excluded_terms") or [],
+        list(playlist.tracks),
+        retrieval.get("excluded_terms") or [],
     )
     after_excl = len(playlist.tracks)
     # 候选质量闸门：歌单只由真正的歌曲组成（教程/合集/DJ串烧/节目一律挡）；过滤后真实数量=cleaned，
     # 下游文案/卡片一律以此为准（不再用 target_count 谎报）。
-    clean, gate = filter_music_tracks(list(playlist.tracks), ctx.query, allow_maybe=False, target_count=args.get("target_count"))
+    clean, gate = filter_music_tracks(
+        list(playlist.tracks), ctx.query, allow_maybe=False, target_count=args.get("target_count")
+    )
     playlist.tracks = clean
     cleaned = len(playlist.tracks)
     report = ResultHygieneReport(
         requested_count=int(args.get("target_count") or 0),
-        raw_count=raw, cleaned_count=cleaned,
+        raw_count=raw,
+        cleaned_count=cleaned,
         removed_by_exclusion=raw - after_excl,
         removed_invalid_tracks=gate.rejected_count,
-        rejected_examples=gate.rejected_examples, reasons=gate.reasons,
+        rejected_examples=gate.rejected_examples,
+        reasons=gate.reasons,
     )
     return _result(
         "playlist",
         {"type": "playlist", "playlist": playlist, "hygiene": report.model_dump()},
         f"生成 {cleaned} 首歌单{_hygiene_suffix(report)}。",
-        list(playlist.tracks), expects_tracks=True,
+        list(playlist.tracks),
+        expects_tracks=True,
     )
 
 
@@ -635,8 +699,13 @@ def _recommend_explainer(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 def _taste_experiment(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     experiment = ctx.agent.generate_taste_experiment(ctx.user_id, args["prompt"], total=args.get("total", 12))
     from app.graph.nodes import _taste_experiment_card
+
     cards = [_taste_experiment_card(item) for segment in experiment.segments for item in segment.tracks]
-    result = _result("taste_experiment", {"type": "taste_experiment", "experiment": experiment}, f"生成 {len(cards)} 首三档品味实验候选。")
+    result = _result(
+        "taste_experiment",
+        {"type": "taste_experiment", "experiment": experiment},
+        f"生成 {len(cards)} 首三档品味实验候选。",
+    )
     result.cards = cards
     result.status = ToolStatus.OK if cards else ToolStatus.EMPTY
     return result
@@ -669,14 +738,18 @@ def _resolve_music_entity(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "partial": not bool(entities),
     }
     summary = f"解析到 {len(entities)} 个音乐实体。" if entities else "未能稳定解析音乐实体。"
-    return ToolResult(tool="resolve_music_entity", status=ToolStatus.OK if entities else ToolStatus.EMPTY, data=data, summary=summary)
+    return ToolResult(
+        tool="resolve_music_entity", status=ToolStatus.OK if entities else ToolStatus.EMPTY, data=data, summary=summary
+    )
 
 
 def _music_metadata_lookup(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     from app.knowledge import lookup_metadata, resolve_music_entities
 
     plan = ctx.plan or {}
-    entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(args.get("query") or ctx.query, str(plan.get("intent") or ""), plan)
+    entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(
+        args.get("query") or ctx.query, str(plan.get("intent") or ""), plan
+    )
     payload = lookup_metadata(ctx.agent, entities, ctx.deadline_at)
     data = {
         "type": "music_metadata",
@@ -684,8 +757,14 @@ def _music_metadata_lookup(args: dict[str, Any], ctx: ToolContext) -> ToolResult
         **payload,
     }
     skipped = payload.get("skipped_due_to_deadline") or []
-    status = ToolStatus.EMPTY if skipped or not (payload.get("metadata") or payload.get("tracks") or payload.get("citations")) else ToolStatus.OK
-    summary = "资料查询因时间预算不足被跳过。" if skipped else f"获取 {len(payload.get('citations') or [])} 条资料来源。"
+    status = (
+        ToolStatus.EMPTY
+        if skipped or not (payload.get("metadata") or payload.get("tracks") or payload.get("citations"))
+        else ToolStatus.OK
+    )
+    summary = (
+        "资料查询因时间预算不足被跳过。" if skipped else f"获取 {len(payload.get('citations') or [])} 条资料来源。"
+    )
     return ToolResult(tool="music_metadata_lookup", status=status, data=data, summary=summary)
 
 
@@ -693,7 +772,9 @@ def _review_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     from app.knowledge import resolve_music_entities, search_reviews
 
     plan = ctx.plan or {}
-    entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(args.get("query") or ctx.query, str(plan.get("intent") or ""), plan)
+    entities = _knowledge_entities_from_prior(ctx) or resolve_music_entities(
+        args.get("query") or ctx.query, str(plan.get("intent") or ""), plan
+    )
     payload = search_reviews(
         entities,
         ctx.deadline_at,
@@ -707,7 +788,9 @@ def _review_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     }
     skipped = payload.get("skipped_due_to_deadline") or []
     status = ToolStatus.EMPTY if skipped or not payload.get("citations") else ToolStatus.OK
-    summary = "乐评搜索因时间预算不足被跳过。" if skipped else f"获取 {len(payload.get('citations') or [])} 条乐评来源。"
+    summary = (
+        "乐评搜索因时间预算不足被跳过。" if skipped else f"获取 {len(payload.get('citations') or [])} 条乐评来源。"
+    )
     return ToolResult(tool="review_search", status=status, data=data, summary=summary)
 
 
@@ -730,7 +813,9 @@ async def _web_knowledge_search_async(args: dict[str, Any], ctx: ToolContext) ->
         if label:
             ent_labels.append(label)
 
-    result = await run_web_knowledge_search(query=query, intent=intent, entities=ent_labels, mode=intent or "background")
+    result = await run_web_knowledge_search(
+        query=query, intent=intent, entities=ent_labels, mode=intent or "background"
+    )
 
     # provider 链全空（无 web、先验被 intent 门控挡掉）→ 回退 legacy review_search 兜底，
     # 把它的 citations 并进 result，保住下游 dossier 至少有可引用来源。
@@ -820,7 +905,9 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             entities = [MusicEntity.model_validate(item) for item in result.get("entities", []) or []]
     if intent == "music_compare":
         requested = _compare_names(query)
-        compare_entities = [entity for entity in entities[:2] if (entity.name or "").strip() and entity.name != "未知音乐实体"]
+        compare_entities = [
+            entity for entity in entities[:2] if (entity.name or "").strip() and entity.name != "未知音乐实体"
+        ]
         if len(compare_entities) < 2:
             left = requested[0] if requested else (compare_entities[0].name if compare_entities else "")
             right = requested[1] if len(requested) > 1 else ""
@@ -851,6 +938,7 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     # _enrich_review_content 就地改写 citation，受保护预算、不拖垮整条链路。
     if entities:
         from app.knowledge import _enrich_review_content, _opinions_from_citations
+
         # 合流后抓正文：就地填充已有 citation 的 excerpt，并补入构造的 last.fm/Discogs 兜底 citation。
         combined = list(metadata_citations) + list(review_citations)
         known_ids = {id(c) for c in combined}
@@ -889,8 +977,18 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
             web_knowledge_provider = "deepseek_parametric"
             web_knowledge_style_tags.extend(rescued.style_tags or [])
     dossier = build_dossier(
-        ctx.agent, query, intent, entities, metadata, metadata_citations,
-        review_citations, opinions, tracks, ctx.deadline_at, skipped, albums,
+        ctx.agent,
+        query,
+        intent,
+        entities,
+        metadata,
+        metadata_citations,
+        review_citations,
+        opinions,
+        tracks,
+        ctx.deadline_at,
+        skipped,
+        albums,
         timed_out=timed_out,
         web_knowledge_claims=web_knowledge_claims,
         web_knowledge_provider=web_knowledge_provider,
@@ -917,13 +1015,15 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 titles = list(entry_map.get(key) or [])
                 if not titles:
                     continue
-                entry_groups.append({
-                    "artist": entity.name,
-                    "tracks": [
-                        TrackRef(title=title, artist=entity.name, source="guide").model_dump(mode="json")
-                        for title in titles
-                    ],
-                })
+                entry_groups.append(
+                    {
+                        "artist": entity.name,
+                        "tracks": [
+                            TrackRef(title=title, artist=entity.name, source="guide").model_dump(mode="json")
+                            for title in titles
+                        ],
+                    }
+                )
             collab_tracks = [
                 TrackRef(title=title, artist=f"{left.name} / {right.name}", source="guide").model_dump(mode="json")
                 for title in (profiled.get("collaboration_tracks") or [])
@@ -962,20 +1062,24 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 titles = " / ".join(track.get("title", "") for track in group["tracks"][:4] if track.get("title"))
                 compare_lines.append(f"- {group['artist']}：{titles}")
             if collab_tracks:
-                compare_lines.extend([
-                    "",
-                    "5. 先听他们的合作曲：",
-                    "- " + " / ".join(track["title"] for track in collab_tracks[:5]),
-                ])
+                compare_lines.extend(
+                    [
+                        "",
+                        "5. 先听他们的合作曲：",
+                        "- " + " / ".join(track["title"] for track in collab_tracks[:5]),
+                    ]
+                )
             if evidence:
-                compare_lines.extend([
-                    "",
-                    "参考来源：",
-                    *[
-                        f"- {item['title']}：{item['url']}" if item.get("url") else f"- {item['title']}"
-                        for item in evidence[:3]
-                    ],
-                ])
+                compare_lines.extend(
+                    [
+                        "",
+                        "参考来源：",
+                        *[
+                            f"- {item['title']}：{item['url']}" if item.get("url") else f"- {item['title']}"
+                            for item in evidence[:3]
+                        ],
+                    ]
+                )
             answer_text = "\n".join(line for line in compare_lines if line is not None)
         else:
             entry_groups = _fallback_compare_entry_groups([left, right], dossier.key_tracks)
@@ -985,10 +1089,12 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 if not line or not re.match(r"^\d+\.", line):
                     continue
                 head, _, tail = line.partition("：")
-                comparison_axes.append({
-                    "axis": head.split(".", 1)[-1].strip(),
-                    "summary": tail.strip() or head.strip(),
-                })
+                comparison_axes.append(
+                    {
+                        "axis": head.split(".", 1)[-1].strip(),
+                        "summary": tail.strip() or head.strip(),
+                    }
+                )
             compare_lines = [f"{left.name} 和 {right.name} 的区别：{dossier.summary}"]
             if comparison_axes:
                 compare_lines.append("")
@@ -996,22 +1102,26 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
                     compare_lines.append(f"{idx}. {axis['axis']}：{axis['summary']}")
             compare_lines.extend(["", "4. 各自入门歌："])
             for group in entry_groups:
-                titles = " / ".join(track.get("title", "") for track in group.get("tracks", [])[:4] if track.get("title"))
+                titles = " / ".join(
+                    track.get("title", "") for track in group.get("tracks", [])[:4] if track.get("title")
+                )
                 if titles:
                     compare_lines.append(f"- {group['artist']}：{titles}")
                 else:
                     compare_lines.append(f"- {group['artist']}：这轮没有稳定拿到可核实的入门曲名，我先不硬填。")
             if evidence:
-                compare_lines.extend([
-                    "",
-                    "参考来源：",
-                    *[
-                        f"- {item['title']}（支撑：{' / '.join(item['supports'])}）：{item['url']}"
-                        if item.get("url") else
-                        f"- {item['title']}（支撑：{' / '.join(item['supports'])}）"
-                        for item in evidence[:4]
-                    ],
-                ])
+                compare_lines.extend(
+                    [
+                        "",
+                        "参考来源：",
+                        *[
+                            f"- {item['title']}（支撑：{' / '.join(item['supports'])}）：{item['url']}"
+                            if item.get("url")
+                            else f"- {item['title']}（支撑：{' / '.join(item['supports'])}）"
+                            for item in evidence[:4]
+                        ],
+                    ]
+                )
             answer_text = "\n".join(line for line in compare_lines if line is not None)
             compare_bundle = {
                 "entities": [entity.model_dump(mode="json") for entity in (left, right)],
@@ -1030,17 +1140,21 @@ def _build_music_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "answer": answer_text,
     }
     if intent == "music_compare":
-        data.update({
-            "entities": [entity.model_dump(mode="json") for entity in entities[:2]],
-            "comparison_axes": comparison_axes,
-            "evidence": (compare_bundle or {}).get("evidence") or [citation.model_dump(mode="json") for citation in dossier.citations[:6]],
-            "verdict_summary": dossier.summary,
-            "entry_tracks": (compare_bundle or {}).get("entry_tracks_by_artist") or [track.model_dump(mode="json") for track in dossier.key_tracks[:6]],
-            "collaboration_tracks": (compare_bundle or {}).get("collaboration_tracks") or [],
-            "intersection_summary": (compare_bundle or {}).get("intersection_summary") or "",
-            "artist_cards": artist_cards,
-            "cards_payload": cards,
-        })
+        data.update(
+            {
+                "entities": [entity.model_dump(mode="json") for entity in entities[:2]],
+                "comparison_axes": comparison_axes,
+                "evidence": (compare_bundle or {}).get("evidence")
+                or [citation.model_dump(mode="json") for citation in dossier.citations[:6]],
+                "verdict_summary": dossier.summary,
+                "entry_tracks": (compare_bundle or {}).get("entry_tracks_by_artist")
+                or [track.model_dump(mode="json") for track in dossier.key_tracks[:6]],
+                "collaboration_tracks": (compare_bundle or {}).get("collaboration_tracks") or [],
+                "intersection_summary": (compare_bundle or {}).get("intersection_summary") or "",
+                "artist_cards": artist_cards,
+                "cards_payload": cards,
+            }
+        )
     return ToolResult(
         tool="build_music_dossier",
         status=ToolStatus.OK,
@@ -1120,8 +1234,12 @@ def _locate_sample_sources(args: dict[str, Any], ctx: ToolContext) -> ToolResult
     data = {"type": "locate_sample_sources", "target": target.model_dump(mode="json"), **payload}
     skipped = payload.get("skipped_due_to_deadline") or []
     status = ToolStatus.EMPTY if skipped or not payload.get("relations") else ToolStatus.OK
-    summary = "源曲定位因时间预算不足被跳过。" if skipped else f"定位 {len(payload.get('source_cards') or [])} 个源曲候选。"
-    return ToolResult(tool="locate_sample_sources", status=status, data=data, summary=summary, cards=payload.get("source_cards") or [])
+    summary = (
+        "源曲定位因时间预算不足被跳过。" if skipped else f"定位 {len(payload.get('source_cards') or [])} 个源曲候选。"
+    )
+    return ToolResult(
+        tool="locate_sample_sources", status=status, data=data, summary=summary, cards=payload.get("source_cards") or []
+    )
 
 
 def _build_sample_dossier(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1165,8 +1283,11 @@ def _web_music_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     target = plan.get("target_count") or args.get("top_k", 5)
     rec_offset = len(excluded) if excluded else 0
     tracks = ctx.agent.search_web_music(
-        args["query"], top_k=max(target, args.get("top_k", 5)),
-        relevance_query=search_core, offset=rec_offset, variants=variants,
+        args["query"],
+        top_k=max(target, args.get("top_k", 5)),
+        relevance_query=search_core,
+        offset=rec_offset,
+        variants=variants,
     )
     raw = len(tracks)
     if excluded:
@@ -1178,11 +1299,14 @@ def _web_music_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     # 候选质量闸门：先剔非歌曲，再写库——脏数据(教程/合集/DJ串烧)不得沉淀进 resource library。
     tracks, gate = filter_music_tracks(tracks, ctx.query, allow_maybe=False, target_count=target)
     report = ResultHygieneReport(
-        requested_count=int(target or 0), raw_count=raw, cleaned_count=len(tracks),
+        requested_count=int(target or 0),
+        raw_count=raw,
+        cleaned_count=len(tracks),
         removed_by_exclusion=raw - after_excl,
         removed_by_language_filter=after_excl - after_lang,
         removed_invalid_tracks=gate.rejected_count,
-        rejected_examples=gate.rejected_examples, reasons=gate.reasons,
+        rejected_examples=gate.rejected_examples,
+        reasons=gate.reasons,
     )
     for track in tracks:
         ctx.agent.library.upsert_external(track)
@@ -1190,7 +1314,8 @@ def _web_music_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "web_music_search",
         {"type": "web_music_search", "tracks": tracks, "hygiene": report.model_dump()},
         f"获取 {len(tracks)} 个线上候选{_hygiene_suffix(report)}。",
-        tracks, expects_tracks=True,
+        tracks,
+        expects_tracks=True,
     )
 
 
@@ -1204,8 +1329,11 @@ async def _web_music_search_async(args: dict[str, Any], ctx: ToolContext) -> Too
     target = plan.get("target_count") or args.get("top_k", 5)
     rec_offset = len(excluded) if excluded else 0
     tracks = await ctx.agent.search_web_music_async(
-        args["query"], top_k=max(target, args.get("top_k", 5)),
-        relevance_query=search_core, offset=rec_offset, variants=variants,
+        args["query"],
+        top_k=max(target, args.get("top_k", 5)),
+        relevance_query=search_core,
+        offset=rec_offset,
+        variants=variants,
     )
     raw = len(tracks)
     if excluded:
@@ -1217,17 +1345,21 @@ async def _web_music_search_async(args: dict[str, Any], ctx: ToolContext) -> Too
     # 候选质量闸门：只返回真正的歌曲（async 路径不写库，但同样过滤）。
     tracks, gate = filter_music_tracks(tracks, ctx.query, allow_maybe=False, target_count=target)
     report = ResultHygieneReport(
-        requested_count=int(target or 0), raw_count=raw, cleaned_count=len(tracks),
+        requested_count=int(target or 0),
+        raw_count=raw,
+        cleaned_count=len(tracks),
         removed_by_exclusion=raw - after_excl,
         removed_by_language_filter=after_excl - after_lang,
         removed_invalid_tracks=gate.rejected_count,
-        rejected_examples=gate.rejected_examples, reasons=gate.reasons,
+        rejected_examples=gate.rejected_examples,
+        reasons=gate.reasons,
     )
     return _result(
         "web_music_search",
         {"type": "web_music_search", "tracks": tracks, "hygiene": report.model_dump()},
         f"获取 {len(tracks)} 个线上候选{_hygiene_suffix(report)}。",
-        tracks, expects_tracks=True,
+        tracks,
+        expects_tracks=True,
     )
 
 
@@ -1241,7 +1373,8 @@ def _artist_albums(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 async def _artist_albums_async(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     albums = await ctx.agent.recommend_artist_albums_async(ctx.user_id, args["query"], limit=12)
     result = _result(
-        "artist_albums", {"type": "artist_albums", "albums": albums},
+        "artist_albums",
+        {"type": "artist_albums", "albums": albums},
         f"获取 {len(albums)} 张专辑。",
     )
     result.status = ToolStatus.OK if albums else ToolStatus.EMPTY
@@ -1276,6 +1409,7 @@ def _similar_artists(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     seed_moods = {name for name, _ in seed_profile["moods"].most_common(4)} if seed_profile else set()
     if not seed_genres:
         from app.graph.tag_rules import extract_genre_from_artist
+
         seed_genres.update(extract_genre_from_artist(seed))
 
     plan = ctx.plan or {}
@@ -1296,20 +1430,30 @@ def _similar_artists(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
         moods = {name for name, _ in profile["moods"].most_common(3)}
         genre_overlap = seed_genres & genres
         mood_overlap = seed_moods & moods
-        genre_score = sum(seed_profile["genres"].get(name, 1) for name in genre_overlap) if seed_profile else len(genre_overlap)
-        mood_score = sum(seed_profile["moods"].get(name, 1) for name in mood_overlap) if seed_profile else len(mood_overlap)
+        genre_score = (
+            sum(seed_profile["genres"].get(name, 1) for name in genre_overlap) if seed_profile else len(genre_overlap)
+        )
+        mood_score = (
+            sum(seed_profile["moods"].get(name, 1) for name in mood_overlap) if seed_profile else len(mood_overlap)
+        )
         score = genre_score * 3.0 + mood_score * 1.2
         if score <= 0:
             continue
-        ranked.append((score, artist, {
-            "name": artist,
-            "genres": [name for name, _ in profile["genres"].most_common(3)],
-            "moods": [name for name, _ in profile["moods"].most_common(3)],
-            "representative_tracks": [title for title in profile["tracks"] if title],
-            "reason": "、".join([*sorted(genre_overlap), *sorted(mood_overlap)]) or "曲库标签相近",
-            "source": "local_library",
-            "seed_artist": seed_name,
-        }))
+        ranked.append(
+            (
+                score,
+                artist,
+                {
+                    "name": artist,
+                    "genres": [name for name, _ in profile["genres"].most_common(3)],
+                    "moods": [name for name, _ in profile["moods"].most_common(3)],
+                    "representative_tracks": [title for title in profile["tracks"] if title],
+                    "reason": "、".join([*sorted(genre_overlap), *sorted(mood_overlap)]) or "曲库标签相近",
+                    "source": "local_library",
+                    "seed_artist": seed_name,
+                },
+            )
+        )
     ranked.sort(key=lambda item: (-item[0], item[1].lower()))
     artists = [item[2] for item in ranked[:top_k]]
     return ToolResult(
@@ -1322,7 +1466,9 @@ def _similar_artists(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
 
 def _import_netease_playlist(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    imported = ctx.agent.import_netease_playlist(args["playlist_ref"], user_id=ctx.user_id, limit=args.get("limit", 100))
+    imported = ctx.agent.import_netease_playlist(
+        args["playlist_ref"], user_id=ctx.user_id, limit=args.get("limit", 100)
+    )
     tracks = _normalize_track_items(imported.get("tracks", []))
     normalized_import = {**imported, "tracks": tracks}
     return _result(
@@ -1336,14 +1482,25 @@ def _import_netease_playlist(args: dict[str, Any], ctx: ToolContext) -> ToolResu
 
 def _journey(_args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     from app.models import ExternalTrack
+
     target_count = (ctx.plan or {}).get("target_count") if isinstance(ctx.plan, dict) else None
     if target_count:
         journey = ctx.agent.generate_music_journey(ctx.user_id, ctx.query, target_count=target_count)
     else:
         journey = ctx.agent.generate_music_journey(ctx.user_id, ctx.query)
-    tracks = [ExternalTrack.model_validate(track) for phase in journey.get("phases", []) for track in phase.get("tracks", [])]
-    result = _result("journey", {"type": "journey", "journey": journey}, f"生成 {len(journey.get('phases', []))} 个阶段、{len(tracks)} 首曲目。", tracks, expects_tracks=True)
-    phase_reasons = [(phase["name"], phase["goal"]) for phase in journey.get("phases", []) for _ in phase.get("tracks", [])]
+    tracks = [
+        ExternalTrack.model_validate(track) for phase in journey.get("phases", []) for track in phase.get("tracks", [])
+    ]
+    result = _result(
+        "journey",
+        {"type": "journey", "journey": journey},
+        f"生成 {len(journey.get('phases', []))} 个阶段、{len(tracks)} 首曲目。",
+        tracks,
+        expects_tracks=True,
+    )
+    phase_reasons = [
+        (phase["name"], phase["goal"]) for phase in journey.get("phases", []) for _ in phase.get("tracks", [])
+    ]
     for card, (phase, goal) in zip(result.cards, phase_reasons, strict=False):
         card["reason"] = f"{phase}：{goal}"
         card["journey_phase"] = phase
@@ -1354,39 +1511,62 @@ def _video_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     tracks = ctx.agent.search_videos(args["query"], top_k=5)
     for track in tracks:
         ctx.agent.library.upsert_external(track)
-    return _result("video_search", {"type": "video_search", "tracks": tracks}, f"获取 {len(tracks)} 个视频结果。", tracks, expects_tracks=True)
+    return _result(
+        "video_search",
+        {"type": "video_search", "tracks": tracks},
+        f"获取 {len(tracks)} 个视频结果。",
+        tracks,
+        expects_tracks=True,
+    )
 
 
 def _web_info_search(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     items = ctx.agent.search_artist_info(args["query"])
-    return _result("web_info_search", {"type": "web_info_search", "search_results": items}, f"获取 {len(items)} 条可追溯资料。")
+    return _result(
+        "web_info_search", {"type": "web_info_search", "search_results": items}, f"获取 {len(items)} 条可追溯资料。"
+    )
 
 
 async def _video_search_async(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     tracks = await ctx.agent.search_videos_async(args["query"], top_k=5)
     return _result(
-        "video_search", {"type": "video_search", "tracks": tracks},
-        f"获取 {len(tracks)} 个视频结果。", tracks, expects_tracks=True,
+        "video_search",
+        {"type": "video_search", "tracks": tracks},
+        f"获取 {len(tracks)} 个视频结果。",
+        tracks,
+        expects_tracks=True,
     )
 
 
 async def _web_info_search_async(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     items = await ctx.agent.search_artist_info_async(args["query"])
     return _result(
-        "web_info_search", {"type": "web_info_search", "search_results": items},
+        "web_info_search",
+        {"type": "web_info_search", "search_results": items},
         f"获取 {len(items)} 条可追溯资料。",
     )
 
 
 def _fetch_metadata(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    data = ctx.agent.fetch_track_metadata(asset_id=args.get("asset_id") or ctx.asset_id, url=args.get("url"), use_network=args.get("use_network", True))
-    return _result("fetch_metadata", {"type": "fetch_metadata", "metadata": data}, "元数据抓取完成。" if data.get("found") else "未抓到可用元数据。")
+    data = ctx.agent.fetch_track_metadata(
+        asset_id=args.get("asset_id") or ctx.asset_id, url=args.get("url"), use_network=args.get("use_network", True)
+    )
+    return _result(
+        "fetch_metadata",
+        {"type": "fetch_metadata", "metadata": data},
+        "元数据抓取完成。" if data.get("found") else "未抓到可用元数据。",
+    )
 
 
 def _memory_update(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     from app.models import MemoryUpdateRequest
-    _, changed = ctx.agent.update_memory(MemoryUpdateRequest(user_id=ctx.user_id, event=args["event"], asset_id=ctx.asset_id))
-    return _result("memory_update", {"type": "memory_update", "changed": changed}, f"记忆{'已更新' if changed else '无变化'}。")
+
+    _, changed = ctx.agent.update_memory(
+        MemoryUpdateRequest(user_id=ctx.user_id, event=args["event"], asset_id=ctx.asset_id)
+    )
+    return _result(
+        "memory_update", {"type": "memory_update", "changed": changed}, f"记忆{'已更新' if changed else '无变化'}。"
+    )
 
 
 def _similar_cross(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -1400,7 +1580,9 @@ def _similar_intra(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if not ctx.asset_id:
         return ToolResult(tool="similar_intra", status=ToolStatus.UNSUPPORTED, summary="缺少媒体上下文。")
     segments = ctx.agent.media.get_segments(ctx.asset_id)
-    items = ctx.agent.find_similar_segments(ctx.asset_id, segments[0].segment_id, args.get("top_k", 5)) if segments else []
+    items = (
+        ctx.agent.find_similar_segments(ctx.asset_id, segments[0].segment_id, args.get("top_k", 5)) if segments else []
+    )
     return _result("similar_intra", {"type": "similar_intra", "results": items}, f"找到 {len(items)} 个相似片段。")
 
 
@@ -1415,7 +1597,11 @@ def _analyze(_args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if not ctx.asset_id:
         return ToolResult(tool="analyze", status=ToolStatus.UNSUPPORTED, summary="缺少媒体上下文。")
     asset, segments = ctx.agent.analyze_media(ctx.asset_id)
-    return _result("analyze", {"type": "analyze", "asset": asset, "segments": segments}, f"已分析 {asset.title}：生成 {len(segments)} 个片段。")
+    return _result(
+        "analyze",
+        {"type": "analyze", "asset": asset, "segments": segments},
+        f"已分析 {asset.title}：生成 {len(segments)} 个片段。",
+    )
 
 
 def _report(_args: dict[str, Any], ctx: ToolContext) -> ToolResult:

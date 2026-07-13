@@ -47,10 +47,7 @@ class ProfileSignals:
         mood_text = "、".join(moods) if moods else "暂无明显偏好"
         pref_text = "；".join(prefs) if prefs else "暂无"
         artist_text = "、".join(artists) if artists else ""
-        parts = [
-            f"你的品味目前更偏向 {genre_text}，"
-            f"情绪上常出现 {mood_text}，"
-        ]
+        parts = [f"你的品味目前更偏向 {genre_text}，情绪上常出现 {mood_text}，"]
         if include_artists and artist_text:
             parts.append(f"偏好的艺人有 {artist_text}，")
         parts.append(f"显式表达过的偏好包括 {pref_text}。")
@@ -64,6 +61,7 @@ class ProfileSignals:
         """
         try:
             from app.services.profile import UserProfileService
+
             ctx = UserProfileService(self.store, self.memory).get_context_for_llm(user_id)
         except Exception:
             logger.debug("profile_context_text 失败，跳过画像注入", exc_info=True)
@@ -95,6 +93,7 @@ class ProfileSignals:
         """
         try:
             from app.services.profile import UserProfileService
+
             profile = UserProfileService(self.store, self.memory).get_profile(user_id)
         except Exception:
             logger.debug("profile_rerank_signals 失败，降级无画像信号", exc_info=True)
@@ -104,10 +103,7 @@ class ProfileSignals:
         # 纠错回流：被否定的艺人洞察（title 含艺人名）决定关系反转方向——
         #   core/rising 被否定 → 从加分改减分；avoid 被否定 → 不再减分。
         # 直接按关系+是否被否定一次建表，避免先加进 penalty 又被第二轮扫描误删。
-        rejected_titles = [
-            i.title for i in profile.insights
-            if i.status == "rejected" and i.dimension == "artist"
-        ]
+        rejected_titles = [i.title for i in profile.insights if i.status == "rejected" and i.dimension == "artist"]
 
         def _rejected(name: str) -> bool:
             return any(name in t for t in rejected_titles)

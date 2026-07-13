@@ -119,29 +119,35 @@ def run_scenario(agent: Any, scenario: dict[str, Any]) -> list[TurnResult]:
         try:
             answer = asyncio.run(agent.chat_async(user_id, turn["message"], history=history))
             checks = evaluate_turn(agent, user_id, turn, answer)
-            results.append(TurnResult(
-                index=index,
-                session=session,
-                message=turn["message"],
-                ok=all(check.ok for check in checks),
-                checks=checks,
-                answer_preview=(getattr(answer, "answer", "") or "")[:240],
-                trace=list(getattr(answer, "agent_trace", []) or []),
-                rationale=turn.get("rationale", ""),
-            ))
-            history.extend([
-                {"role": "user", "content": turn["message"]},
-                {"role": "assistant", "content": getattr(answer, "answer", "") or ""},
-            ])
+            results.append(
+                TurnResult(
+                    index=index,
+                    session=session,
+                    message=turn["message"],
+                    ok=all(check.ok for check in checks),
+                    checks=checks,
+                    answer_preview=(getattr(answer, "answer", "") or "")[:240],
+                    trace=list(getattr(answer, "agent_trace", []) or []),
+                    rationale=turn.get("rationale", ""),
+                )
+            )
+            history.extend(
+                [
+                    {"role": "user", "content": turn["message"]},
+                    {"role": "assistant", "content": getattr(answer, "answer", "") or ""},
+                ]
+            )
         except Exception as exc:
-            results.append(TurnResult(
-                index=index,
-                session=session,
-                message=turn["message"],
-                ok=False,
-                error=repr(exc),
-                rationale=turn.get("rationale", ""),
-            ))
+            results.append(
+                TurnResult(
+                    index=index,
+                    session=session,
+                    message=turn["message"],
+                    ok=False,
+                    error=repr(exc),
+                    rationale=turn.get("rationale", ""),
+                )
+            )
     return results
 
 

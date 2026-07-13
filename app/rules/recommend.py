@@ -47,20 +47,58 @@ class RecommendationAnchors:
 
 
 _KNOWN_RECOMMENDATION_ARTISTS = (
-    "SZA", "Frank Ocean", "Daniel Caesar",
-    "Four Tet", "Jon Hopkins", "Aphex Twin",
-    "Lamp", "小野リサ", "Lisa Ono", "Tomoko Aran", "亜蘭知子",
-    "toe", "Explosions in the Sky", "American Football",
-    "Cocteau Twins", "Slowdive", "Alvvays",
-    "Nujabes", "J Dilla", "Uyama Hiroto",
+    "SZA",
+    "Frank Ocean",
+    "Daniel Caesar",
+    "Four Tet",
+    "Jon Hopkins",
+    "Aphex Twin",
+    "Lamp",
+    "小野リサ",
+    "Lisa Ono",
+    "Tomoko Aran",
+    "亜蘭知子",
+    "toe",
+    "Explosions in the Sky",
+    "American Football",
+    "Cocteau Twins",
+    "Slowdive",
+    "Alvvays",
+    "Nujabes",
+    "J Dilla",
+    "Uyama Hiroto",
 )
 
 # LLM entities 里偶尔混进的非艺人词（场景/情绪/请求词）——这些不能当艺人硬锚点，
 # 否则会用一个泛词去 anchor_filter 把所有真实候选清空。genre/mood 走 styles 分支。
 _NON_ANCHOR_ENTITY_WORDS = {
-    "", "推荐", "音乐", "歌曲", "歌", "song", "songs", "music", "track", "tracks",
-    "chill", "vibe", "vibes", "playlist", "mix", "放松", "深夜", "学习", "工作", "跑步",
-    "随便", "好听", "来点", "来几首", "更多", "similar", "more",
+    "",
+    "推荐",
+    "音乐",
+    "歌曲",
+    "歌",
+    "song",
+    "songs",
+    "music",
+    "track",
+    "tracks",
+    "chill",
+    "vibe",
+    "vibes",
+    "playlist",
+    "mix",
+    "放松",
+    "深夜",
+    "学习",
+    "工作",
+    "跑步",
+    "随便",
+    "好听",
+    "来点",
+    "来几首",
+    "更多",
+    "similar",
+    "more",
 }
 
 _RECOMMENDATION_STYLE_ALIASES: dict[str, tuple[str, ...]] = {
@@ -104,39 +142,135 @@ _RECOMMENDATION_STYLE_SEARCH_VARIANTS: dict[str, tuple[str, ...]] = {
 _RUNNING_PLAYLIST_TOKENS = ("跑步", "运动", "健身", "慢跑", "夜跑", "running", "workout", "gym", "run ")
 
 _RUNNING_PLAYLIST_ANTI_CONTEXT_PATTERNS = (
-    r"白噪音", r"粉噪音", r"褐噪音", r"助眠", r"催眠", r"睡前", r"睡眠", r"入睡",
-    r"工作学习", r"学习工作", r"学习(?:时|用|专注|必备|音乐)?", r"专注力", r"提高专注",
-    r"放松(?:音乐|催眠|冥想|疗愈)?", r"冥想", r"spa", r"asmr",
-    r"雨声", r"雨水声", r"下雨声", r"雷声", r"雨林", r"自然(?:声|白噪音)",
-    r"高音质.*/.*白噪音", r"睡觉", r"安眠",
-    r"white\s*noise", r"brown\s*noise", r"pink\s*noise", r"sleep(?:ing)?",
-    r"study(?:ing)?", r"focus", r"concentrat(?:e|ion)", r"meditation", r"relax(?:ing|ation)?",
-    r"rain\s*sounds?", r"thunder\s*sounds?", r"lullaby",
+    r"白噪音",
+    r"粉噪音",
+    r"褐噪音",
+    r"助眠",
+    r"催眠",
+    r"睡前",
+    r"睡眠",
+    r"入睡",
+    r"工作学习",
+    r"学习工作",
+    r"学习(?:时|用|专注|必备|音乐)?",
+    r"专注力",
+    r"提高专注",
+    r"放松(?:音乐|催眠|冥想|疗愈)?",
+    r"冥想",
+    r"spa",
+    r"asmr",
+    r"雨声",
+    r"雨水声",
+    r"下雨声",
+    r"雷声",
+    r"雨林",
+    r"自然(?:声|白噪音)",
+    r"高音质.*/.*白噪音",
+    r"睡觉",
+    r"安眠",
+    r"white\s*noise",
+    r"brown\s*noise",
+    r"pink\s*noise",
+    r"sleep(?:ing)?",
+    r"study(?:ing)?",
+    r"focus",
+    r"concentrat(?:e|ion)",
+    r"meditation",
+    r"relax(?:ing|ation)?",
+    r"rain\s*sounds?",
+    r"thunder\s*sounds?",
+    r"lullaby",
 )
 
 _LONG_VIDEO_RECOMMENDATION_MARKERS = (
-    "推荐歌曲", "日推", "一定要带上耳机", "带上耳机", "不能错过", "歌单推荐",
-    "热门推荐", "音乐分享", "高音质", "完整版", "合集", "纯享", "一小时", "1小时",
+    "推荐歌曲",
+    "日推",
+    "一定要带上耳机",
+    "带上耳机",
+    "不能错过",
+    "歌单推荐",
+    "热门推荐",
+    "音乐分享",
+    "高音质",
+    "完整版",
+    "合集",
+    "纯享",
+    "一小时",
+    "1小时",
 )
 
 _FUNCTIONAL_AUDIO_PATTERNS = (
-    r"白噪音", r"粉噪音", r"褐噪音", r"助眠", r"催眠", r"睡前", r"睡眠", r"入睡",
-    r"工作学习", r"学习工作", r"学习(?:时|用|专注|必备|音乐)?", r"专注力", r"提高专注",
-    r"放松(?:音乐|身心|催眠|冥想|疗愈|解压)?", r"舒缓解压", r"解压放松",
-    r"轻音乐", r"纯音乐", r"背景音乐", r"咖啡厅音乐", r"下午茶音乐", r"午后放松时光",
-    r"舒适的下午", r"冥想", r"spa", r"asmr", r"雨声", r"雨水声", r"下雨声", r"雷声",
-    r"雨林", r"自然(?:声|白噪音)", r"睡觉", r"安眠",
-    r"white\s*noise", r"brown\s*noise", r"pink\s*noise", r"sleep(?:ing)?",
-    r"study(?:ing)?", r"focus", r"concentrat(?:e|ion)", r"meditation", r"relax(?:ing|ation)?",
-    r"coffee\s*(?:shop|house|cafe)\s*music", r"background\s*music",
-    r"rain\s*sounds?", r"thunder\s*sounds?", r"lullaby",
+    r"白噪音",
+    r"粉噪音",
+    r"褐噪音",
+    r"助眠",
+    r"催眠",
+    r"睡前",
+    r"睡眠",
+    r"入睡",
+    r"工作学习",
+    r"学习工作",
+    r"学习(?:时|用|专注|必备|音乐)?",
+    r"专注力",
+    r"提高专注",
+    r"放松(?:音乐|身心|催眠|冥想|疗愈|解压)?",
+    r"舒缓解压",
+    r"解压放松",
+    r"轻音乐",
+    r"纯音乐",
+    r"背景音乐",
+    r"咖啡厅音乐",
+    r"下午茶音乐",
+    r"午后放松时光",
+    r"舒适的下午",
+    r"冥想",
+    r"spa",
+    r"asmr",
+    r"雨声",
+    r"雨水声",
+    r"下雨声",
+    r"雷声",
+    r"雨林",
+    r"自然(?:声|白噪音)",
+    r"睡觉",
+    r"安眠",
+    r"white\s*noise",
+    r"brown\s*noise",
+    r"pink\s*noise",
+    r"sleep(?:ing)?",
+    r"study(?:ing)?",
+    r"focus",
+    r"concentrat(?:e|ion)",
+    r"meditation",
+    r"relax(?:ing|ation)?",
+    r"coffee\s*(?:shop|house|cafe)\s*music",
+    r"background\s*music",
+    r"rain\s*sounds?",
+    r"thunder\s*sounds?",
+    r"lullaby",
 )
 
 _FUNCTIONAL_AUDIO_ARTIST_PATTERNS = (
-    r"纯音乐馆", r"轻松治愈", r"音眠治愈所", r"治愈音乐集", r"解压放松治愈",
-    r"休闲音乐", r"睡眠音乐", r"助眠音乐", r"白噪音", r"背景音乐", r"轻音乐",
-    r"咖啡厅音乐", r"咖啡馆音乐", r"咖啡音乐", r"放松治愈", r"催眠", r"冥想",
-    r"sleep\s*music", r"relax(?:ing|ation)?\s*music", r"study\s*music",
+    r"纯音乐馆",
+    r"轻松治愈",
+    r"音眠治愈所",
+    r"治愈音乐集",
+    r"解压放松治愈",
+    r"休闲音乐",
+    r"睡眠音乐",
+    r"助眠音乐",
+    r"白噪音",
+    r"背景音乐",
+    r"轻音乐",
+    r"咖啡厅音乐",
+    r"咖啡馆音乐",
+    r"咖啡音乐",
+    r"放松治愈",
+    r"催眠",
+    r"冥想",
+    r"sleep\s*music",
+    r"relax(?:ing|ation)?\s*music",
+    r"study\s*music",
     r"coffee\s*(?:shop|house|cafe)\s*music",
 )
 
@@ -155,9 +289,18 @@ _GENERIC_SCENE_TITLE_COMPACTS = {
 }
 
 _GENERIC_SCENE_ARTIST_COMPACTS = {
-    "轻松治愈", "音眠治愈所", "治愈音乐集", "解压放松治愈",
-    "纯音乐馆", "休闲音乐", "睡眠音乐", "助眠音乐", "背景音乐",
-    "咖啡厅音乐", "咖啡馆音乐", "咖啡音乐",
+    "轻松治愈",
+    "音眠治愈所",
+    "治愈音乐集",
+    "解压放松治愈",
+    "纯音乐馆",
+    "休闲音乐",
+    "睡眠音乐",
+    "助眠音乐",
+    "背景音乐",
+    "咖啡厅音乐",
+    "咖啡馆音乐",
+    "咖啡音乐",
 }
 
 
@@ -231,12 +374,14 @@ def _recommendation_search_seeds(
 def _recommendation_anchor_hits(track: Asset | ExternalTrack, anchors: RecommendationAnchors) -> list[str]:
     if not anchors.explicit:
         return []
-    raw = " ".join([
-        getattr(track, "title", "") or "",
-        getattr(track, "artist", "") or "",
-        " ".join(getattr(track, "genre", []) or []),
-        " ".join(getattr(track, "mood", []) or []),
-    ]).lower()
+    raw = " ".join(
+        [
+            getattr(track, "title", "") or "",
+            getattr(track, "artist", "") or "",
+            " ".join(getattr(track, "genre", []) or []),
+            " ".join(getattr(track, "mood", []) or []),
+        ]
+    ).lower()
     normalized = _normalize_match_text(raw)
     hits: list[str] = []
     for artist in anchors.artists:
@@ -268,16 +413,30 @@ def _is_recommendation_quality_track(track: Any, *, allow_variants: bool = False
     compact_artist = re.sub(r"[^a-z0-9一-鿿㐀-䶿]+", "", lowered_artist)
 
     noise_patterns = (
-        r"\btype\s*beat\b", r"\bfree\s*beat\b", r"\binstrumental\b",
-        r"\bbpm\s*\d+\b", r"\bprod\.?(?:\s|$)", r"\bdemo\b",
-        r"\bai\s*(?:翻唱|cover|歌曲|音乐)", r"\blive\s*stage\b",
+        r"\btype\s*beat\b",
+        r"\bfree\s*beat\b",
+        r"\binstrumental\b",
+        r"\bbpm\s*\d+\b",
+        r"\bprod\.?(?:\s|$)",
+        r"\bdemo\b",
+        r"\bai\s*(?:翻唱|cover|歌曲|音乐)",
+        r"\blive\s*stage\b",
     )
     if any(re.search(pattern, lowered_title) for pattern in noise_patterns):
         return False
-    if any(token in lowered_title for token in (
-        "伴奏", "翻自", "动态歌词", "歌词版", "无损音质", "完整版试听",
-        "步频", "卡点",
-    )):
+    if any(
+        token in lowered_title
+        for token in (
+            "伴奏",
+            "翻自",
+            "动态歌词",
+            "歌词版",
+            "无损音质",
+            "完整版试听",
+            "步频",
+            "卡点",
+        )
+    ):
         return False
     if "#" in title or title.startswith(("【free】", "[free]", "（free）", "(free)")):
         return False
@@ -285,11 +444,37 @@ def _is_recommendation_quality_track(track: Any, *, allow_variants: bool = False
         return False
 
     generic_names = {
-        "热门歌曲", "热门音乐", "流行音乐", "独立流行", "另类流行", "新灵魂",
-        "更新灵魂", "氛围说唱", "律动rnb", "律动rb", "另类rnb", "另类rb",
-        "小众rnb", "小众rb", "neosoulbeat", "neosoul", "纯音乐", "伴奏",
-        "typebeat", "unknown", "佚名", "群星", "rnb", "rb", "律动", "说唱",
-        "学习专注", "专注学习", "学习能量", "专注力读书音乐", "学习专注力读书音乐",
+        "热门歌曲",
+        "热门音乐",
+        "流行音乐",
+        "独立流行",
+        "另类流行",
+        "新灵魂",
+        "更新灵魂",
+        "氛围说唱",
+        "律动rnb",
+        "律动rb",
+        "另类rnb",
+        "另类rb",
+        "小众rnb",
+        "小众rb",
+        "neosoulbeat",
+        "neosoul",
+        "纯音乐",
+        "伴奏",
+        "typebeat",
+        "unknown",
+        "佚名",
+        "群星",
+        "rnb",
+        "rb",
+        "律动",
+        "说唱",
+        "学习专注",
+        "专注学习",
+        "学习能量",
+        "专注力读书音乐",
+        "学习专注力读书音乐",
     }
     if compact_title in generic_names or compact_artist in generic_names:
         return False
@@ -297,8 +482,20 @@ def _is_recommendation_quality_track(track: Any, *, allow_variants: bool = False
         return False
 
     genre_words = (
-        "r&b", "rnb", "soul", "说唱", "嘻哈", "trap", "chill", "beat",
-        "另类", "流行", "爵士", "电子", "梦核", "雷鬼",
+        "r&b",
+        "rnb",
+        "soul",
+        "说唱",
+        "嘻哈",
+        "trap",
+        "chill",
+        "beat",
+        "另类",
+        "流行",
+        "爵士",
+        "电子",
+        "梦核",
+        "雷鬼",
     )
     descriptor_count = sum(1 for word in genre_words if word in lowered_title)
     if descriptor_count >= 3:
@@ -312,7 +509,13 @@ def _is_scene_recommendation_instruction(instruction: str) -> bool:
     lowered = (instruction or "").lower()
     strict_scene_tokens = (
         *_RUNNING_PLAYLIST_TOKENS,
-        "通勤", "开车", "派对", "聚会", "散步", "旅行", "约会",
+        "通勤",
+        "开车",
+        "派对",
+        "聚会",
+        "散步",
+        "旅行",
+        "约会",
     )
     return bool(_scene_playlist_queries(instruction)) or any(token in lowered for token in strict_scene_tokens)
 
@@ -331,7 +534,10 @@ def _looks_like_functional_audio(track: Any) -> bool:
         return True
     if any(re.search(pattern, combined) or re.search(pattern, compact) for pattern in _FUNCTIONAL_AUDIO_PATTERNS):
         return True
-    if any(re.search(pattern, lowered_artist) or re.search(pattern, artist_compact) for pattern in _FUNCTIONAL_AUDIO_ARTIST_PATTERNS):
+    if any(
+        re.search(pattern, lowered_artist) or re.search(pattern, artist_compact)
+        for pattern in _FUNCTIONAL_AUDIO_ARTIST_PATTERNS
+    ):
         return True
     scene_words = ("下午", "午后", "放松", "治愈", "舒缓", "解压", "chill", "睡眠", "学习", "专注", "咖啡")
     title_scene_hits = sum(1 for word in scene_words if word in lowered_title)

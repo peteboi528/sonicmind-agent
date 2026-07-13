@@ -12,6 +12,7 @@
 落盘格式统一为 ``{"_encrypted": bool, "blob": str}``，blob 为 JSON 串的加密/明文
 token；旧版 ``{"cookie": ...}`` 明文格式（无 blob 字段）由 load 兼容读取。
 """
+
 from __future__ import annotations
 
 import json
@@ -51,7 +52,8 @@ def _fernet() -> Fernet | None:
                     pass
                 logger.warning(
                     "SECRET_STORE_KEY 未配置，已生成 dev 兜底密钥落 %s。生产部署必须显式设置 "
-                    "SECRET_STORE_KEY 环境变量，否则加密等于裸存。", key_file,
+                    "SECRET_STORE_KEY 环境变量，否则加密等于裸存。",
+                    key_file,
                 )
         except OSError:
             logger.warning("无法写入 dev 兜底密钥，凭证将明文落盘。生产必须配置 SECRET_STORE_KEY。")

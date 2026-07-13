@@ -7,6 +7,7 @@
 
 与 lastfm_client 同风格：同步 urllib + 异常返回空，零新依赖。
 """
+
 from __future__ import annotations
 
 import json
@@ -103,25 +104,21 @@ def _url_relations(raw: Any) -> list[dict[str, str]]:
         if not url:
             continue
         rel_type = str(rel.get("type") or "").strip()
-        out.append({
-            "type": rel_type,
-            "url": url,
-            "ended": "true" if rel.get("ended") else "",
-        })
+        out.append(
+            {
+                "type": rel_type,
+                "url": url,
+                "ended": "true" if rel.get("ended") else "",
+            }
+        )
     return out
 
 
 def _artist_from_raw(a: dict[str, Any], score: int = 0) -> dict[str, Any]:
     aliases = [
-        str(al.get("name", "")).strip()
-        for al in (a.get("aliases") or [])
-        if isinstance(al, dict) and al.get("name")
+        str(al.get("name", "")).strip() for al in (a.get("aliases") or []) if isinstance(al, dict) and al.get("name")
     ]
-    tags = [
-        str(tg.get("name", "")).strip()
-        for tg in (a.get("tags") or [])
-        if isinstance(tg, dict) and tg.get("name")
-    ]
+    tags = [str(tg.get("name", "")).strip() for tg in (a.get("tags") or []) if isinstance(tg, dict) and tg.get("name")]
     return {
         "mbid": a.get("id", ""),
         "name": a.get("name", ""),
@@ -137,16 +134,8 @@ def _artist_from_raw(a: dict[str, Any], score: int = 0) -> dict[str, Any]:
 
 def _release_group_from_raw(rg: dict[str, Any], score: int = 0) -> dict[str, Any]:
     credit = rg.get("artist-credit") or []
-    artists = [
-        str(ac.get("name", "")).strip()
-        for ac in credit
-        if isinstance(ac, dict) and ac.get("name")
-    ]
-    tags = [
-        str(tg.get("name", "")).strip()
-        for tg in (rg.get("tags") or [])
-        if isinstance(tg, dict) and tg.get("name")
-    ]
+    artists = [str(ac.get("name", "")).strip() for ac in credit if isinstance(ac, dict) and ac.get("name")]
+    tags = [str(tg.get("name", "")).strip() for tg in (rg.get("tags") or []) if isinstance(tg, dict) and tg.get("name")]
     return {
         "mbid": rg.get("id", ""),
         "title": rg.get("title", ""),
@@ -157,7 +146,6 @@ def _release_group_from_raw(rg: dict[str, Any], score: int = 0) -> dict[str, Any
         "tags": tags,
         "relations": _url_relations(rg.get("relations")),
     }
-
 
 
 class MusicBrainzClient:
@@ -224,7 +212,11 @@ class MusicBrainzClient:
         if not hits:
             return None
         if artist:
-            artist_exact = [h for h in hits if _norm(h.get("artist", "")) == _norm(artist) or _norm(artist) in _norm(h.get("artist", ""))]
+            artist_exact = [
+                h
+                for h in hits
+                if _norm(h.get("artist", "")) == _norm(artist) or _norm(artist) in _norm(h.get("artist", ""))
+            ]
             title_and_artist = [h for h in artist_exact if _norm(h.get("title", "")) == _norm(title)]
             if title_and_artist:
                 return max(title_and_artist, key=lambda h: h.get("score", 0))

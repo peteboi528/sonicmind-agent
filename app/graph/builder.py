@@ -89,8 +89,13 @@ class AgentGraphRunner:
     ) -> AgentAnswer:
         final: StreamEvent | None = None
         async for event in self.astream(
-            user_id, asset_id, query, history=history, top_k=top_k,
-            thread_id=thread_id, run_id=run_id,
+            user_id,
+            asset_id,
+            query,
+            history=history,
+            top_k=top_k,
+            thread_id=thread_id,
+            run_id=run_id,
         ):
             if event.type == "final":
                 final = event
@@ -112,12 +117,24 @@ class AgentGraphRunner:
         resolved_thread = thread_id or f"{user_id}:default"
         if is_compound_task(query):
             async for event in self._astream_compound(
-                user_id, asset_id, query, history or [], top_k, resolved_thread, run_id or "",
+                user_id,
+                asset_id,
+                query,
+                history or [],
+                top_k,
+                resolved_thread,
+                run_id or "",
             ):
                 yield event
             return
         async for event in self._astream_single(
-            user_id, asset_id, query, history or [], top_k, resolved_thread, run_id or "",
+            user_id,
+            asset_id,
+            query,
+            history or [],
+            top_k,
+            resolved_thread,
+            run_id or "",
         ):
             yield event
 
@@ -175,7 +192,9 @@ class AgentGraphRunner:
         run_id: str,
     ) -> AsyncIterator[StreamEvent]:
         subtasks, decompose_versions, decompose_metrics = await decompose_compound_async(
-            self.agent, query, history,
+            self.agent,
+            query,
+            history,
         )
         yield StreamEvent(type="plan", content=summarize_subtasks(subtasks))
         scratchpad: dict[str, Any] = {}
@@ -186,8 +205,13 @@ class AgentGraphRunner:
             task_query = _hydrate_subtask_query(task, scratchpad)
             final: StreamEvent | None = None
             async for event in self._astream_single(
-                user_id, asset_id, task_query, history, top_k,
-                f"{thread_id}:sub:{index}", f"{run_id}:sub:{index}" if run_id else "",
+                user_id,
+                asset_id,
+                task_query,
+                history,
+                top_k,
+                f"{thread_id}:sub:{index}",
+                f"{run_id}:sub:{index}" if run_id else "",
             ):
                 if event.type == "final":
                     final = event
@@ -202,15 +226,22 @@ class AgentGraphRunner:
             trace.append(f"[compound_step] {index}/{len(subtasks)} {task.intent}: {task_query}")
             trace.extend(f"[subtask {index}] {line}" for line in answer.agent_trace)
         text, synth_versions, synth_metrics = await _compose_compound_answer_async(
-            self.agent, query, subtasks, answers,
+            self.agent,
+            query,
+            subtasks,
+            answers,
         )
         last = answers[-1] if answers else AgentAnswer(answer="", evidences=[])
         versions = _merge_prompt_version_maps(
-            *[answer.prompt_versions for answer in answers], decompose_versions, synth_versions,
+            *[answer.prompt_versions for answer in answers],
+            decompose_versions,
+            synth_versions,
         )
         metrics = merge_runtime_metrics(
-            empty_runtime_metrics(), *[answer.runtime_metrics for answer in answers],
-            decompose_metrics, synth_metrics,
+            empty_runtime_metrics(),
+            *[answer.runtime_metrics for answer in answers],
+            decompose_metrics,
+            synth_metrics,
         )
         trace.append(f"[meta] {format_runtime_metrics(metrics)}")
         answer = AgentAnswer(
@@ -290,9 +321,15 @@ def _try_build_streaming_langgraph(agent: AudioVisualAgent, checkpointer=None):
     graph.set_entry_point("load_context")
     graph.add_edge("load_context", "plan_intent")
     graph.add_edge("plan_intent", "execute_tools")
-    graph.add_conditional_edges("execute_tools", lambda state: route_after_execute(state), {"web_fallback": "web_fallback", "reflect": "reflect"})
+    graph.add_conditional_edges(
+        "execute_tools",
+        lambda state: route_after_execute(state),
+        {"web_fallback": "web_fallback", "reflect": "reflect"},
+    )
     graph.add_edge("web_fallback", "reflect")
-    graph.add_conditional_edges("reflect", lambda state: route_after_reflect(state), {"refine": "execute_tools", "finalize": "finalize"})
+    graph.add_conditional_edges(
+        "reflect", lambda state: route_after_reflect(state), {"refine": "execute_tools", "finalize": "finalize"}
+    )
     graph.add_edge("finalize", END)
     return graph.compile(checkpointer=checkpointer)
 

@@ -3,6 +3,7 @@
 回归守卫：若有人移除 MemoryManager 各 RMW 方法上的 store.lock(...)，这些测试在
 多线程下会间歇性失败（history 条数 < 预期、评分重复写入）。
 """
+
 from __future__ import annotations
 
 import threading
@@ -28,9 +29,7 @@ def test_record_listen_concurrent_no_lost_updates(tmp_path):
         t.join()
 
     memory = mgr.get_memory(user_id)
-    assert len(memory.listening_history) == n, (
-        f"lost update: expected {n} events, got {len(memory.listening_history)}"
-    )
+    assert len(memory.listening_history) == n, f"lost update: expected {n} events, got {len(memory.listening_history)}"
 
 
 def test_record_rating_concurrent_no_duplicate(tmp_path):

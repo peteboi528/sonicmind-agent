@@ -6,6 +6,7 @@
 Usage:
     python -m tests.eval.ab_rerank
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -26,22 +27,102 @@ PROFILES: dict[str, tuple[float, float, float]] = {
 QUERY = "适合跑步的高能量歌"
 
 CANDIDATES: list[Asset] = [
-    Asset(asset_id="c1", source_url="u1", title="Run It Up", artist="A", duration_seconds=200,
-          genre=["电子"], mood=["激昂"], tempo_bpm=140, energy_level=0.9, status="analyzed"),
-    Asset(asset_id="c2", source_url="u2", title="Night Drive", artist="B", duration_seconds=210,
-          genre=["电子", "合成器"], mood=["激昂", "律动"], tempo_bpm=128, energy_level=0.85, status="analyzed"),
-    Asset(asset_id="c3", source_url="u3", title="晨跑节拍", artist="C", duration_seconds=190,
-          genre=["流行"], mood=["欢快"], tempo_bpm=130, energy_level=0.8, status="analyzed"),
-    Asset(asset_id="c4", source_url="u4", title="Slow Coffee", artist="D", duration_seconds=240,
-          genre=["爵士"], mood=["放松"], tempo_bpm=80, energy_level=0.3, status="analyzed"),
-    Asset(asset_id="c5", source_url="u5", title="Pump Iron", artist="E", duration_seconds=180,
-          genre=["摇滚"], mood=["热血"], tempo_bpm=150, energy_level=0.95, status="analyzed"),
-    Asset(asset_id="c6", source_url="u6", title="霓虹冲刺", artist="F", duration_seconds=195,
-          genre=["电子"], mood=["热血"], tempo_bpm=135, energy_level=0.88, status="analyzed"),
-    Asset(asset_id="c7", source_url="u7", title="Ballad Cry", artist="G", duration_seconds=300,
-          genre=["流行"], mood=["伤感"], tempo_bpm=70, energy_level=0.2, status="analyzed"),
-    Asset(asset_id="c8", source_url="u8", title="Sprint Mix", artist="H", duration_seconds=185,
-          genre=["说唱", "电子"], mood=["激昂"], tempo_bpm=145, energy_level=0.92, status="analyzed"),
+    Asset(
+        asset_id="c1",
+        source_url="u1",
+        title="Run It Up",
+        artist="A",
+        duration_seconds=200,
+        genre=["电子"],
+        mood=["激昂"],
+        tempo_bpm=140,
+        energy_level=0.9,
+        status="analyzed",
+    ),
+    Asset(
+        asset_id="c2",
+        source_url="u2",
+        title="Night Drive",
+        artist="B",
+        duration_seconds=210,
+        genre=["电子", "合成器"],
+        mood=["激昂", "律动"],
+        tempo_bpm=128,
+        energy_level=0.85,
+        status="analyzed",
+    ),
+    Asset(
+        asset_id="c3",
+        source_url="u3",
+        title="晨跑节拍",
+        artist="C",
+        duration_seconds=190,
+        genre=["流行"],
+        mood=["欢快"],
+        tempo_bpm=130,
+        energy_level=0.8,
+        status="analyzed",
+    ),
+    Asset(
+        asset_id="c4",
+        source_url="u4",
+        title="Slow Coffee",
+        artist="D",
+        duration_seconds=240,
+        genre=["爵士"],
+        mood=["放松"],
+        tempo_bpm=80,
+        energy_level=0.3,
+        status="analyzed",
+    ),
+    Asset(
+        asset_id="c5",
+        source_url="u5",
+        title="Pump Iron",
+        artist="E",
+        duration_seconds=180,
+        genre=["摇滚"],
+        mood=["热血"],
+        tempo_bpm=150,
+        energy_level=0.95,
+        status="analyzed",
+    ),
+    Asset(
+        asset_id="c6",
+        source_url="u6",
+        title="霓虹冲刺",
+        artist="F",
+        duration_seconds=195,
+        genre=["电子"],
+        mood=["热血"],
+        tempo_bpm=135,
+        energy_level=0.88,
+        status="analyzed",
+    ),
+    Asset(
+        asset_id="c7",
+        source_url="u7",
+        title="Ballad Cry",
+        artist="G",
+        duration_seconds=300,
+        genre=["流行"],
+        mood=["伤感"],
+        tempo_bpm=70,
+        energy_level=0.2,
+        status="analyzed",
+    ),
+    Asset(
+        asset_id="c8",
+        source_url="u8",
+        title="Sprint Mix",
+        artist="H",
+        duration_seconds=185,
+        genre=["说唱", "电子"],
+        mood=["激昂"],
+        tempo_bpm=145,
+        energy_level=0.92,
+        status="analyzed",
+    ),
 ]
 
 # 行为信号：用户听完 c1/c5（喜欢），秒跳 c7。让 behavior 锚有区分度。
@@ -81,8 +162,12 @@ def run_profile(name: str) -> tuple[list[tuple[Any, Any]], float]:
     """返回 (top-5 (track, breakdown), 列内多样性)。"""
     apply_profile(name)
     ranked = rerank_candidates(
-        QUERY, CANDIDATES, make_taste(),
-        behavior_scores=BEHAVIOR, top_k=5, apply_mmr=False,
+        QUERY,
+        CANDIDATES,
+        make_taste(),
+        behavior_scores=BEHAVIOR,
+        top_k=5,
+        apply_mmr=False,
     )
     tracks = [t for t, _ in ranked]
     return ranked, intra_list_diversity(tracks)

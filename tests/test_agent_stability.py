@@ -1,4 +1,5 @@
 """Agent 稳定性修复：图异常 final 契约与候选池并发写。"""
+
 from __future__ import annotations
 
 import asyncio
@@ -35,8 +36,10 @@ def test_graph_failure_still_emits_safe_final(tmp_path):
 def test_resource_library_serializes_concurrent_batch_writes(tmp_path):
     library = ResourceLibrary(tmp_path / "resource.sqlite")
     batches = [
-        [ExternalTrack(external_id=f"{batch}-{i}", title=f"Song {batch}-{i}", artist="Artist", source="netease")
-         for i in range(10)]
+        [
+            ExternalTrack(external_id=f"{batch}-{i}", title=f"Song {batch}-{i}", artist="Artist", source="netease")
+            for i in range(10)
+        ]
         for batch in range(8)
     ]
 

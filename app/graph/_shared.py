@@ -3,6 +3,7 @@
 这些函数被多个域模块（planning/continuation/execution/recovery/budget/finalize）
 共同使用，为避免循环依赖而抽到本模块。本模块不依赖任何其他 graph 子模块。
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -77,7 +78,7 @@ def _select_listed_tracks_single(results: list[dict[str, Any]], plan: AgentPlan)
         tracks = _collect_tracks(results)
         # 旅程的阶段数决定自然长度。未显式指定首数时必须保留全部阶段，不能套用
         # 普通推荐的 12 张默认上限，否则 final 事件会把流式阶段的完整卡片截掉。
-        return tracks[:plan.target_count] if plan.target_count else tracks
+        return tracks[: plan.target_count] if plan.target_count else tracks
     if plan.intent == "import":
         return _collect_tracks(results)[: plan.target_count or 12]
     if plan.intent == "video":

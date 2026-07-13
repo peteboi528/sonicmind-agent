@@ -13,6 +13,7 @@
 局限：基础 getaddrinfo 校验挡绝大多数 SSRF 探测；DNS rebinding（首次解析公网、二次解析内网）
 在本地自用场景不重点防御。解析失败（NXDOMAIN 等）不视为私网——交由后续 fetch 自然失败。
 """
+
 from __future__ import annotations
 
 import ipaddress

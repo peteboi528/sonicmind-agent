@@ -85,25 +85,30 @@ def test_pyproject_declares_embeddings_extra():
 
 def test_resource_library_semantic_search_uses_dense(tmp_path, monkeypatch):
     lib = ResourceLibrary(tmp_path / "lib.sqlite")
-    lib.upsert_track(ResourceTrack(
-        title="Piano Night",
-        artist="A",
-        source="netease",
-        source_id="1",
-        genre=["古典"],
-        mood=["安静"],
-        verified=True,
-    ))
-    lib.upsert_track(ResourceTrack(
-        title="Drum Fire",
-        artist="B",
-        source="netease",
-        source_id="2",
-        genre=["摇滚"],
-        mood=["激昂"],
-        verified=True,
-    ))
+    lib.upsert_track(
+        ResourceTrack(
+            title="Piano Night",
+            artist="A",
+            source="netease",
+            source_id="1",
+            genre=["古典"],
+            mood=["安静"],
+            verified=True,
+        )
+    )
+    lib.upsert_track(
+        ResourceTrack(
+            title="Drum Fire",
+            artist="B",
+            source="netease",
+            source_id="2",
+            genre=["摇滚"],
+            mood=["激昂"],
+            verified=True,
+        )
+    )
     monkeypatch.setattr(emb, "embeddings_available", lambda: True)
+
     # semantic_search 现用预存向量 + cosine：query 向量与 "Piano" 文本向量接近、与 "Drum" 远。
     # 用确定性 stub：encode 按"是否含 Piano"返回不同向量，cosine 映射后 Piano 高分。
     def fake_encode(texts):
@@ -114,6 +119,7 @@ def test_resource_library_semantic_search_uses_dense(tmp_path, monkeypatch):
             else:
                 out.append([0.0, 1.0, 0.0, 0.0])
         return out
+
     monkeypatch.setattr(emb, "encode", fake_encode)
 
     hits = lib.semantic_search("安静钢琴", limit=2, min_score=0.55)

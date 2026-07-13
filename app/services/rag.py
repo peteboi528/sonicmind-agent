@@ -95,7 +95,11 @@ class RagService:
             f"{index}. {segment.timestamp} - {segment.scene_summary}"
             for index, segment in enumerate(segments[:top_k], start=1)
         ]
-        answer = "基于你的记忆和当前素材，我优先推荐这些片段：\n" + "\n".join(lines) if lines else "当前素材里没有足够明显的高匹配片段。"
+        answer = (
+            "基于你的记忆和当前素材，我优先推荐这些片段：\n" + "\n".join(lines)
+            if lines
+            else "当前素材里没有足够明显的高匹配片段。"
+        )
         return AgentAnswer(
             answer=answer,
             evidences=evidences[:top_k],

@@ -3,6 +3,7 @@
 对应线上脏/低质数据：教程、DJ串烧(南宁Dj阿聪)、车载DJ、车祸新闻、抖音高潮版。
 验证 classify_candidate 的三态判定 + query-aware mix 放行 + filter_music_tracks 报告。
 """
+
 from __future__ import annotations
 
 from app.models import ExternalTrack
@@ -69,8 +70,8 @@ def test_legit_dashed_titles_not_false_positive():
     legit = [
         ("Vampire - Live", "Olivia Rodrigo"),
         ("Blinding Lights - Remix", "The Weeknd"),
-        ("深夜食堂", "铃木常吉"),     # 标题含「深夜」但无破折号后缀
-        ("氛围感单曲", "某歌手"),     # 「氛围」在主标题、不在破折号描述段
+        ("深夜食堂", "铃木常吉"),  # 标题含「深夜」但无破折号后缀
+        ("氛围感单曲", "某歌手"),  # 「氛围」在主标题、不在破折号描述段
     ]
     for title, artist in legit:
         q = classify_candidate(_t(title, artist), "推荐几首歌")

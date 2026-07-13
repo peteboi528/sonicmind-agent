@@ -1,4 +1,5 @@
 """限流中间件 + 令牌桶测试。"""
+
 from __future__ import annotations
 
 import pytest
@@ -23,7 +24,7 @@ def test_rate_limiter_per_key_isolation():
     rl = RateLimiter({"chat": 1})
     assert rl.acquire("chat", "userA")[0]
     assert not rl.acquire("chat", "userA")[0]  # userA 用尽
-    assert rl.acquire("chat", "userB")[0]      # userB 独立桶
+    assert rl.acquire("chat", "userB")[0]  # userB 独立桶
 
 
 def test_rate_limiter_unknown_tier_passthrough():
@@ -37,8 +38,10 @@ def test_rate_limiter_unknown_tier_passthrough():
 @pytest.fixture
 def _fast_chat(monkeypatch):
     """mock 掉 agent.chat_async，避免 /chat 跑真实图编排。"""
+
     async def _fast(*a, **kw):
         return {"answer": "ok"}
+
     monkeypatch.setattr(main_module.agent, "chat_async", _fast)
 
 

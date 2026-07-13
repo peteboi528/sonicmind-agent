@@ -112,4 +112,3 @@ def keyword_overlap(left: set[str], right: set[str]) -> float:
     if not left or not right:
         return 0.0
     return len(left & right) / len(left | right)
-

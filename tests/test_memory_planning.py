@@ -75,18 +75,22 @@ def test_negated_memory_tag_is_never_reintroduced():
 
 def test_semantic_recall_is_injected_before_tool_stages(tmp_path, monkeypatch):
     agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+
     async def fake_plan(*_args, **_kwargs):
         return _plan(query="深夜 放松"), {}, {}
 
     monkeypatch.setattr(nodes, "plan_with_llm_with_meta_async", fake_plan)
     monkeypatch.setattr(agent.memory, "recall_episodes", lambda *_args, **_kwargs: ["三周前偏好：R&B 暗黑"])
-    state = nodes.load_context(agent, {
-        "user_id": "u-memory-plan",
-        "asset_id": None,
-        "query": "来点深夜放松的歌曲",
-        "history": [],
-        "top_k": 3,
-    })
+    state = nodes.load_context(
+        agent,
+        {
+            "user_id": "u-memory-plan",
+            "asset_id": None,
+            "query": "来点深夜放松的歌曲",
+            "history": [],
+            "top_k": 3,
+        },
+    )
 
     out = asyncio.run(nodes.plan_intent_async(agent, state))
 
@@ -111,9 +115,14 @@ def test_real_planner_prompt_marks_memory_as_soft_context(tmp_path, monkeypatch)
 
     monkeypatch.setattr(nodes, "select_llm", lambda *_args: FakeLLM())
 
-    plan, _, _ = asyncio.run(nodes.plan_with_llm_with_meta_async(
-        agent, "来点深夜放松的歌曲", "", "R&B 暗黑 The Weeknd",
-    ))
+    plan, _, _ = asyncio.run(
+        nodes.plan_with_llm_with_meta_async(
+            agent,
+            "来点深夜放松的歌曲",
+            "",
+            "R&B 暗黑 The Weeknd",
+        )
+    )
 
     assert plan is not None
     assert "长期音乐偏好（仅作软参考" in captured["prompt"]

@@ -28,7 +28,4 @@ def DAILY_RECOMMEND_USER_TEMPLATE(
 
 
 def DAILY_SUMMARY_TEMPLATE(*, count: int, genre_str: str, bucket: str) -> str:
-    return (
-        f"用一句中文总结今日推荐（不超过30字）。"
-        f"共{count}首，主要风格：{genre_str}，时段：{bucket}。"
-    )
+    return f"用一句中文总结今日推荐（不超过30字）。共{count}首，主要风格：{genre_str}，时段：{bucket}。"

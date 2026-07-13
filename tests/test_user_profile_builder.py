@@ -46,10 +46,12 @@ def _rich_memory(user_id: str = "u1") -> UserMemory:
         ],
         exclusion_rules=["抖音热歌", "不要中文歌"],
         ratings=[
-            RatingEntry(asset_id="a1", score=9.0, title="Ditto", artist="NewJeans",
-                        genre=["R&B", "流行"], mood=["律动", "治愈"]),
-            RatingEntry(asset_id="a2", score=8.0, title="Sunflower", artist="Post Malone",
-                        genre=["流行"], mood=["欢快"]),
+            RatingEntry(
+                asset_id="a1", score=9.0, title="Ditto", artist="NewJeans", genre=["R&B", "流行"], mood=["律动", "治愈"]
+            ),
+            RatingEntry(
+                asset_id="a2", score=8.0, title="Sunflower", artist="Post Malone", genre=["流行"], mood=["欢快"]
+            ),
         ],
         taste_profile=TasteProfile(
             top_genres=[("R&B", 8.0), ("流行", 5.0)],
@@ -136,19 +138,15 @@ def test_disliked_artist_marked_avoid():
 
 # ── 置信度 ──────────────────────────────────────────────────────────────────
 def test_confidence_increases_with_evidence_and_explicitness():
-    weak = compute_confidence(evidence_count=1, explicit=False, recency=0.5,
-                              consistency=0.3, contradiction=0.0)
-    strong = compute_confidence(evidence_count=5, explicit=True, recency=0.9,
-                                consistency=0.9, contradiction=0.0)
+    weak = compute_confidence(evidence_count=1, explicit=False, recency=0.5, consistency=0.3, contradiction=0.0)
+    strong = compute_confidence(evidence_count=5, explicit=True, recency=0.9, consistency=0.9, contradiction=0.0)
     assert strong > weak
     assert 0.0 <= weak <= 1.0 and 0.0 <= strong <= 1.0
 
 
 def test_contradiction_lowers_confidence():
-    clean = compute_confidence(evidence_count=4, explicit=True, recency=0.7,
-                               consistency=0.7, contradiction=0.0)
-    contradicted = compute_confidence(evidence_count=4, explicit=True, recency=0.7,
-                                      consistency=0.7, contradiction=1.0)
+    clean = compute_confidence(evidence_count=4, explicit=True, recency=0.7, consistency=0.7, contradiction=0.0)
+    contradicted = compute_confidence(evidence_count=4, explicit=True, recency=0.7, consistency=0.7, contradiction=1.0)
     assert contradicted < clean
 
 
@@ -174,7 +172,7 @@ def test_taste_only_profile_lifts_off_confidence_floor():
     )
     profile = UserProfileBuilder().build_from_memory(mem)
     assert profile.is_empty is False
-    assert profile.summary.confidence > 0.5   # 明显高于旧地板 0.36
+    assert profile.summary.confidence > 0.5  # 明显高于旧地板 0.36
     assert profile.evidence_strength > 0.0
 
 
@@ -183,10 +181,10 @@ def test_recency_decays_with_signal_age():
     from datetime import UTC, datetime, timedelta
 
     now = datetime.now(UTC)
-    recent = UserMemory(user_id="r", listening_history=[
-        ListeningEvent(asset_id="a", timestamp=now.isoformat())])
-    stale = UserMemory(user_id="s", listening_history=[
-        ListeningEvent(asset_id="a", timestamp=(now - timedelta(days=100)).isoformat())])
+    recent = UserMemory(user_id="r", listening_history=[ListeningEvent(asset_id="a", timestamp=now.isoformat())])
+    stale = UserMemory(
+        user_id="s", listening_history=[ListeningEvent(asset_id="a", timestamp=(now - timedelta(days=100)).isoformat())]
+    )
     no_ts = UserMemory(user_id="t")  # 无 listening/ratings/明确偏好 → 无候选时间戳
 
     r_recent = _compute_recency(collect_profile_evidence(recent))
@@ -235,13 +233,17 @@ def test_confirm_and_reset_insight(service):
     target = profile.insights[0]
 
     service.update_insight_feedback("confirm-user", target.insight_id, "confirm")
-    assert next(i for i in service.get_profile("confirm-user").insights
-                if i.insight_id == target.insight_id).status == "confirmed"
+    assert (
+        next(i for i in service.get_profile("confirm-user").insights if i.insight_id == target.insight_id).status
+        == "confirmed"
+    )
 
     # reset 回到 active
     service.update_insight_feedback("confirm-user", target.insight_id, "reset")
-    assert next(i for i in service.get_profile("confirm-user").insights
-                if i.insight_id == target.insight_id).status == "active"
+    assert (
+        next(i for i in service.get_profile("confirm-user").insights if i.insight_id == target.insight_id).status
+        == "active"
+    )
 
 
 def test_delete_insight_feedback(service):
@@ -252,8 +254,10 @@ def test_delete_insight_feedback(service):
     service.update_insight_feedback("del-user", target.insight_id, "reject")
     assert service.delete_insight("del-user", target.insight_id) is True
     # 删除后恢复默认 active
-    assert next(i for i in service.get_profile("del-user").insights
-                if i.insight_id == target.insight_id).status == "active"
+    assert (
+        next(i for i in service.get_profile("del-user").insights if i.insight_id == target.insight_id).status
+        == "active"
+    )
     # 再次删除返回 False（已不存在）
     assert service.delete_insight("del-user", target.insight_id) is False
 
@@ -276,8 +280,12 @@ def test_hard_constraints_surface_in_profile():
     assert "抖音热歌" in profile.hard_constraints
     assert "不要中文歌" in profile.hard_constraints
     # 排除项应生成高置信 language insight
-    lang_insights = [i for i in
-                     __import__("app.profile.insights", fromlist=["generate_profile_insights"])
-                     .generate_profile_insights(profile) if i.dimension == "language"]
+    lang_insights = [
+        i
+        for i in __import__("app.profile.insights", fromlist=["generate_profile_insights"]).generate_profile_insights(
+            profile
+        )
+        if i.dimension == "language"
+    ]
     assert lang_insights
     assert all(i.confidence >= 0.66 for i in lang_insights)

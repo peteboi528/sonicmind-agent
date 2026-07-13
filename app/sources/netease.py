@@ -259,8 +259,16 @@ def search_netease_album(artist: str, album: str) -> dict[str, Any] | None:
     def score(item: dict[str, Any]) -> tuple[int, int]:
         item_name = _normalize_music_name(item.get("name", ""))
         item_artist = _normalize_music_name(_album_artist_name(item))
-        name_score = 3 if item_name == wanted_album else 2 if wanted_album in item_name or item_name in wanted_album else 0
-        artist_score = 2 if wanted_artist and item_artist == wanted_artist else 1 if wanted_artist and wanted_artist in item_artist else 0
+        name_score = (
+            3 if item_name == wanted_album else 2 if wanted_album in item_name or item_name in wanted_album else 0
+        )
+        artist_score = (
+            2
+            if wanted_artist and item_artist == wanted_artist
+            else 1
+            if wanted_artist and wanted_artist in item_artist
+            else 0
+        )
         return name_score + artist_score, int(item.get("size") or 0)
 
     best = max(albums, key=score)
@@ -320,13 +328,15 @@ def fetch_netease_album_tracks(album_id: str, limit: int = 100) -> dict[str, Any
         if not song_id or not title:
             continue
         al = song.get("al") or song.get("album") or {}
-        tracks.append({
-            "song_id": str(song_id),
-            "title": title,
-            "artist": _song_artists(song) or album_artist,
-            "album": (al.get("name") or album_name or "").strip() or None,
-            "cover": al.get("picUrl") or cover or None,
-        })
+        tracks.append(
+            {
+                "song_id": str(song_id),
+                "title": title,
+                "artist": _song_artists(song) or album_artist,
+                "album": (al.get("name") or album_name or "").strip() or None,
+                "cover": al.get("picUrl") or cover or None,
+            }
+        )
     full = {
         "id": album_id,
         "name": album_name,
@@ -374,8 +384,13 @@ async def asearch_netease_artist_albums(artist: str, limit: int = 6) -> list[dic
     async def fetch(endpoint: str) -> list[dict[str, Any]]:
         try:
             response = await source_transport.request(
-                "netease", "GET", endpoint, params=params, headers=_search_headers(),
-                retries=1, concurrency=4,
+                "netease",
+                "GET",
+                endpoint,
+                params=params,
+                headers=_search_headers(),
+                retries=1,
+                concurrency=4,
             )
             return response.json().get("result", {}).get("albums", []) or []
         except asyncio.CancelledError:
@@ -389,7 +404,9 @@ async def asearch_netease_artist_albums(artist: str, limit: int = 6) -> list[dic
 
 
 def _normalize_artist_albums(
-    albums: list[dict[str, Any]], artist: str, limit: int,
+    albums: list[dict[str, Any]],
+    artist: str,
+    limit: int,
 ) -> list[dict[str, Any]]:
 
     wanted_artist = _normalize_music_name(artist)
@@ -415,13 +432,15 @@ def _normalize_artist_albums(
         if key in seen:
             continue
         seen.add(key)
-        result.append({
-            "id": album_id,
-            "name": name,
-            "image": item.get("picUrl") or item.get("blurPicUrl") or "",
-            "artist": _album_artist_name(item) or artist,
-            "track_count": int(item.get("size") or 0) or None,
-        })
+        result.append(
+            {
+                "id": album_id,
+                "name": name,
+                "image": item.get("picUrl") or item.get("blurPicUrl") or "",
+                "artist": _album_artist_name(item) or artist,
+                "track_count": int(item.get("size") or 0) or None,
+            }
+        )
         if len(result) >= limit:
             break
     return result
@@ -465,8 +484,13 @@ async def asearch_netease_many(query: str, limit: int = 20, offset: int = 0) -> 
     async def fetch(endpoint: str) -> list[dict[str, Any]]:
         try:
             response = await source_transport.request(
-                "netease", "GET", endpoint, params=params, headers=_search_headers(),
-                retries=_SEARCH_RETRIES, concurrency=4,
+                "netease",
+                "GET",
+                endpoint,
+                params=params,
+                headers=_search_headers(),
+                retries=_SEARCH_RETRIES,
+                concurrency=4,
             )
             payload = response.json()
             return payload.get("result", {}).get("songs", []) or []
@@ -488,18 +512,18 @@ def _normalize_netease_songs(songs: list[dict[str, Any]]) -> list[dict[str, Any]
         if not name:
             continue
         artists = "、".join(
-            a.get("name", "").strip()
-            for a in (song.get("artists") or song.get("ar") or [])
-            if a.get("name")
+            a.get("name", "").strip() for a in (song.get("artists") or song.get("ar") or []) if a.get("name")
         )
         album = song.get("album") or song.get("al") or {}
-        results.append({
-            "song_id": str(song.get("id")),
-            "title": name,
-            "artist": artists,
-            "album": (album.get("name") or "").strip() or None,
-            "cover": album.get("picUrl"),
-        })
+        results.append(
+            {
+                "song_id": str(song.get("id")),
+                "title": name,
+                "artist": artists,
+                "album": (album.get("name") or "").strip() or None,
+                "cover": album.get("picUrl"),
+            }
+        )
     return results
 
 
@@ -596,14 +620,8 @@ def get_netease_audio_url(song_id: str, cookie: str = "") -> str | None:
 
     apis = []
     if cookie_header:
-        apis.append(
-            "https://music.163.com/api/song/enhance/player/url/v1"
-            f"?ids=[{song_id}]&level=exhigh&encodeType=aac"
-        )
-    apis.append(
-        "https://music.163.com/api/song/enhance/player/url"
-        f"?id={song_id}&ids=[{song_id}]&br=320000"
-    )
+        apis.append(f"https://music.163.com/api/song/enhance/player/url/v1?ids=[{song_id}]&level=exhigh&encodeType=aac")
+    apis.append(f"https://music.163.com/api/song/enhance/player/url?id={song_id}&ids=[{song_id}]&br=320000")
 
     for api in apis:
         try:

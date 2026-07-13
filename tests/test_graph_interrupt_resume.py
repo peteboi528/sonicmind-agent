@@ -22,7 +22,11 @@ from app.tools.registry import TOOL_REGISTRY
 
 @pytest.mark.parametrize("approved,expected_status,expected_calls", [(True, "ok", 1), (False, "cancelled", 0)])
 def test_checkpointed_graph_interrupts_and_resumes_external_write(
-    tmp_path, monkeypatch, approved, expected_status, expected_calls,
+    tmp_path,
+    monkeypatch,
+    approved,
+    expected_status,
+    expected_calls,
 ):
     calls = {"count": 0, "arguments": {}}
     spec = TOOL_REGISTRY["favorite_track"]
@@ -42,11 +46,18 @@ def test_checkpointed_graph_interrupts_and_resumes_external_write(
     plan = AgentPlan(
         intent="feedback",
         tools_needed=["favorite_track"],
-        stages=[ToolStage(calls=[ToolCall(
-            call_id=action_id,
-            name="favorite_track",
-            arguments={"track_id": "42"},
-        )], parallel=False)],
+        stages=[
+            ToolStage(
+                calls=[
+                    ToolCall(
+                        call_id=action_id,
+                        name="favorite_track",
+                        arguments={"track_id": "42"},
+                    )
+                ],
+                parallel=False,
+            )
+        ],
     )
 
     async def run():
@@ -85,9 +96,14 @@ def test_checkpointed_graph_interrupts_and_resumes_external_write(
         }
         initial = [item async for item in compiled.astream(state, config=config, stream_mode="custom")]
         resolved = ledger.resolve(action_id, thread_id, "user-1", approved)
-        resumed = [item async for item in runner.resume(
-            thread_id=thread_id, action_id=action_id, approved=approved,
-        )]
+        resumed = [
+            item
+            async for item in runner.resume(
+                thread_id=thread_id,
+                action_id=action_id,
+                approved=approved,
+            )
+        ]
         runner._checkpoint_connection = None
         await connection.close()
         return initial, resumed, resolved

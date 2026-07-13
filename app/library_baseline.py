@@ -40,16 +40,18 @@ def build_library_baseline(
     asset_digest = _file_set_digest(asset_files, store)
     media_digest = _file_set_digest(media_files, media)
     resource_count, resource_digest, source_counts = _resource_content_digest(resource)
-    overall = _hash_json({
-        "asset_count": len(asset_files),
-        "resource_track_count": resource_count,
-        "local_track_count": source_counts.get("local", 0),
-        "resource_source_counts": source_counts,
-        "media_file_count": len(media_files),
-        "asset_digest": asset_digest,
-        "resource_digest": resource_digest,
-        "media_digest": media_digest,
-    })
+    overall = _hash_json(
+        {
+            "asset_count": len(asset_files),
+            "resource_track_count": resource_count,
+            "local_track_count": source_counts.get("local", 0),
+            "resource_source_counts": source_counts,
+            "media_file_count": len(media_files),
+            "asset_digest": asset_digest,
+            "resource_digest": resource_digest,
+            "media_digest": media_digest,
+        }
+    )
     return LibraryBaseline(
         store_root=str(store),
         resource_library=str(resource),
@@ -68,12 +70,20 @@ def build_library_baseline(
 
 def compare_library_baselines(before: LibraryBaseline, after: LibraryBaseline) -> dict[str, Any]:
     fields = (
-        "asset_count", "resource_track_count", "local_track_count", "resource_source_counts", "media_file_count",
-        "asset_digest", "resource_digest", "media_digest", "overall_digest",
+        "asset_count",
+        "resource_track_count",
+        "local_track_count",
+        "resource_source_counts",
+        "media_file_count",
+        "asset_digest",
+        "resource_digest",
+        "media_digest",
+        "overall_digest",
     )
     changed = {
         field: {"before": getattr(before, field), "after": getattr(after, field)}
-        for field in fields if getattr(before, field) != getattr(after, field)
+        for field in fields
+        if getattr(before, field) != getattr(after, field)
     }
     return {"unchanged": not changed, "changed": changed}
 
@@ -95,9 +105,7 @@ def _resource_content_digest(path: Path) -> tuple[int, str, dict[str, int]]:
         return 0, hashlib.sha256(b"").hexdigest(), {}
     uri = f"file:{path}?mode=ro"
     with sqlite3.connect(uri, uri=True) as connection:
-        exists = connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tracks'"
-        ).fetchone()
+        exists = connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='tracks'").fetchone()
         if not exists:
             return 0, hashlib.sha256(b"").hexdigest(), {}
         rows = connection.execute(

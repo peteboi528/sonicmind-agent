@@ -2,6 +2,7 @@
 
 所有外部 API 调用均 mock，测试纯逻辑。
 """
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
@@ -96,15 +97,15 @@ def test_discovery_route_soft_budget_skips_llm_and_lastfm():
         is_quality_track=lambda _track: True,
         query_noise=[],
     )
-    search_and_extract = MagicMock(return_value=[
-        ExternalTrack(external_id="p1", title="Playlist Song", artist="Artist", source="netease")
-    ])
-    discover_from_llm = MagicMock(return_value=[
-        ExternalTrack(external_id="l1", title="LLM Song", artist="Artist", source="netease")
-    ])
-    discover_from_lastfm = MagicMock(return_value=[
-        ExternalTrack(external_id="f1", title="Lastfm Song", artist="Artist", source="netease")
-    ])
+    search_and_extract = MagicMock(
+        return_value=[ExternalTrack(external_id="p1", title="Playlist Song", artist="Artist", source="netease")]
+    )
+    discover_from_llm = MagicMock(
+        return_value=[ExternalTrack(external_id="l1", title="LLM Song", artist="Artist", source="netease")]
+    )
+    discover_from_lastfm = MagicMock(
+        return_value=[ExternalTrack(external_id="f1", title="Lastfm Song", artist="Artist", source="netease")]
+    )
 
     candidates, trace = service.extend_discovery_route_candidates(
         candidates=[],
@@ -174,8 +175,12 @@ def test_agent_lexical_library_fallback_supports_offline_mood_queries():
     class FakeLibrary:
         def list_tracks(self, limit, *, verified_only=False):
             return [
-                ResourceTrack(title="Night Calm", artist="A", source="local", source_id="1", mood=["放松"], verified=True),
-                ResourceTrack(title="Morning Run", artist="B", source="local", source_id="2", mood=["热血"], verified=True),
+                ResourceTrack(
+                    title="Night Calm", artist="A", source="local", source_id="1", mood=["放松"], verified=True
+                ),
+                ResourceTrack(
+                    title="Morning Run", artist="B", source="local", source_id="2", mood=["热血"], verified=True
+                ),
             ]
 
     agent.library = FakeLibrary()
@@ -198,8 +203,13 @@ class TestVerifySong:
     @patch("app.sources.netease.search_netease_many")
     def test_exact_match(self, mock_search):
         mock_search.return_value = [
-            {"song_id": "100", "title": "Blinding Lights", "artist": "The Weeknd",
-             "album": "After Hours", "cover": None},
+            {
+                "song_id": "100",
+                "title": "Blinding Lights",
+                "artist": "The Weeknd",
+                "album": "After Hours",
+                "cover": None,
+            },
         ]
         from app.search.verifier import verify_song
 
@@ -213,8 +223,7 @@ class TestVerifySong:
     @patch("app.sources.netease.search_netease_many")
     def test_case_insensitive_partial_match(self, mock_search):
         mock_search.return_value = [
-            {"song_id": "200", "title": "blinding lights", "artist": "the weeknd",
-             "album": None, "cover": None},
+            {"song_id": "200", "title": "blinding lights", "artist": "the weeknd", "album": None, "cover": None},
         ]
         from app.search.verifier import verify_song
 
@@ -225,8 +234,7 @@ class TestVerifySong:
     @patch("app.sources.netease.search_netease_many")
     def test_no_match_returns_none(self, mock_search):
         mock_search.return_value = [
-            {"song_id": "300", "title": "其他歌曲", "artist": "其他歌手",
-             "album": None, "cover": None},
+            {"song_id": "300", "title": "其他歌曲", "artist": "其他歌手", "album": None, "cover": None},
         ]
         from app.search.verifier import verify_song
 
@@ -253,19 +261,31 @@ class TestBatchVerify:
     @patch("app.search.verifier.verify_song")
     def test_verify_multiple(self, mock_verify):
         mock_verify.side_effect = [
-            ExternalTrack(external_id="1", title="Song A", artist="X", source="netease",
-                          playback_url="https://music.163.com/song?id=1"),
-            ExternalTrack(external_id="2", title="Song B", artist="Y", source="netease",
-                          playback_url="https://music.163.com/song?id=2"),
+            ExternalTrack(
+                external_id="1",
+                title="Song A",
+                artist="X",
+                source="netease",
+                playback_url="https://music.163.com/song?id=1",
+            ),
+            ExternalTrack(
+                external_id="2",
+                title="Song B",
+                artist="Y",
+                source="netease",
+                playback_url="https://music.163.com/song?id=2",
+            ),
             None,  # 第三首找不到
         ]
         from app.search.verifier import batch_verify
 
-        result = batch_verify([
-            {"title": "Song A", "artist": "X"},
-            {"title": "Song B", "artist": "Y"},
-            {"title": "Song C", "artist": "Z"},
-        ])
+        result = batch_verify(
+            [
+                {"title": "Song A", "artist": "X"},
+                {"title": "Song B", "artist": "Y"},
+                {"title": "Song C", "artist": "Z"},
+            ]
+        )
         assert len(result) == 2
         assert result[0].title == "Song A"
         assert result[1].title == "Song B"
@@ -273,15 +293,20 @@ class TestBatchVerify:
     @patch("app.search.verifier.verify_song")
     def test_dedup_same_song(self, mock_verify):
         mock_verify.return_value = ExternalTrack(
-            external_id="1", title="Song A", artist="X", source="netease",
+            external_id="1",
+            title="Song A",
+            artist="X",
+            source="netease",
             playback_url="https://music.163.com/song?id=1",
         )
         from app.search.verifier import batch_verify
 
-        result = batch_verify([
-            {"title": "Song A", "artist": "X"},
-            {"title": "song a", "artist": "x"},  # 去重
-        ])
+        result = batch_verify(
+            [
+                {"title": "Song A", "artist": "X"},
+                {"title": "song a", "artist": "x"},  # 去重
+            ]
+        )
         assert len(result) == 1
 
     def test_max_verify_limit(self):
@@ -515,20 +540,30 @@ class TestSearchAndExtract:
     def test_prefers_official_curated_playlist(self, mock_search, mock_tracks):
         mock_search.return_value = [
             {
-                "id": 1, "name": "SEO 跑步歌单", "track_count": 50,
-                "play_count": 999999, "creator_name": "关键词音乐", "creator_verified": False,
+                "id": 1,
+                "name": "SEO 跑步歌单",
+                "track_count": 50,
+                "play_count": 999999,
+                "creator_name": "关键词音乐",
+                "creator_verified": False,
             },
             {
-                "id": 2, "name": "夏日跑步", "track_count": 50,
-                "play_count": 200000, "creator_name": "云音乐官方歌单", "creator_verified": True,
+                "id": 2,
+                "name": "夏日跑步",
+                "track_count": 50,
+                "play_count": 200000,
+                "creator_name": "云音乐官方歌单",
+                "creator_verified": True,
             },
         ]
-        mock_tracks.side_effect = lambda playlist_id, limit: [ExternalTrack(
-            external_id=str(playlist_id),
-            title="Firework" if playlist_id == 2 else "跑步 BPM 180 Type Beat",
-            artist="Katy Perry" if playlist_id == 2 else "Beat Maker",
-            source="netease",
-        )]
+        mock_tracks.side_effect = lambda playlist_id, limit: [
+            ExternalTrack(
+                external_id=str(playlist_id),
+                title="Firework" if playlist_id == 2 else "跑步 BPM 180 Type Beat",
+                artist="Katy Perry" if playlist_id == 2 else "Beat Maker",
+                source="netease",
+            )
+        ]
         from app.search.netease_playlist import search_and_extract
 
         result = search_and_extract("跑步 动感 节奏", max_playlists=1)
@@ -554,7 +589,9 @@ class TestGenerateLlmCandidates:
         from app.search.web_music_discovery import generate_llm_candidates
 
         mock_llm = MagicMock()
-        mock_llm.generate.return_value = '{"candidates": [{"title": "Nikes", "artist": "Frank Ocean"}, {"title": "Ivy", "artist": "Frank Ocean"}]}'
+        mock_llm.generate.return_value = (
+            '{"candidates": [{"title": "Nikes", "artist": "Frank Ocean"}, {"title": "Ivy", "artist": "Frank Ocean"}]}'
+        )
 
         result = generate_llm_candidates("深夜 R&B", "R&B, neo-soul", llm=mock_llm)
         assert len(result) == 2
@@ -604,7 +641,8 @@ class TestGenerateLlmCandidates:
         mock_llm.generate.return_value = '{"candidates": []}'
 
         generate_llm_candidates(
-            "深夜 R&B", "R&B, neo-soul",
+            "深夜 R&B",
+            "R&B, neo-soul",
             exclusion_rules=["不听摇滚"],
             library_artists=["Frank Ocean", "SZA"],
             target_count=8,
@@ -723,26 +761,62 @@ def test_discover_query_classifier_separates_category_artist_and_track(tmp_path)
     from app.storage import JsonStore
 
     store = JsonStore(tmp_path / "store")
-    store.write_model("assets", "weeknd", Asset(
-        asset_id="weeknd", source_url="https://example.com/weeknd",
-        title="Blinding Lights", artist="The Weeknd", duration_seconds=200,
-        status="analyzed", genre=["R&B"], mood=["暗黑"],
-    ))
-    store.write_model("assets", "kanye", Asset(
-        asset_id="kanye", source_url="https://example.com/kanye",
-        title="I Wonder", artist="Kanye West、Ye", duration_seconds=200,
-        status="analyzed", genre=["说唱"], mood=["律动"],
-    ))
-    store.write_model("assets", "not-kanye", Asset(
-        asset_id="not-kanye", source_url="https://example.com/not-kanye",
-        title="Kanye Dreams", artist="Joe Example", duration_seconds=200,
-        status="analyzed", genre=["爵士"], mood=["放松"],
-    ))
-    store.write_model("assets", "lana", Asset(
-        asset_id="lana", source_url="https://example.com/lana",
-        title="Video Games", artist="Lana Del Rey", duration_seconds=200,
-        status="analyzed", genre=["流行"], mood=["浪漫"],
-    ))
+    store.write_model(
+        "assets",
+        "weeknd",
+        Asset(
+            asset_id="weeknd",
+            source_url="https://example.com/weeknd",
+            title="Blinding Lights",
+            artist="The Weeknd",
+            duration_seconds=200,
+            status="analyzed",
+            genre=["R&B"],
+            mood=["暗黑"],
+        ),
+    )
+    store.write_model(
+        "assets",
+        "kanye",
+        Asset(
+            asset_id="kanye",
+            source_url="https://example.com/kanye",
+            title="I Wonder",
+            artist="Kanye West、Ye",
+            duration_seconds=200,
+            status="analyzed",
+            genre=["说唱"],
+            mood=["律动"],
+        ),
+    )
+    store.write_model(
+        "assets",
+        "not-kanye",
+        Asset(
+            asset_id="not-kanye",
+            source_url="https://example.com/not-kanye",
+            title="Kanye Dreams",
+            artist="Joe Example",
+            duration_seconds=200,
+            status="analyzed",
+            genre=["爵士"],
+            mood=["放松"],
+        ),
+    )
+    store.write_model(
+        "assets",
+        "lana",
+        Asset(
+            asset_id="lana",
+            source_url="https://example.com/lana",
+            title="Video Games",
+            artist="Lana Del Rey",
+            duration_seconds=200,
+            status="analyzed",
+            genre=["流行"],
+            mood=["浪漫"],
+        ),
+    )
     agent = AudioVisualAgent(store)
 
     category = agent.classify_discover_query("适合专注工作的电子音乐")
@@ -777,9 +851,14 @@ def test_library_evidence_search_does_not_analyze_or_write_missing_segments():
     from app.models import Asset
 
     asset = Asset(
-        asset_id="readonly", source_url="https://example.com/readonly",
-        title="Read Only", artist="Example", duration_seconds=180,
-        status="analyzed", genre=["电子"], mood=["专注"],
+        asset_id="readonly",
+        source_url="https://example.com/readonly",
+        title="Read Only",
+        artist="Example",
+        duration_seconds=180,
+        status="analyzed",
+        genre=["电子"],
+        mood=["专注"],
     )
     agent = AudioVisualAgent.__new__(AudioVisualAgent)
     agent.list_assets = MagicMock(return_value=[asset])
@@ -787,9 +866,13 @@ def test_library_evidence_search_does_not_analyze_or_write_missing_segments():
     agent.media.get_segments.return_value = []
     agent.analyze_media = MagicMock()
     from app.services.rag import RagService
+
     agent.rag = RagService(
-        MagicMock(), agent.media, MagicMock(),
-        analyze_media=agent.analyze_media, list_assets=agent.list_assets,
+        MagicMock(),
+        agent.media,
+        MagicMock(),
+        analyze_media=agent.analyze_media,
+        list_assets=agent.list_assets,
     )
 
     assert agent.retrieve_library_evidence("专注", top_k=5) == []
@@ -811,7 +894,9 @@ class TestRecommendForQueryRoutes:
         from app.models import DailyRecommendation
 
         mock_memory = MagicMock()
-        mock_mem = UserMemory(user_id="test", taste_profile=TasteProfile(top_genres=[("R&B", 0.8)], top_moods=[("放松", 0.6)]))
+        mock_mem = UserMemory(
+            user_id="test", taste_profile=TasteProfile(top_genres=[("R&B", 0.8)], top_moods=[("放松", 0.6)])
+        )
         mock_memory.get_memory.return_value = mock_mem
         mock_memory.weighted_query.return_value = "R&B 放松"
 
@@ -824,6 +909,7 @@ class TestRecommendForQueryRoutes:
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])  # 不走 store
         from app.services.profile_signals import ProfileSignals
+
         agent.profile_signals = ProfileSignals(MagicMock(), agent.memory, list_assets=agent.list_assets)
 
         # search_web_music 已被 conftest mock → 固定返回 3 首
@@ -854,14 +940,17 @@ class TestRecommendForQueryRoutes:
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])
         from app.services.profile_signals import ProfileSignals
+
         agent.profile_signals = ProfileSignals(MagicMock(), agent.memory, list_assets=agent.list_assets)
 
         seen_offsets: list[int] = []
 
         def spy(query, top_k=5, relevance_query="", offset=0, **_):
             seen_offsets.append(offset)
-            return [ExternalTrack(external_id=f"x-{offset}-{i}", title=f"T{i}", artist="A", source="netease")
-                    for i in range(top_k)]
+            return [
+                ExternalTrack(external_id=f"x-{offset}-{i}", title=f"T{i}", artist="A", source="netease")
+                for i in range(top_k)
+            ]
 
         agent.search_web_music = spy  # 实例级覆盖，盖住 conftest 的类级 mock
 
@@ -893,6 +982,7 @@ class TestRecommendForQueryRoutes:
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])
         from app.services.profile_signals import ProfileSignals
+
         agent.profile_signals = ProfileSignals(MagicMock(), agent.memory, list_assets=agent.list_assets)
 
         call_count = {"n": 0}
@@ -904,8 +994,13 @@ class TestRecommendForQueryRoutes:
         agent.search_web_music = spy  # 实例级覆盖
 
         seeds = [
-            ExternalTrack(external_id=f"s-{i}", title=f"Seed {i}", artist="A", source="netease",
-                          playback_url=f"https://music.163.com/song?id={i}")
+            ExternalTrack(
+                external_id=f"s-{i}",
+                title=f"Seed {i}",
+                artist="A",
+                source="netease",
+                playback_url=f"https://music.163.com/song?id={i}",
+            )
             for i in range(6)  # >= top_k，命中 seed 短路
         ]
         agent.recommend_for_query("user1", "有节奏感的歌", top_k=5, seed_tracks=seeds)
@@ -933,14 +1028,18 @@ class TestRecommendForQueryRoutes:
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])
         agent._local_recommendation_candidates = MagicMock(return_value=[])
-        agent._dense_library_fallback = MagicMock(return_value=[
-            ExternalTrack(external_id="bad-1", title="City Lights", artist="Airi City Pop", source="netease")
-        ])
+        agent._dense_library_fallback = MagicMock(
+            return_value=[
+                ExternalTrack(external_id="bad-1", title="City Lights", artist="Airi City Pop", source="netease")
+            ]
+        )
         agent._record_recommendation_history = MagicMock()
-        agent._rerank_tracks = MagicMock(side_effect=lambda _uid, _q, tracks, top_k: [
-            (t, SimpleNamespace(score=1.0 - i * 0.01, reason="test", components={}))
-            for i, t in enumerate(tracks[:top_k])
-        ])
+        agent._rerank_tracks = MagicMock(
+            side_effect=lambda _uid, _q, tracks, top_k: [
+                (t, SimpleNamespace(score=1.0 - i * 0.01, reason="test", components={}))
+                for i, t in enumerate(tracks[:top_k])
+            ]
+        )
 
         def fake_search(query, top_k=5, relevance_query="", offset=0, **_):
             if query == "toe":
@@ -950,7 +1049,9 @@ class TestRecommendForQueryRoutes:
                 ]
             if query == "Explosions in the Sky":
                 return [
-                    ExternalTrack(external_id=f"eits-{i}", title=f"Sky Song {i}", artist="Explosions In The Sky", source="netease")
+                    ExternalTrack(
+                        external_id=f"eits-{i}", title=f"Sky Song {i}", artist="Explosions In The Sky", source="netease"
+                    )
                     for i in range(3)
                 ]
             return [
@@ -998,16 +1099,20 @@ class TestRecommendForQueryRoutes:
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])
         # 本地库返回用户爱听的其他歌手（模拟 taste 漏出）
-        agent._local_recommendation_candidates = MagicMock(return_value=[
-            ExternalTrack(external_id="drake-1", title="Passionfruit", artist="Drake", source="local"),
-            ExternalTrack(external_id="kanye-1", title="THIS ONE HERE", artist="Kanye West", source="local"),
-        ])
+        agent._local_recommendation_candidates = MagicMock(
+            return_value=[
+                ExternalTrack(external_id="drake-1", title="Passionfruit", artist="Drake", source="local"),
+                ExternalTrack(external_id="kanye-1", title="THIS ONE HERE", artist="Kanye West", source="local"),
+            ]
+        )
         agent._dense_library_fallback = MagicMock(return_value=[])
         agent._record_recommendation_history = MagicMock()
-        agent._rerank_tracks = MagicMock(side_effect=lambda _uid, _q, tracks, top_k: [
-            (t, SimpleNamespace(score=1.0 - i * 0.01, reason="test", components={}))
-            for i, t in enumerate(tracks[:top_k])
-        ])
+        agent._rerank_tracks = MagicMock(
+            side_effect=lambda _uid, _q, tracks, top_k: [
+                (t, SimpleNamespace(score=1.0 - i * 0.01, reason="test", components={}))
+                for i, t in enumerate(tracks[:top_k])
+            ]
+        )
 
         def fake_search(query, top_k=5, relevance_query="", offset=0, **_):
             return [
@@ -1019,7 +1124,10 @@ class TestRecommendForQueryRoutes:
 
         # entities=["The Weeknd"] 是 LLM 规划器抽出的实体（现在会传进来）
         result = agent.recommend_for_query(
-            "user1", "推几首 The Weeknd", top_k=5, entities=["The Weeknd"],
+            "user1",
+            "推几首 The Weeknd",
+            top_k=5,
+            entities=["The Weeknd"],
         )
 
         artists = {item.asset.artist for item in result.tracks}
@@ -1045,13 +1153,17 @@ class TestRecommendForQueryRoutes:
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])
         agent._local_recommendation_candidates = MagicMock(return_value=[])
-        agent._dense_library_fallback = MagicMock(return_value=[
-            ExternalTrack(external_id="bad-pool", title="City Lights", artist="Airi City Pop", source="netease")
-        ])
+        agent._dense_library_fallback = MagicMock(
+            return_value=[
+                ExternalTrack(external_id="bad-pool", title="City Lights", artist="Airi City Pop", source="netease")
+            ]
+        )
         agent._record_recommendation_history = MagicMock()
-        agent.search_web_music = MagicMock(return_value=[
-            ExternalTrack(external_id="bad-web", title="City-Pop Curse", artist="Airi City Pop", source="netease")
-        ])
+        agent.search_web_music = MagicMock(
+            return_value=[
+                ExternalTrack(external_id="bad-web", title="City-Pop Curse", artist="Airi City Pop", source="netease")
+            ]
+        )
 
         result = agent.recommend_for_query("user1", "给我 6 首 Nujabes jazz hip-hop lo-fi beats", top_k=6)
 
@@ -1061,16 +1173,16 @@ class TestRecommendForQueryRoutes:
 
     @patch("app.search.web_music_discovery.discover_from_llm")
     @patch("app.search.netease_playlist.search_and_extract")
-    def test_mood_query_uses_llm_and_playlist_routes(
-        self, mock_playlist, mock_llm_disc
-    ):
+    def test_mood_query_uses_llm_and_playlist_routes(self, mock_playlist, mock_llm_disc):
         """纯情绪查询走 LLM 候选 + 歌单搜索，不走 exact。"""
         from app.agent import AudioVisualAgent
         from app.memory import TasteProfile, UserMemory
         from app.models import DailyRecommendation, ExternalTrack
 
         mock_memory = MagicMock()
-        mock_mem = UserMemory(user_id="test", taste_profile=TasteProfile(top_genres=[("R&B", 0.8)], top_moods=[("放松", 0.6)]))
+        mock_mem = UserMemory(
+            user_id="test", taste_profile=TasteProfile(top_genres=[("R&B", 0.8)], top_moods=[("放松", 0.6)])
+        )
         mock_memory.get_memory.return_value = mock_mem
         mock_memory.weighted_query.return_value = "R&B 放松"
 
@@ -1079,18 +1191,38 @@ class TestRecommendForQueryRoutes:
 
         # LLM 路由返回 2 首
         mock_llm_disc.return_value = [
-            ExternalTrack(external_id="1", title="Nikes", artist="Frank Ocean", source="netease",
-                          playback_url="https://music.163.com/song?id=1"),
-            ExternalTrack(external_id="2", title="Ivy", artist="Frank Ocean", source="netease",
-                          playback_url="https://music.163.com/song?id=2"),
+            ExternalTrack(
+                external_id="1",
+                title="Nikes",
+                artist="Frank Ocean",
+                source="netease",
+                playback_url="https://music.163.com/song?id=1",
+            ),
+            ExternalTrack(
+                external_id="2",
+                title="Ivy",
+                artist="Frank Ocean",
+                source="netease",
+                playback_url="https://music.163.com/song?id=2",
+            ),
         ]
 
         # 歌单路由返回 2 首
         mock_playlist.return_value = [
-            ExternalTrack(external_id="3", title="Song A", artist="Artist A", source="netease",
-                          playback_url="https://music.163.com/song?id=3"),
-            ExternalTrack(external_id="4", title="Song B", artist="Artist B", source="netease",
-                          playback_url="https://music.163.com/song?id=4"),
+            ExternalTrack(
+                external_id="3",
+                title="Song A",
+                artist="Artist A",
+                source="netease",
+                playback_url="https://music.163.com/song?id=3",
+            ),
+            ExternalTrack(
+                external_id="4",
+                title="Song B",
+                artist="Artist B",
+                source="netease",
+                playback_url="https://music.163.com/song?id=4",
+            ),
         ]
 
         agent = AudioVisualAgent.__new__(AudioVisualAgent)
@@ -1099,6 +1231,7 @@ class TestRecommendForQueryRoutes:
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])  # 不走 store
         from app.services.profile_signals import ProfileSignals
+
         agent.profile_signals = ProfileSignals(MagicMock(), agent.memory, list_assets=agent.list_assets)
 
         result = agent.recommend_for_query("user1", "深夜 慵懒 律动", top_k=5)
@@ -1177,6 +1310,7 @@ class TestPickImage:
 
     def test_mega_empty_falls_back_to_smaller(self):
         from app.sources.lastfm_client import _pick_image
+
         images = [
             {"#text": "small.jpg", "size": "small"},
             {"#text": "large.jpg", "size": "large"},
@@ -1187,10 +1321,12 @@ class TestPickImage:
 
     def test_all_empty_returns_empty(self):
         from app.sources.lastfm_client import _pick_image
+
         assert _pick_image([{"#text": "", "size": "small"}, {"#text": "", "size": "mega"}]) == ""
 
     def test_not_a_list_returns_empty(self):
         from app.sources.lastfm_client import _pick_image
+
         assert _pick_image(None) == ""
         assert _pick_image([]) == ""
 
@@ -1203,9 +1339,7 @@ class TestSearchAbstractFallback:
         from app.memory import TasteProfile, UserMemory
 
         mock_memory = MagicMock()
-        mock_memory.get_memory.return_value = UserMemory(
-            user_id="test", taste_profile=TasteProfile()
-        )
+        mock_memory.get_memory.return_value = UserMemory(user_id="test", taste_profile=TasteProfile())
         mock_memory.weighted_query.return_value = ""
 
         mock_library = MagicMock()
@@ -1217,20 +1351,26 @@ class TestSearchAbstractFallback:
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])
         from app.services.rag import RagService
+
         agent.rag = RagService(
-            MagicMock(), MagicMock(), agent.memory,
-            analyze_media=MagicMock(), list_assets=agent.list_assets,
+            MagicMock(),
+            MagicMock(),
+            agent.memory,
+            analyze_media=MagicMock(),
+            list_assets=agent.list_assets,
         )
 
         # 字面 netease 搜空（"痛苦"没有同名歌曲）
         agent.search_web_music = lambda query, top_k=5, relevance_query="", offset=0, **_: []
 
         fallback_track = ExternalTrack(
-            external_id="pl-1", title="治愈系", artist="某歌手", source="netease",
+            external_id="pl-1",
+            title="治愈系",
+            artist="某歌手",
+            source="netease",
         )
 
-        with patch("app.search.netease_playlist.search_and_extract",
-                   return_value=[fallback_track]) as mock_extract:
+        with patch("app.search.netease_playlist.search_and_extract", return_value=[fallback_track]) as mock_extract:
             result = agent.search("user1", "痛苦", include_external=True, top_k=8)
 
         # 触发了歌单回退，且返回了回退曲目
@@ -1243,9 +1383,7 @@ class TestSearchAbstractFallback:
         from app.memory import TasteProfile, UserMemory
 
         mock_memory = MagicMock()
-        mock_memory.get_memory.return_value = UserMemory(
-            user_id="test", taste_profile=TasteProfile()
-        )
+        mock_memory.get_memory.return_value = UserMemory(user_id="test", taste_profile=TasteProfile())
         mock_memory.weighted_query.return_value = ""
 
         agent = AudioVisualAgent.__new__(AudioVisualAgent)
@@ -1254,12 +1392,12 @@ class TestSearchAbstractFallback:
         agent.llm = MagicMock()
         agent.list_assets = MagicMock(return_value=[])
 
-        hits = [ExternalTrack(external_id=f"h-{i}", title=f"Hit{i}", artist="Drake", source="netease")
-                for i in range(5)]
+        hits = [
+            ExternalTrack(external_id=f"h-{i}", title=f"Hit{i}", artist="Drake", source="netease") for i in range(5)
+        ]
         agent.search_web_music = lambda query, top_k=5, relevance_query="", offset=0, **_: hits
 
-        with patch("app.search.netease_playlist.search_and_extract",
-                   return_value=[]) as mock_extract:
+        with patch("app.search.netease_playlist.search_and_extract", return_value=[]) as mock_extract:
             agent.search("user1", "Drake", include_external=True, top_k=8)
 
         # 有足够字面结果 → 不触发歌单回退

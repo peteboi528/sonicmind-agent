@@ -81,7 +81,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="根据用户的品味档案和当前需求推荐音乐。适用于：用户想要新歌推荐、根据心情/时段推荐、每日推荐。默认应先调用 web_music_search 获取真实线上候选，再用本工具排序和解释。",
         args_schema={
             "query": {"type": "string", "description": "用户的推荐请求原文，例如 '推荐适合工作时听的歌'"},
-            "search_query": {"type": "string", "description": "供搜索/召回使用的改写查询，例如从原文中提炼出的场景、实体或正向检索词"},
+            "search_query": {
+                "type": "string",
+                "description": "供搜索/召回使用的改写查询，例如从原文中提炼出的场景、实体或正向检索词",
+            },
             "top_k": {"type": "integer", "description": "返回数量，默认 5", "default": 5},
         },
         required=("query",),
@@ -122,7 +125,10 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         description="根据用户指令生成一个主题歌单。适用于：用户明确说'做一个歌单'、'帮我整理'等。生成前应尽量已有 web_music_search 或导入结果作为真实候选；若用户给的是网易云歌单链接，应先调用 import_netease_playlist。",
         args_schema={
             "instruction": {"type": "string", "description": "歌单主题或场景，例如 '深夜专注用'、'跑步歌单'"},
-            "target_count": {"type": "integer", "description": "用户要求的歌单曲目数，例如 50；未指定时由系统从 instruction 推断"},
+            "target_count": {
+                "type": "integer",
+                "description": "用户要求的歌单曲目数，例如 50；未指定时由系统从 instruction 推断",
+            },
         },
         required=("instruction",),
     ),
@@ -450,9 +456,9 @@ for _name in ("save_to_playlist", "favorite_track"):
 # run_parallel(timeout=15.0)，被 8s 墙杀掉会让所有阶段空候选；recommend/playlist
 # 走 LLM 发现 + 多轮网易云搜索 + 重排，也常 >8s。按真实内部耗时放宽。
 _HEAVY_TOOL_TIMEOUTS = {
-    "journey": 18.0,            # 内部 5 阶段并行歌单搜索 timeout=15.0，留余量
-    "recommend": 30.0,          # LLM 发现 + 多轮网易云搜索 + 重排（国内访问偶尔 >20s）
-    "playlist": 30.0,           # 同 recommend，且常要更多候选
+    "journey": 18.0,  # 内部 5 阶段并行歌单搜索 timeout=15.0，留余量
+    "recommend": 30.0,  # LLM 发现 + 多轮网易云搜索 + 重排（国内访问偶尔 >20s）
+    "playlist": 30.0,  # 同 recommend，且常要更多候选
     "web_music_search": 16.0,  # 多端点搜索 + 验证
     "taste_experiment": 20.0,  # 三档候选生成，LLM + 搜索
     "import_netease_playlist": 30.0,  # 批量导入大歌单

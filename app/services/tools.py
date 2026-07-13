@@ -18,4 +18,3 @@ checkpoint_store = ActionCheckpointStore(
     retention_days=settings.agent_retention_days,
 )
 tool_runtime = ToolRuntime(trace_store=trace_store)
-

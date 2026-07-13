@@ -4,6 +4,7 @@
 本 client 缓存并按过期时间自动刷新。凭证缺失或调用失败时返回空，知识链路降级。
 与 lastfm/musicbrainz 同风格：同步 urllib，零新依赖。
 """
+
 from __future__ import annotations
 
 import base64
@@ -41,10 +42,16 @@ class SpotifyClient:
         try:
             data = urllib.parse.urlencode({"grant_type": "client_credentials"}).encode()
             cred = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
-            req = urllib.request.Request(_TOKEN_URL, data=data, method="POST", headers={
-                **_HEADERS, "Authorization": f"Basic {cred}",
-                "Content-Type": "application/x-www-form-urlencoded",
-            })
+            req = urllib.request.Request(
+                _TOKEN_URL,
+                data=data,
+                method="POST",
+                headers={
+                    **_HEADERS,
+                    "Authorization": f"Basic {cred}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
             with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
                 payload = json.loads(resp.read().decode())
             self._token = payload.get("access_token", "")
@@ -125,8 +132,7 @@ class SpotifyClient:
         if not feats:
             return ""
         n = len(feats)
-        avg = {k: sum(f.get(k, 0) for f in feats) / n
-               for k in ("danceability", "energy", "valence", "acousticness")}
+        avg = {k: sum(f.get(k, 0) for f in feats) / n for k in ("danceability", "energy", "valence", "acousticness")}
         tempo = sum(f.get("tempo", 0) for f in feats) / n
         bits: list[str] = []
         if avg["danceability"] > 0.7:

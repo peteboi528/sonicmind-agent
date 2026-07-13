@@ -3,6 +3,7 @@
 只需要一个免费 API Key（https://www.last.fm/api/account/create），不需要 OAuth。
 核心能力：artist.getSimilar → 找同风格艺人 → artist.getTopTracks → 拿代表曲目 → 网易云验证。
 """
+
 from __future__ import annotations
 
 import json
@@ -122,6 +123,7 @@ class LastfmClient:
         bio = bio_block.get("content", "") or bio_block.get("summary", "") or ""
         # 清理 Last.fm 里的 HTML 标签
         import re
+
         bio = re.sub(r"<[^>]+>", "", bio).strip()
         # 标签
         tags_raw = (raw.get("tags") or {}).get("tag") or []

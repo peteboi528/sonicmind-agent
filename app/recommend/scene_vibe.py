@@ -9,6 +9,7 @@
 
 vibe 判别的真实效果由 P1 eval 的 scene_relevance 指标度量，不在此处手工断言。
 """
+
 from __future__ import annotations
 
 from app.retrieval.embeddings import cosine_normalized, embeddings_available, encode
@@ -85,11 +86,8 @@ def scene_vibe_scores(track_texts: list[str], scene: str) -> list[float] | None:
     if vecs is None or len(vecs) != len(protos) + len(track_texts):
         return None
     proto_vecs = vecs[: len(protos)]
-    track_vecs = vecs[len(protos):]
-    return [
-        max((cosine_normalized(tv, pv) + 1.0) / 2.0 for pv in proto_vecs)
-        for tv in track_vecs
-    ]
+    track_vecs = vecs[len(protos) :]
+    return [max((cosine_normalized(tv, pv) + 1.0) / 2.0 for pv in proto_vecs) for tv in track_vecs]
 
 
 def scene_vibe_score(track_text: str, scene: str) -> float | None:

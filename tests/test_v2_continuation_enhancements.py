@@ -8,6 +8,7 @@ handler 链路中真正生效（经 ctx.plan 注入），以及 plan=None 的直
 而 V2 handler 不读 ctx.plan，导致默认 V2=True 路径下悄悄失效。移植到 handler 后由
 ``ctx.plan`` 防御性读取恢复——本文件锁住这条契约。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -37,11 +38,17 @@ class _FakeAgent:
         self.playlist = SimpleNamespace(tracks=[])
         self.last_playlist: dict = {}
 
-    def search_web_music(self, query, top_k=5, relevance_query="", include_video_sources=False, offset=0, variants=None):
-        self.last_web = dict(query=query, top_k=top_k, relevance_query=relevance_query, offset=offset, variants=variants)
+    def search_web_music(
+        self, query, top_k=5, relevance_query="", include_video_sources=False, offset=0, variants=None
+    ):
+        self.last_web = dict(
+            query=query, top_k=top_k, relevance_query=relevance_query, offset=offset, variants=variants
+        )
         return list(self.web_results)
 
-    async def search_web_music_async(self, query, top_k=5, relevance_query="", include_video_sources=False, offset=0, variants=None):
+    async def search_web_music_async(
+        self, query, top_k=5, relevance_query="", include_video_sources=False, offset=0, variants=None
+    ):
         return self.search_web_music(query, top_k, relevance_query, include_video_sources, offset, variants)
 
     def recommend_for_query(
@@ -141,7 +148,9 @@ def test_web_search_applies_language_filter():
 
 def test_recommend_passes_excluded_and_variants():
     agent = _FakeAgent()
-    ctx = _ctx(agent, _plan(excluded=[{"title": "X", "source_id": "9"}], variants=["synonym"], search_query="chill r&b"))
+    ctx = _ctx(
+        agent, _plan(excluded=[{"title": "X", "source_id": "9"}], variants=["synonym"], search_query="chill r&b")
+    )
     result = _exec("recommend", {"query": "music", "top_k": 5}, ctx)
     assert agent.last_rec["excluded_tracks"] == [{"title": "X", "source_id": "9"}]
     assert agent.last_rec["search_variants"] == ["synonym"]

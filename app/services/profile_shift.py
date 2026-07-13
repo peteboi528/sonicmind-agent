@@ -47,7 +47,9 @@ def detect_taste_shift(
     if not recent_assets:
         recent_assets = baseline_assets[-10:]
     if not baseline_assets:
-        baseline_assets = [asset_map.get(getattr(event, "asset_id", "")) for event in events[:-len(recent_assets) or None]]
+        baseline_assets = [
+            asset_map.get(getattr(event, "asset_id", "")) for event in events[: -len(recent_assets) or None]
+        ]
         baseline_assets = [asset for asset in baseline_assets if asset is not None]
 
     recent_profile = _profile_snapshot(recent_assets)
@@ -58,9 +60,21 @@ def detect_taste_shift(
         "recent_profile": recent_profile,
         "baseline_profile": baseline_profile,
         "shift_signals": shift_signals,
-        "emerging_artists": [name for name, _ in recent_profile.get("top_artists", []) if name not in {x for x, _ in baseline_profile.get("top_artists", [])}][:5],
-        "emerging_genres": [name for name, _ in recent_profile.get("top_genres", []) if name not in {x for x, _ in baseline_profile.get("top_genres", [])}][:5],
-        "emerging_moods": [name for name, _ in recent_profile.get("top_moods", []) if name not in {x for x, _ in baseline_profile.get("top_moods", [])}][:5],
+        "emerging_artists": [
+            name
+            for name, _ in recent_profile.get("top_artists", [])
+            if name not in {x for x, _ in baseline_profile.get("top_artists", [])}
+        ][:5],
+        "emerging_genres": [
+            name
+            for name, _ in recent_profile.get("top_genres", [])
+            if name not in {x for x, _ in baseline_profile.get("top_genres", [])}
+        ][:5],
+        "emerging_moods": [
+            name
+            for name, _ in recent_profile.get("top_moods", [])
+            if name not in {x for x, _ in baseline_profile.get("top_moods", [])}
+        ][:5],
         "message": "",
     }
 
@@ -105,12 +119,14 @@ def _diff_profiles(recent: dict[str, Any], baseline: dict[str, Any]) -> list[dic
             diff = count - baseline_map.get(name, 0)
             if diff <= 0:
                 continue
-            signals.append({
-                "dimension": key.removeprefix("top_"),
-                "name": name,
-                "direction": "up",
-                "recent_count": count,
-                "baseline_count": baseline_map.get(name, 0),
-                "delta": diff,
-            })
+            signals.append(
+                {
+                    "dimension": key.removeprefix("top_"),
+                    "name": name,
+                    "direction": "up",
+                    "recent_count": count,
+                    "baseline_count": baseline_map.get(name, 0),
+                    "delta": diff,
+                }
+            )
     return signals[:8]

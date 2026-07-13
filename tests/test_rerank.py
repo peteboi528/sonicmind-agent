@@ -23,8 +23,12 @@ from app.recommend.rerank import (
 
 def _track(title, genre, mood, source="netease", ext_id=None):
     return ExternalTrack(
-        external_id=ext_id or title, title=title, artist="A",
-        genre=genre, mood=mood, source=source,
+        external_id=ext_id or title,
+        title=title,
+        artist="A",
+        genre=genre,
+        mood=mood,
+        source=source,
     )
 
 
@@ -37,6 +41,7 @@ def _bd(score: float) -> RankingBreakdown:
 
 
 # ---- 四锚归一化（默认 CF 不可用，退回三锚） ----
+
 
 def test_tri_anchor_weights_sum_to_one():
     w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(semantic_ok=True, behavior_ok=True)
@@ -54,9 +59,7 @@ def test_missing_anchors_reweighted():
 
 def test_collaborative_anchor_takes_share_when_enabled():
     # 四锚全可用时，CF 锚分到非零权重，四者归一化和为 1
-    w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(
-        semantic_ok=True, behavior_ok=True, collaborative_ok=True
-    )
+    w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(semantic_ok=True, behavior_ok=True, collaborative_ok=True)
     assert w_col > 0.0
     assert w_exp == 0.0
     assert abs(w_sem + w_per + w_beh + w_col + w_exp - 1.0) < 1e-9
@@ -105,6 +108,7 @@ def test_explore_components_added_when_ts_scores_exist():
 
 # ---- 锚复活回归（旧 bug：语义/行为在生产恒为 0，三锚退化成单锚）----
 
+
 def test_semantic_tf_fallback_is_live_anchor():
     """无 sentence-transformers 时 TF 兜底不再被清零——语义锚真正参与精排。
 
@@ -112,12 +116,11 @@ def test_semantic_tf_fallback_is_live_anchor():
     随即把 w_semantic 清零、正确的语义匹配（如 query「说唱」命中说唱曲）被整体丢弃。
     """
     from app.recommend.rerank import _semantic_anchor
+
     tracks = [_track("RapTrack", ["说唱"], ["激昂"], ext_id="r1")]
     _, ok = _semantic_anchor("说唱 hip hop", tracks)
     assert ok is True  # TF 兜底现在是有效锚
-    ranked = tri_anchor_rerank(
-        "说唱", tracks, PreferenceProfile.from_taste(TasteProfile(top_genres=[("流行", 1.0)]))
-    )
+    ranked = tri_anchor_rerank("说唱", tracks, PreferenceProfile.from_taste(TasteProfile(top_genres=[("流行", 1.0)])))
     assert ranked[0][1].components["w_semantic"] > 0.0  # 语义权重不再被清零
 
 
@@ -128,6 +131,7 @@ def test_behavior_anchor_moves_ranking_when_data_exists():
     → 行为锚 available=False → w_behavior 恒为 0，从未改变过任何推荐。
     """
     from app.recommend.rerank import _behavior_anchor
+
     # 两首口味/语义同分，但一首被反复听完(+行为)、一首被秒跳(-行为)
     tracks = [
         _track("Finished", ["R&B"], ["放松"], ext_id="fin"),
@@ -143,6 +147,7 @@ def test_behavior_anchor_moves_ranking_when_data_exists():
 
 
 # ---- MMR 多样性 ----
+
 
 def test_mmr_promotes_diversity():
     taste = TasteProfile(top_genres=[("R&B", 1.0), ("电子", 0.8)], top_moods=[("放松", 1.0), ("激昂", 0.8)])
@@ -207,22 +212,25 @@ def test_bandit_select_ratio():
     for i in range(10):
         is_explorer = i >= 7
         track = _track(f"T{i}", ["R&B" if not is_explorer else "电子"], ["放松"], ext_id=f"id{i}")
-        scored.append((
-            track,
-            RankingBreakdown(
-                title=track.title,
-                source=track.source,
-                score=round(1.0 - i * 0.05, 4),
-                reason="test",
-                components={"explore": 0.99 if is_explorer else 0.01},
-            ),
-        ))
+        scored.append(
+            (
+                track,
+                RankingBreakdown(
+                    title=track.title,
+                    source=track.source,
+                    score=round(1.0 - i * 0.05, 4),
+                    reason="test",
+                    components={"explore": 0.99 if is_explorer else 0.01},
+                ),
+            )
+        )
     selected = bandit_select(scored, top_k=10, explore_ratio=0.3)
     titles = [track.title for track, _ in selected]
     assert {"T7", "T8", "T9"} <= set(titles)
 
 
 # ---- Thompson Sampling ----
+
 
 @pytest.fixture
 def lib():
@@ -266,6 +274,7 @@ def test_ts_sample_for_unknown_track_is_uniform(lib):
 
 # ---- 画像艺人信号（core/rising 加分、avoid 减分）----
 
+
 def test_profile_artist_adjust_boosts_core_and_penalizes_avoid():
     """同分候选：画像 core 艺人升到最前，avoid 艺人沉到最后。"""
     a = _track_artist("Song A", "Core Artist")
@@ -303,22 +312,30 @@ def test_rerank_candidates_accepts_profile_signals_without_crash():
     rerank_candidates("test", tracks, taste, top_k=2, apply_mmr=False)
     # 传画像（加分生效、不崩）
     out = rerank_candidates(
-        "test", tracks, taste, top_k=2, apply_mmr=False,
-        profile_boost_artists={"Core Artist"}, profile_penalty_artists=None,
+        "test",
+        tracks,
+        taste,
+        top_k=2,
+        apply_mmr=False,
+        profile_boost_artists={"Core Artist"},
+        profile_penalty_artists=None,
     )
     assert len(out) == 2
 
 
 # ---- 场景 vibe 微调（深夜 query 压低下午向候选等）----
 
+
 def test_scene_vibe_adjust_penalizes_off_vibe_in_scene_query(monkeypatch):
     """深夜 query 下，vibe 偏离场景的候选（对比值低于阈值）被降分、排到后面。"""
     from app.recommend import rerank as rerank_mod
+
     a = _track_artist("Night Track", "Night Artist")
     b = _track_artist("Sunny Afternoon", "Day Artist")
     # mock scene_vibe_penalty：(fits, threshold)；a=0.8（高）、b=0.2（低，<0.5 阈值 → 降分）
-    monkeypatch.setattr(rerank_mod, "scene_vibe_penalty",
-                        lambda texts, scene: ([0.8, 0.2], 0.5) if scene == "深夜" else (None, 0.0))
+    monkeypatch.setattr(
+        rerank_mod, "scene_vibe_penalty", lambda texts, scene: ([0.8, 0.2], 0.5) if scene == "深夜" else (None, 0.0)
+    )
     out = rerank_mod.apply_scene_vibe_adjust([(a, _bd(0.5)), (b, _bd(0.5))], "推荐几首适合深夜的歌")
     assert out[0][0].title == "Night Track"
     assert out[1][0].title == "Sunny Afternoon"
@@ -328,6 +345,7 @@ def test_scene_vibe_adjust_penalizes_off_vibe_in_scene_query(monkeypatch):
 def test_scene_vibe_adjust_noop_without_scene(monkeypatch):
     """非场景 query 不启用 vibe 判别，分数不变。"""
     from app.recommend import rerank as rerank_mod
+
     t = _track_artist("X", "Y")
     out = rerank_mod.apply_scene_vibe_adjust([(t, _bd(0.5))], "推荐几首歌")
     assert out[0][1].score == 0.5
@@ -336,6 +354,7 @@ def test_scene_vibe_adjust_noop_without_scene(monkeypatch):
 def test_scene_vibe_adjust_noop_when_embeddings_unavailable(monkeypatch):
     """embedding 不可用时安全降级，不改分（生产里模型没装也不影响推荐）。"""
     from app.recommend import rerank as rerank_mod
+
     monkeypatch.setattr(rerank_mod, "scene_vibe_penalty", lambda texts, scene: (None, 0.0))
     t = _track_artist("X", "Y")
     out = rerank_mod.apply_scene_vibe_adjust([(t, _bd(0.5))], "推荐几首适合深夜的歌")

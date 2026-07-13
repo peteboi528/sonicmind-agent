@@ -136,15 +136,18 @@ class OpenAICompatibleLLM:
     ) -> LLMResponse:
         if not messages or messages[0].get("role") != "system":
             messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(messages)
-        payload: dict[str, Any] = self._with_thinking({
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": 0.95,
-            "tools": tools,
-            "tool_choice": tool_choice,
-            "max_tokens": settings.llm_max_tokens,
-        }, thinking)
+        payload: dict[str, Any] = self._with_thinking(
+            {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "top_p": 0.95,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "max_tokens": settings.llm_max_tokens,
+            },
+            thinking,
+        )
         try:
             data = self._post(payload)
         except Exception as exc:
@@ -169,11 +172,13 @@ class OpenAICompatibleLLM:
                     args = json.loads(args_raw) if isinstance(args_raw, str) else (args_raw or {})
                 except json.JSONDecodeError:
                     args = {}
-                tool_calls.append(ToolCall(
-                    id=tc.get("id", ""),
-                    name=fn.get("name", ""),
-                    arguments=args,
-                ))
+                tool_calls.append(
+                    ToolCall(
+                        id=tc.get("id", ""),
+                        name=fn.get("name", ""),
+                        arguments=args,
+                    )
+                )
             usage = data.get("usage") or {}
             latency_ms = float((data.get("_meta") or {}).get("latency_ms", 0.0))
             estimated_cost = _estimate_cost_usd(
@@ -253,14 +258,17 @@ class OpenAICompatibleLLM:
         temperature: float,
         thinking: bool | None,
     ) -> Iterator[str]:
-        payload = self._with_thinking({
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": 0.95,
-            "max_tokens": settings.llm_max_tokens,
-            "stream": True,
-        }, thinking)
+        payload = self._with_thinking(
+            {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "top_p": 0.95,
+                "max_tokens": settings.llm_max_tokens,
+                "stream": True,
+            },
+            thinking,
+        )
         client = _shared_http_client()
         timeout = httpx.Timeout(settings.llm_timeout_seconds, connect=settings.llm_connect_timeout)
         headers = {
@@ -277,7 +285,7 @@ class OpenAICompatibleLLM:
                 for line in resp.iter_lines():
                     if not line or not line.startswith("data:"):
                         continue
-                    chunk = line[len("data:"):].strip()
+                    chunk = line[len("data:") :].strip()
                     if chunk == "[DONE]":
                         break
                     try:
@@ -311,13 +319,16 @@ class OpenAICompatibleLLM:
         }
 
     def _call(self, messages: list[dict[str, Any]], temperature: float, thinking: bool | None = None) -> str:
-        payload = self._with_thinking({
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": 0.95,
-            "max_tokens": settings.llm_max_tokens,
-        }, thinking)
+        payload = self._with_thinking(
+            {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "top_p": 0.95,
+                "max_tokens": settings.llm_max_tokens,
+            },
+            thinking,
+        )
         try:
             data = self._post(payload)
             usage = data.get("usage") or {}
@@ -345,13 +356,16 @@ class OpenAICompatibleLLM:
         temperature: float,
         thinking: bool | None = None,
     ) -> str:
-        payload = self._with_thinking({
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": 0.95,
-            "max_tokens": settings.llm_max_tokens,
-        }, thinking)
+        payload = self._with_thinking(
+            {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "top_p": 0.95,
+                "max_tokens": settings.llm_max_tokens,
+            },
+            thinking,
+        )
         try:
             data = await self._apost(payload)
             self._record_stats(data)
@@ -365,14 +379,17 @@ class OpenAICompatibleLLM:
         temperature: float,
         thinking: bool | None,
     ) -> AsyncIterator[str]:
-        payload = self._with_thinking({
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "top_p": 0.95,
-            "max_tokens": settings.llm_max_tokens,
-            "stream": True,
-        }, thinking)
+        payload = self._with_thinking(
+            {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "top_p": 0.95,
+                "max_tokens": settings.llm_max_tokens,
+                "stream": True,
+            },
+            thinking,
+        )
         client = _shared_async_http_client()
         timeout = httpx.Timeout(settings.llm_timeout_seconds, connect=settings.llm_connect_timeout)
         headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
@@ -380,13 +397,17 @@ class OpenAICompatibleLLM:
         usage: dict[str, Any] = {}
         try:
             async with client.stream(
-                "POST", f"{self.base_url}/chat/completions", json=payload, headers=headers, timeout=timeout,
+                "POST",
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=timeout,
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
                         continue
-                    chunk = line[len("data:"):].strip()
+                    chunk = line[len("data:") :].strip()
                     if chunk == "[DONE]":
                         break
                     try:

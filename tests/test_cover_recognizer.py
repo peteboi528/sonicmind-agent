@@ -3,6 +3,7 @@
 全程不打真实网络：视觉调用走模块级 ``_vision_chat_completion`` 接缝 mock，
 OCR 走 ``_get_ocr_engine`` 接缝 mock，图片用 Pillow 现造的小图。确定、可重复。
 """
+
 from __future__ import annotations
 
 import io
@@ -99,13 +100,20 @@ class TestSynthesizedQueryResolves:
 
 class TestExtractJson:
     def test_plain_json(self):
-        assert cr._extract_json_object('{"album":"X","artist":"Y","confidence":0.5}') == {"album": "X", "artist": "Y", "confidence": 0.5}
+        assert cr._extract_json_object('{"album":"X","artist":"Y","confidence":0.5}') == {
+            "album": "X",
+            "artist": "Y",
+            "confidence": 0.5,
+        }
 
     def test_fenced_json(self):
         assert cr._extract_json_object('```json\n{"album":"X"}\n```') == {"album": "X"}
 
     def test_json_with_prose(self):
-        assert cr._extract_json_object('好的，识别结果是 {"album":"X","artist":"Y"} 希望有帮助') == {"album": "X", "artist": "Y"}
+        assert cr._extract_json_object('好的，识别结果是 {"album":"X","artist":"Y"} 希望有帮助') == {
+            "album": "X",
+            "artist": "Y",
+        }
 
     def test_empty_or_garbage(self):
         assert cr._extract_json_object("") == {}
@@ -120,7 +128,10 @@ class TestExtractJson:
         assert cr._extract_json_object('{"album":"A"} 后续 {"album":"B"}') == {"album": "A"}
 
     def test_escaped_brace_inside_string(self):
-        assert cr._extract_json_object('{"album":"{Not the end}","artist":"X"}') == {"album": "{Not the end}", "artist": "X"}
+        assert cr._extract_json_object('{"album":"{Not the end}","artist":"X"}') == {
+            "album": "{Not the end}",
+            "artist": "X",
+        }
 
 
 # ── 视觉识别 ──
@@ -135,7 +146,8 @@ class TestRecognizeViaVision:
     @pytest.mark.anyio
     async def test_high_confidence(self, vision_enabled, monkeypatch):
         monkeypatch.setattr(
-            cr, "_vision_chat_completion",
+            cr,
+            "_vision_chat_completion",
             _vision_returning('{"album":"Blonde","artist":"Frank Ocean","confidence":0.92}'),
         )
         rec = await cr.recognize_cover_via_vision(_tiny_png(), "image/png")
@@ -162,6 +174,7 @@ class TestRecognizeViaVision:
     @pytest.mark.anyio
     async def test_http_error_degrades(self, vision_enabled, monkeypatch):
         """视觉调用抛错 → 返回带 note 的空结果（usable=False），不向上抛。"""
+
         async def _boom(payload, headers):  # noqa: ARG001
             raise RuntimeError("network down")
 
@@ -178,7 +191,8 @@ class TestRecognizeAlbumCover:
     @pytest.mark.anyio
     async def test_vision_path_used(self, vision_enabled, monkeypatch):
         monkeypatch.setattr(
-            cr, "_vision_chat_completion",
+            cr,
+            "_vision_chat_completion",
             _vision_returning('{"album":"Blonde","artist":"Frank Ocean","confidence":0.9}'),
         )
         rec = await cr.recognize_album_cover(_tiny_png(), "image/png")
@@ -212,7 +226,8 @@ class TestRecognizeAlbumCover:
     async def test_low_confidence_vision_falls_through_to_ocr(self, vision_enabled, monkeypatch):
         """视觉给了名字但置信 0.2 < 阈值 0.5 → 落到 OCR，且 OCR 置信更高取胜。"""
         monkeypatch.setattr(
-            cr, "_vision_chat_completion",
+            cr,
+            "_vision_chat_completion",
             _vision_returning('{"album":"Maybe Blonde","artist":"?","confidence":0.2}'),
         )
         monkeypatch.setattr(cr, "_get_ocr_engine", lambda: _fake_ocr_engine(["Real Title", "Real Artist"]))
@@ -224,7 +239,8 @@ class TestRecognizeAlbumCover:
     async def test_subthreshold_vision_still_beats_ocr_when_higher(self, vision_enabled, monkeypatch):
         """视觉 0.45 < 阈值，但仍 ≥ OCR 的 0.4 → 视觉胜出（comparison 分支）。"""
         monkeypatch.setattr(
-            cr, "_vision_chat_completion",
+            cr,
+            "_vision_chat_completion",
             _vision_returning('{"album":"Blonde","artist":"Frank Ocean","confidence":0.45}'),
         )
         monkeypatch.setattr(cr, "_get_ocr_engine", lambda: _fake_ocr_engine(["Wrong"]))
@@ -235,7 +251,8 @@ class TestRecognizeAlbumCover:
     async def test_low_conf_vision_survives_when_no_ocr(self, vision_enabled, monkeypatch):
         """视觉低置信 + OCR 不可用 → 仍返回低置信视觉（好过 none，交 MB 校验）。"""
         monkeypatch.setattr(
-            cr, "_vision_chat_completion",
+            cr,
+            "_vision_chat_completion",
             _vision_returning('{"album":"Blonde","artist":"Frank Ocean","confidence":0.3}'),
         )
         monkeypatch.setattr(cr, "_get_ocr_engine", lambda: None)
@@ -245,6 +262,7 @@ class TestRecognizeAlbumCover:
     @pytest.mark.anyio
     async def test_vision_error_then_ocr_recovers(self, vision_enabled, monkeypatch):
         """视觉调用抛错 → 编排层降级到 OCR 并返回 raw_text（不向上抛）。"""
+
         async def _boom(payload, headers):  # noqa: ARG001
             raise RuntimeError("network down")
 

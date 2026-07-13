@@ -42,14 +42,28 @@ def _setup_agent(case, agent: AudioVisualAgent) -> None:
     # 写入两条种子素材，让 setup_actions 里的 asset_id 可用
     seeds = [
         Asset(
-            asset_id="a_seed1", source_url="https://eval/1", title="夜的钢琴曲",
-            duration_seconds=240, artist="石进", genre=["古典"], mood=["治愈", "宁静"],
-            tempo_bpm=72, energy_level=0.3, status="analyzed",
+            asset_id="a_seed1",
+            source_url="https://eval/1",
+            title="夜的钢琴曲",
+            duration_seconds=240,
+            artist="石进",
+            genre=["古典"],
+            mood=["治愈", "宁静"],
+            tempo_bpm=72,
+            energy_level=0.3,
+            status="analyzed",
         ),
         Asset(
-            asset_id="a_seed2", source_url="https://eval/2", title="海阔天空",
-            duration_seconds=326, artist="Beyond", genre=["摇滚"], mood=["励志"],
-            tempo_bpm=85, energy_level=0.8, status="analyzed",
+            asset_id="a_seed2",
+            source_url="https://eval/2",
+            title="海阔天空",
+            duration_seconds=326,
+            artist="Beyond",
+            genre=["摇滚"],
+            mood=["励志"],
+            tempo_bpm=85,
+            energy_level=0.8,
+            status="analyzed",
         ),
     ]
     for s in seeds:
@@ -109,19 +123,23 @@ def run_eval(case_id: str | None = None, store_root: str = "/tmp/musicagent_eval
 
         score = judge.evaluate(case, answer.answer)
         scores.append(score)
-        case_reports.append({
-            "case_id": case.case_id,
-            "latency_seconds": round(latency, 3),
-            "has_final_answer": bool(answer.answer.strip()),
-            "overall": score.overall,
-            "passed": score.passed,
-            "mention_hit": score.mention_hit,
-            "mention_miss": score.mention_miss,
-            "per_criterion": score.per_criterion,
-            "rationale": score.rationale,
-        })
+        case_reports.append(
+            {
+                "case_id": case.case_id,
+                "latency_seconds": round(latency, 3),
+                "has_final_answer": bool(answer.answer.strip()),
+                "overall": score.overall,
+                "passed": score.passed,
+                "mention_hit": score.mention_hit,
+                "mention_miss": score.mention_miss,
+                "per_criterion": score.per_criterion,
+                "rationale": score.rationale,
+            }
+        )
         status = "✅" if score.passed else "❌"
-        print(f"  {status} overall={score.overall:.2f}  mention_hit={score.mention_hit}  violations={score.mention_miss}")
+        print(
+            f"  {status} overall={score.overall:.2f}  mention_hit={score.mention_hit}  violations={score.mention_miss}"
+        )
         if score.rationale:
             print(f"  judge: {score.rationale}")
 

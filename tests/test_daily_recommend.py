@@ -30,9 +30,14 @@ def test_recommendation_uses_local_library_and_avoids_recent_round(tmp_path, mon
     agent = AudioVisualAgent(store)
     for i in range(4):
         asset = Asset(
-            asset_id=f"local-{i}", source_url=f"https://example.com/{i}",
-            title=f"Night R&B {i}", artist=f"Artist {i}", duration_seconds=180,
-            status="analyzed", genre=["R&B"], mood=["深夜", "放松"],
+            asset_id=f"local-{i}",
+            source_url=f"https://example.com/{i}",
+            title=f"Night R&B {i}",
+            artist=f"Artist {i}",
+            duration_seconds=180,
+            status="analyzed",
+            genre=["R&B"],
+            mood=["深夜", "放松"],
         )
         store.write_model("assets", asset.asset_id, asset)
     memory = agent.memory.get_memory("u-local")
@@ -64,11 +69,17 @@ def test_rate_limited_recommend_falls_back_to_resource_pool(tmp_path, monkeypatc
 
     # 候选池里预先攒了真实已验证的 netease 歌（模拟历史搜索成果）。
     for i in range(6):
-        agent.library.upsert_external(ExternalTrack(
-            external_id=f"pool-{i}", title=f"Night Song {i}", artist="Real Artist",
-            source="netease", genre=["R&B"], mood=["放松", "深夜"],
-            playback_url=f"https://music.163.com/song?id=pool-{i}",
-        ))
+        agent.library.upsert_external(
+            ExternalTrack(
+                external_id=f"pool-{i}",
+                title=f"Night Song {i}",
+                artist="Real Artist",
+                source="netease",
+                genre=["R&B"],
+                mood=["放松", "深夜"],
+                playback_url=f"https://music.163.com/song?id=pool-{i}",
+            )
+        )
 
     # 模拟限流：所有在线路由全空。
     monkeypatch.setattr(netease_playlist, "search_and_extract", lambda *a, **k: [])
@@ -88,16 +99,26 @@ def test_source_balance_caps_local_when_online_supply_exists(tmp_path):
     ranked = []
     for i in range(10):
         track = Asset(
-            asset_id=f"l-{i}", source_url=f"https://example.com/l-{i}",
-            title=f"Local {i}", artist="Local Artist", duration_seconds=180,
-            status="analyzed", genre=["R&B"], mood=["放松"],
+            asset_id=f"l-{i}",
+            source_url=f"https://example.com/l-{i}",
+            title=f"Local {i}",
+            artist="Local Artist",
+            duration_seconds=180,
+            status="analyzed",
+            genre=["R&B"],
+            mood=["放松"],
         )
         ranked.append((track, RankingBreakdown(title=track.title, source="local", score=1 - i * 0.01, reason="test")))
     for i in range(10):
         track = ExternalTrack(
-            external_id=f"o-{i}", title=f"Online {i}", artist="Online Artist", source="netease",
+            external_id=f"o-{i}",
+            title=f"Online {i}",
+            artist="Online Artist",
+            source="netease",
         )
-        ranked.append((track, RankingBreakdown(title=track.title, source="netease", score=0.5 - i * 0.01, reason="test")))
+        ranked.append(
+            (track, RankingBreakdown(title=track.title, source="netease", score=0.5 - i * 0.01, reason="test"))
+        )
 
     selected = agent._balance_recommendation_sources(ranked, top_k=10)
 
@@ -167,6 +188,7 @@ def test_playlist_drops_unverified_llm_tracks(tmp_path):
 
         def chat_with_tools(self, messages, tools, temperature=0.3, tool_choice="auto"):
             from app.llm.protocol import LLMResponse
+
             return LLMResponse(content="ok", finish_reason="stop")
 
     agent.llm = FakePlaylistLLM()

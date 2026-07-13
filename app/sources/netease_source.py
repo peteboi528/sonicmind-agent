@@ -4,6 +4,7 @@
 所有候选都来自网易云搜索 API 的真实数据，不再返回 mock 目录里的假歌。
 get_recommendations 用 seed_genres/seed_moods 拼成搜索词，捞同风格真实曲目。
 """
+
 from __future__ import annotations
 
 import logging

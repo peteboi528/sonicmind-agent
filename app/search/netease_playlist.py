@@ -3,6 +3,7 @@
 网易云歌曲搜索对模糊的情绪词效果很差（"慵懒 R&B" 返回随机歌），
 但歌单搜索很好——因为歌单是真人策划的，歌曲质量有保障。
 """
+
 from __future__ import annotations
 
 import logging
@@ -71,7 +72,9 @@ def search_netease_playlists(query: str, limit: int = 5) -> list[dict[str, Any]]
         return []
     playlists = result.get("playlists") or []
     if not isinstance(playlists, list):
-        logger.debug("Netease playlist search returned invalid playlists payload for %r: %r", query, type(playlists).__name__)
+        logger.debug(
+            "Netease playlist search returned invalid playlists payload for %r: %r", query, type(playlists).__name__
+        )
         return []
     return [
         {
@@ -93,11 +96,19 @@ def get_playlist_detail(playlist_id: int, limit: int = 30) -> dict[str, Any] | N
         return None
     playlist = data.get("playlist")
     if not isinstance(playlist, dict):
-        logger.debug("Netease playlist detail returned invalid playlist payload for id=%s: %r", playlist_id, type(playlist).__name__)
+        logger.debug(
+            "Netease playlist detail returned invalid playlist payload for id=%s: %r",
+            playlist_id,
+            type(playlist).__name__,
+        )
         return None
     tracks_raw = playlist.get("tracks") or []
     if not isinstance(tracks_raw, list):
-        logger.debug("Netease playlist detail returned invalid tracks payload for id=%s: %r", playlist_id, type(tracks_raw).__name__)
+        logger.debug(
+            "Netease playlist detail returned invalid tracks payload for id=%s: %r",
+            playlist_id,
+            type(tracks_raw).__name__,
+        )
         return None
     result: list[ExternalTrack] = []
     for t in tracks_raw[:limit]:
@@ -112,15 +123,17 @@ def get_playlist_detail(playlist_id: int, limit: int = 30) -> dict[str, Any] | N
             album_name = al.get("name", "")
         cover = al.get("picUrl", "") if al else ""
 
-        result.append(ExternalTrack(
-            external_id=str(song_id),
-            title=name,
-            artist=artists,
-            album=album_name or None,
-            cover_url=cover or None,
-            source="netease",
-            playback_url=f"https://music.163.com/song?id={song_id}",
-        ))
+        result.append(
+            ExternalTrack(
+                external_id=str(song_id),
+                title=name,
+                artist=artists,
+                album=album_name or None,
+                cover_url=cover or None,
+                source="netease",
+                playback_url=f"https://music.163.com/song?id={song_id}",
+            )
+        )
     update_time = playlist.get("updateTime")
     updated_at = None
     if isinstance(update_time, (int, float)) and update_time > 0:
@@ -147,10 +160,7 @@ def _offline_playlist_fallback(query: str, limit: int) -> list[ExternalTrack]:
     if not tracks:
         tags = extract_tags(query)
         tracks = source.get_recommendations(tags["genre"], tags["mood"], limit=limit)
-    return [
-        track.model_copy(update={"source": "local"})
-        for track in tracks[:limit]
-    ]
+    return [track.model_copy(update={"source": "local"}) for track in tracks[:limit]]
 
 
 def search_and_extract(query: str, max_playlists: int = 3, tracks_per_playlist: int = 15) -> list[ExternalTrack]:

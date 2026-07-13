@@ -34,12 +34,18 @@ def test_similar_artist_keyword_has_dedicated_intent():
 
 def test_similar_artist_continuation_inherits_previous_artist():
     previous = {
-        "entities": ["The Weeknd"], "last_intent": "search",
-        "last_query": "找 The Weeknd 的歌", "genre_tags": [], "mood_tags": [], "scenario_tags": [],
+        "entities": ["The Weeknd"],
+        "last_intent": "search",
+        "last_query": "找 The Weeknd 的歌",
+        "genre_tags": [],
+        "mood_tags": [],
+        "scenario_tags": [],
         "shown_artists": [{"name": "SZA", "source": "local_library"}],
     }
     plan = AgentPlan(
-        intent="similar_artists", tools_needed=["similar_artists"], online_required=False,
+        intent="similar_artists",
+        tools_needed=["similar_artists"],
+        online_required=False,
         # Mock/小模型可能把关系词误抽成实体；确定性层必须忽略它并继承真实歌手。
         retrieval_plan=RetrievalPlan(entities=["同类型"], search_query="同类型"),
     )
@@ -51,10 +57,12 @@ def test_similar_artist_continuation_inherits_previous_artist():
 
 
 def test_similar_artist_runtime_returns_traceable_local_artists():
-    result = asyncio.run(tool_runtime.execute(
-        ToolCall(name="similar_artists", arguments={"artist": "The Weeknd", "top_k": 4}),
-        ToolContext(thread_id="t", user_id="u", query="推荐同类型的歌手", agent=_Agent()),
-    ))
+    result = asyncio.run(
+        tool_runtime.execute(
+            ToolCall(name="similar_artists", arguments={"artist": "The Weeknd", "top_k": 4}),
+            ToolContext(thread_id="t", user_id="u", query="推荐同类型的歌手", agent=_Agent()),
+        )
+    )
     assert result.status == ToolStatus.OK
     names = [artist["name"] for artist in result.data["artists"]]
     assert "The Weeknd" not in names
@@ -63,16 +71,18 @@ def test_similar_artist_runtime_returns_traceable_local_artists():
 
 
 def test_similar_artist_runtime_excludes_previously_shown_artists():
-    result = asyncio.run(tool_runtime.execute(
-        ToolCall(name="similar_artists", arguments={"artist": "The Weeknd", "top_k": 4}),
-        ToolContext(
-            thread_id="t",
-            user_id="u",
-            query="再来一点",
-            agent=_Agent(),
-            plan={"_excluded_artists": [{"name": "Frank Ocean", "source": "local_library"}]},
-        ),
-    ))
+    result = asyncio.run(
+        tool_runtime.execute(
+            ToolCall(name="similar_artists", arguments={"artist": "The Weeknd", "top_k": 4}),
+            ToolContext(
+                thread_id="t",
+                user_id="u",
+                query="再来一点",
+                agent=_Agent(),
+                plan={"_excluded_artists": [{"name": "Frank Ocean", "source": "local_library"}]},
+            ),
+        )
+    )
     assert result.status == ToolStatus.OK
     names = [artist["name"] for artist in result.data["artists"]]
     assert "Frank Ocean" not in names

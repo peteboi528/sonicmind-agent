@@ -102,11 +102,7 @@ class LibraryService:
             source_url = f"https://music.163.com/song?id={external_id}"
         if not source_url and external_id:
             source_url = f"{source or 'external'}:{external_id}"
-        stable_key = (
-            f"external:{source}:{external_id}"
-            if external_id else
-            source_url or f"{source}:{title}:{artist}"
-        )
+        stable_key = f"external:{source}:{external_id}" if external_id else source_url or f"{source}:{title}:{artist}"
         return stable_id(stable_key), title, artist, source, external_id, source_url, cover_url, stable_key
 
     def asset_id_for_track(self, track: Any) -> str | None:
@@ -186,7 +182,9 @@ class LibraryService:
                 after = asset.model_dump(mode="json")
                 enriched = before != after
                 return EnrichResponse(
-                    asset=asset, enriched=enriched, mode="online",
+                    asset=asset,
+                    enriched=enriched,
+                    mode="online",
                     note="Metadata enrichment completed." if enriched else "No new metadata was identified.",
                 )
         video_title = self._fetch_video_title(asset.source_url)
@@ -222,9 +220,12 @@ class LibraryService:
         # URL 已在 API 边界经 validate_ingest_url 校验（scheme/SSRF），此处不再裸跑。
         try:
             import subprocess
+
             result = subprocess.run(
                 ["yt-dlp", "--get-title", "--no-download", "--no-warnings", "--no-playlist", url],
-                capture_output=True, text=True, timeout=settings.ingest_title_timeout,
+                capture_output=True,
+                text=True,
+                timeout=settings.ingest_title_timeout,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
@@ -246,11 +247,11 @@ class LibraryService:
             # 拼完整歌名：主名 + alias（副标题/英文名）+ tns（翻译名）
             # 网易云 UI 显示格式：晴天（Sunny Day）
             extras: list[str] = []
-            for alias in (song.get("alias") or []):
+            for alias in song.get("alias") or []:
                 a = alias.strip()
                 if a and a != name:
                     extras.append(a)
-            for t in (song.get("tns") or []):
+            for t in song.get("tns") or []:
                 t = t.strip()
                 if t and t != name and t not in extras:
                     extras.append(t)
@@ -307,7 +308,9 @@ class LibraryService:
             if separator not in title:
                 continue
             name, artist = [part.strip() for part in title.split(separator, 1)]
-            if name and (not asset.title or asset.title.startswith("网易云歌曲") or asset.title == "CineSonic Demo Asset"):
+            if name and (
+                not asset.title or asset.title.startswith("网易云歌曲") or asset.title == "CineSonic Demo Asset"
+            ):
                 asset.title = name
             if artist and not asset.artist:
                 asset.artist = artist
@@ -588,7 +591,7 @@ class LibraryService:
         # 批量让 LLM 判断 genre/mood（每块 8 首：20 首会让 DeepSeek 超时整批失败）
         classifications: list[dict[str, list[str]]] = []
         for start in range(0, len(tracks), 8):
-            chunk = tracks[start:start + 8]
+            chunk = tracks[start : start + 8]
             classifications.extend(
                 self._batch_classify_tracks([(t.get("title", ""), t.get("artist", "")) for t in chunk])
             )
@@ -601,8 +604,11 @@ class LibraryService:
             # 跳过用户已 × 不喜欢的歌（按 netease song id 命中 source_url，回退 title+artist）
             if user_id:
                 stub = SimpleNamespace(
-                    title=t.get("title", ""), artist=t.get("artist", ""),
-                    source="netease", source_id=str(song_id), external_id=str(song_id),
+                    title=t.get("title", ""),
+                    artist=t.get("artist", ""),
+                    source="netease",
+                    source_id=str(song_id),
+                    external_id=str(song_id),
                 )
                 if self.library.is_disliked(user_id, stub):
                     result["disliked_skipped"] += 1
@@ -614,8 +620,10 @@ class LibraryService:
             # classify_candidate 的 netease_with_artist 分支），算了也白算，只白白拖慢
             # 100-200 首的大歌单导入。
             gate_stub = SimpleNamespace(
-                title=t.get("title", ""), artist=t.get("artist", ""),
-                source="netease", source_url=f"https://music.163.com/song?id={song_id}",
+                title=t.get("title", ""),
+                artist=t.get("artist", ""),
+                source="netease",
+                source_url=f"https://music.163.com/song?id={song_id}",
                 external_id=str(song_id),
             )
             if is_structural_reject(gate_stub):
@@ -636,7 +644,10 @@ class LibraryService:
             # 补全风格/情绪：LLM → 关键词规则 → 确定性兜底，三层保证永不为空
             cls = classifications[idx] if idx < len(classifications) else {}
             genre, mood = self._ensure_track_tags(
-                asset.title, asset.artist or "", cls.get("genre") or [], cls.get("mood") or [],
+                asset.title,
+                asset.artist or "",
+                cls.get("genre") or [],
+                cls.get("mood") or [],
                 playlist_genres=playlist_genres,
             )
             asset.genre = genre
@@ -737,6 +748,7 @@ class LibraryService:
         # 专辑详情是纯性能缓存（非用户数据），主动清缓存时一并清掉，确保下次点击重新取最新。
         try:
             from app.sources.netease import clear_album_detail_cache
+
             cleared["album_detail"] = clear_album_detail_cache()
         except Exception:
             logger.debug("clear_album_detail_cache failed", exc_info=True)
@@ -753,7 +765,8 @@ class LibraryService:
         if removed_fallback or removed_orphan:
             logger.info(
                 "候选池清理：删除 fallback 假候选 %d 行、僵尸 local %d 行",
-                removed_fallback, removed_orphan,
+                removed_fallback,
+                removed_orphan,
             )
         return {"fallback": removed_fallback, "orphan_local": removed_orphan}
 

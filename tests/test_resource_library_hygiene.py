@@ -1,4 +1,5 @@
 """候选池卫生：拦截假候选入库、上限裁剪、一次性清理污染。"""
+
 from __future__ import annotations
 
 from app.library import ResourceLibrary
@@ -33,13 +34,15 @@ def test_upsert_external_blocks_structural_junk(tmp_path):
     """Phase 1.2：池入口结构性闸门——教程/合集/串烧/功能音乐不入池。
     upsert_external 是池子唯一入口（9 个调用点共享），结构脏数据在这里统一拦截，零 embedding。"""
     from app.recommend.hygiene import is_structural_reject  # 顺带验证从 hygiene 导出
+
     lib = ResourceLibrary(tmp_path / "lib.sqlite")
     lib.upsert_external(_ext("Real Song", sid="1"))
-    lib.upsert_external(_ext("吉他弹唱教学课程", sid="2"))          # 教学 → HARD_REJECT
-    lib.upsert_external(_ext("深夜DJ串烧混音", sid="3"))           # dj/串烧 → mix 拒
+    lib.upsert_external(_ext("吉他弹唱教学课程", sid="2"))  # 教学 → HARD_REJECT
+    lib.upsert_external(_ext("深夜DJ串烧混音", sid="3"))  # dj/串烧 → mix 拒
     # 功能音乐：艺人栏就是功能描述（轻音乐钢琴曲）→ functional_artist 拒
-    lib.upsert_external(ExternalTrack(
-        external_id="4", title="某曲", artist="轻音乐钢琴曲", source="netease", playback_url="x"))
+    lib.upsert_external(
+        ExternalTrack(external_id="4", title="某曲", artist="轻音乐钢琴曲", source="netease", playback_url="x")
+    )
 
     titles = {t.title for t in lib.list_tracks(100)}
     assert "Real Song" in titles
@@ -83,15 +86,19 @@ def test_prune_caps_pool_and_protects_local_and_exposed(tmp_path):
 
     # 1 个 local（受保护）+ 1 个被曝光过的外部（受保护）+ 20 个普通外部候选。
     lib.upsert_track(ResourceTrack(title="LocalKeep", artist="A", source="local", source_id="L1", verified=True))
-    lib.upsert_track(ResourceTrack(title="Exposed", artist="A", source="netease", source_id="E1", verified=True, exposure_count=3))
+    lib.upsert_track(
+        ResourceTrack(title="Exposed", artist="A", source="netease", source_id="E1", verified=True, exposure_count=3)
+    )
     for i in range(20):
-        lib.upsert_track(ResourceTrack(title=f"Cand{i}", artist="A", source="netease", source_id=f"c{i}", verified=True))
+        lib.upsert_track(
+            ResourceTrack(title=f"Cand{i}", artist="A", source="netease", source_id=f"c{i}", verified=True)
+        )
 
     lib.prune()
     titles = {t.title for t in lib.list_tracks(1000)}
-    assert "LocalKeep" in titles      # local 永不淘汰
-    assert "Exposed" in titles        # 曝光过的不淘汰
-    assert len(titles) <= 12          # 受保护 2 个 + 上限附近
+    assert "LocalKeep" in titles  # local 永不淘汰
+    assert "Exposed" in titles  # 曝光过的不淘汰
+    assert len(titles) <= 12  # 受保护 2 个 + 上限附近
 
 
 def test_verified_only_filter_in_sql(tmp_path):
@@ -117,6 +124,7 @@ def test_embedding_persisted_and_dirty_incremental(tmp_path, monkeypatch):
     monkeypatch.setattr(emb, "encode", lambda texts: [[float(len(t) % 7) / 7.0] * 4 for t in texts] or None)
 
     import sqlite3
+
     conn = sqlite3.connect(str(tmp_path / "lib.sqlite"))
     row = conn.execute("SELECT embedding, embed_dirty FROM tracks WHERE title='Rainy'").fetchone()
     assert row[0] == "" and row[1] == 1  # 新行 dirty、无向量
@@ -127,7 +135,9 @@ def test_embedding_persisted_and_dirty_incremental(tmp_path, monkeypatch):
     assert row[0] != "" and row[1] == 0  # 已算并落库、变 clean
 
     # 改 genre → 应重新标 dirty（embedding 文本变了）。
-    lib.upsert_track(ResourceTrack(title="Rainy", artist="A", source="netease", source_id="1", genre=["R&B"], verified=True))
+    lib.upsert_track(
+        ResourceTrack(title="Rainy", artist="A", source="netease", source_id="1", genre=["R&B"], verified=True)
+    )
     row = conn.execute("SELECT embed_dirty FROM tracks WHERE title='Rainy'").fetchone()
     assert row[0] == 1
     conn.close()

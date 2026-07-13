@@ -2,6 +2,7 @@
 
 回归重点：discuss 不再触发 Pydantic Literal 500（AgentPlan.intent 改 str + validator）。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -86,23 +87,26 @@ class TestAgentPlanIntentCoercion:
 
 
 class TestKeywordFallback:
-    @pytest.mark.parametrize("query,expected", [
-        ("给我推荐几首歌", "recommend"),
-        ("搜索周杰伦", "search"),
-        ("做一个 chill 歌单", "playlist"),
-        ("帮我修一下上一轮歌单", "playlist_repair"),
-        ("我最近口味变了吗", "taste_shift_detector"),
-        ("这个说法是真的吗，帮我核实一下", "music_fact_check"),
-        ("为什么推荐这些歌", "recommend_explainer"),
-        ("分析下我的品味", "taste"),
-        ("导入这个网易云歌单", "import"),
-        ("来个音乐旅程 热身到冲刺", "journey"),
-        ("推荐 The Weeknd 的专辑", "artist_albums"),
-        ("周杰伦有哪几张专辑", "artist_albums"),
-        ("Asen 牛逼吗", "discuss"),
-        ("这张专辑先听哪几首", "album_deep_dive"),
-        ("这张专辑，我最想让你先听《Self Control》和《White Ferrari》。", "album_deep_dive"),
-    ])
+    @pytest.mark.parametrize(
+        "query,expected",
+        [
+            ("给我推荐几首歌", "recommend"),
+            ("搜索周杰伦", "search"),
+            ("做一个 chill 歌单", "playlist"),
+            ("帮我修一下上一轮歌单", "playlist_repair"),
+            ("我最近口味变了吗", "taste_shift_detector"),
+            ("这个说法是真的吗，帮我核实一下", "music_fact_check"),
+            ("为什么推荐这些歌", "recommend_explainer"),
+            ("分析下我的品味", "taste"),
+            ("导入这个网易云歌单", "import"),
+            ("来个音乐旅程 热身到冲刺", "journey"),
+            ("推荐 The Weeknd 的专辑", "artist_albums"),
+            ("周杰伦有哪几张专辑", "artist_albums"),
+            ("Asen 牛逼吗", "discuss"),
+            ("这张专辑先听哪几首", "album_deep_dive"),
+            ("这张专辑，我最想让你先听《Self Control》和《White Ferrari》。", "album_deep_dive"),
+        ],
+    )
     def test_keyword_matches(self, query, expected):
         assert match_intent_by_keywords(query) == expected
 

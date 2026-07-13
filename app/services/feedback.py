@@ -47,12 +47,29 @@ class FeedbackService:
         self._list_assets = list_assets
 
     def record_listen(
-        self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None,
-        title: str = "", artist: str = "", cover_url: str = "", source: str = "", source_id: str = "",
+        self,
+        user_id: str,
+        asset_id: str,
+        duration: int,
+        completed: bool,
+        context: str | None = None,
+        title: str = "",
+        artist: str = "",
+        cover_url: str = "",
+        source: str = "",
+        source_id: str = "",
     ) -> UserMemory:
         memory = self.memory.record_listen(
-            user_id, asset_id, duration, completed, context,
-            title=title, artist=artist, cover_url=cover_url, source=source, source_id=source_id,
+            user_id,
+            asset_id,
+            duration,
+            completed,
+            context,
+            title=title,
+            artist=artist,
+            cover_url=cover_url,
+            source=source,
+            source_id=source_id,
         )
         # Thompson 在线学习反馈环：听完 → 正反馈(α+1)，秒跳 → 负反馈(β+0.5)。
         asset = self.store.read_model("assets", asset_id, Asset)
@@ -119,13 +136,19 @@ class FeedbackService:
         # 负反馈也推给 Thompson：明确不喜欢 → ts_beta 大幅上调，后续探索几乎不再选中。
         self.library.update_ts_feedback(
             SimpleNamespace(
-                title=request.title, artist=request.artist,
-                source=request.source, external_id=request.source_id, asset_id=request.source_id,
+                title=request.title,
+                artist=request.artist,
+                source=request.source,
+                external_id=request.source_id,
+                asset_id=request.source_id,
             ),
-            positive=False, weight=3.0,
+            positive=False,
+            weight=3.0,
         )
         memory = self.memory.get_memory(request.user_id)
-        key = " - ".join(part for part in [request.title, request.artist] if part) or request.source_id or request.source
+        key = (
+            " - ".join(part for part in [request.title, request.artist] if part) or request.source_id or request.source
+        )
         if key and key not in memory.dislikes:
             memory.dislikes.append(key)
             memory.updated_at = utc_now_iso()

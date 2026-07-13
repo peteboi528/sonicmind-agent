@@ -6,9 +6,11 @@
 3) validate_evidence_consistency 剔除别家曲目、报告证据冲突；
 4) build_dossier 在歧义/证据冲突时抑制完整合成，返回消歧提示而非硬编。
 """
+
 from __future__ import annotations
 
 # ── canonicalize_entities 消歧状态 ────────────────────────────────────────────
+
 
 def test_canonicalize_flags_same_title_different_artist_as_ambiguous(monkeypatch):
     """裸标题存在多个精确同名、艺人各异 → ambiguous（不再硬编一个完整答案）。"""
@@ -19,8 +21,22 @@ def test_canonicalize_flags_same_title_different_artist_as_ambiguous(monkeypatch
     class FakeMB:
         def search_release_group(self, title, artist="", limit=3):
             return [
-                {"mbid": "m1", "title": "Blonde", "artist": "Frank Ocean", "score": 90, "date": "2016", "type": "Album"},
-                {"mbid": "m2", "title": "Blonde", "artist": "West Norwood Cassette Library", "score": 40, "date": "2014", "type": "Album"},
+                {
+                    "mbid": "m1",
+                    "title": "Blonde",
+                    "artist": "Frank Ocean",
+                    "score": 90,
+                    "date": "2016",
+                    "type": "Album",
+                },
+                {
+                    "mbid": "m2",
+                    "title": "Blonde",
+                    "artist": "West Norwood Cassette Library",
+                    "score": 40,
+                    "date": "2014",
+                    "type": "Album",
+                },
             ]
 
         def search_artist(self, name, limit=3):
@@ -44,8 +60,22 @@ def test_canonicalize_resolved_when_artist_matches_candidate(monkeypatch):
     class FakeMB:
         def search_release_group(self, title, artist="", limit=3):
             return [
-                {"mbid": "m1", "title": "Blonde", "artist": "Frank Ocean", "score": 95, "date": "2016", "type": "Album"},
-                {"mbid": "m2", "title": "Blonde on Blonde", "artist": "Bob Dylan", "score": 50, "date": "1966", "type": "Album"},
+                {
+                    "mbid": "m1",
+                    "title": "Blonde",
+                    "artist": "Frank Ocean",
+                    "score": 95,
+                    "date": "2016",
+                    "type": "Album",
+                },
+                {
+                    "mbid": "m2",
+                    "title": "Blonde on Blonde",
+                    "artist": "Bob Dylan",
+                    "score": 50,
+                    "date": "1966",
+                    "type": "Album",
+                },
             ]
 
         def search_artist(self, name, limit=3):
@@ -68,7 +98,9 @@ def test_canonicalize_resolved_single_exact_title_backfills_artist(monkeypatch):
 
     class FakeMB:
         def search_release_group(self, title, artist="", limit=3):
-            return [{"mbid": "k1", "title": "Kid A", "artist": "Radiohead", "score": 95, "date": "2000", "type": "Album"}]
+            return [
+                {"mbid": "k1", "title": "Kid A", "artist": "Radiohead", "score": 95, "date": "2000", "type": "Album"}
+            ]
 
         def search_artist(self, name, limit=3):
             return []
@@ -95,6 +127,7 @@ def test_canonicalize_unchanged_when_musicbrainz_disabled(monkeypatch):
 
 # ── citation_entity_score 类型感知打分 ────────────────────────────────────────
 
+
 def test_citation_entity_score_is_kind_aware():
     from app.knowledge import citation_entity_score
     from app.models import MusicCitation, MusicEntity
@@ -103,17 +136,26 @@ def test_citation_entity_score_is_kind_aware():
     # 结构化平台源按构造归属，默认高分
     assert citation_entity_score(MusicCitation(source="netease", kind="platform"), entity) >= 0.8
     # 散文乐评：艺人 + 标题命中 → 1.0
-    assert citation_entity_score(
-        MusicCitation(source="pitchfork", kind="review", title="Blonde", excerpt="Frank Ocean returns"), entity
-    ) == 1.0
+    assert (
+        citation_entity_score(
+            MusicCitation(source="pitchfork", kind="review", title="Blonde", excerpt="Frank Ocean returns"), entity
+        )
+        == 1.0
+    )
     # 只命中标题不提艺人 → 弱分（同名异作品高风险）
-    assert citation_entity_score(
-        MusicCitation(source="web", kind="review", title="Blonde", excerpt="by Bob Dylan"), entity
-    ) <= 0.25
+    assert (
+        citation_entity_score(
+            MusicCitation(source="web", kind="review", title="Blonde", excerpt="by Bob Dylan"), entity
+        )
+        <= 0.25
+    )
     # 完全不沾边 → 0
-    assert citation_entity_score(
-        MusicCitation(source="web", kind="review", title="OK Computer", excerpt="Radiohead"), entity
-    ) == 0.0
+    assert (
+        citation_entity_score(
+            MusicCitation(source="web", kind="review", title="OK Computer", excerpt="Radiohead"), entity
+        )
+        == 0.0
+    )
 
 
 def test_artist_citation_score_avoids_partial_name_false_positive():
@@ -133,13 +175,16 @@ def test_artist_citation_score_avoids_partial_name_false_positive():
 
 # ── validate_evidence_consistency ─────────────────────────────────────────────
 
+
 def test_structured_metadata_citation_kept_without_artist_mention():
     """平台/元数据类来源 excerpt 不重述艺人也保留——它们是按实体检索来的。"""
     from app.knowledge import validate_evidence_consistency
     from app.models import MusicCitation, MusicEntity
 
     entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
-    netease = MusicCitation(source="netease", title="Blonde", kind="platform", excerpt="网易云专辑元数据", confidence=0.85)
+    netease = MusicCitation(
+        source="netease", title="Blonde", kind="platform", excerpt="网易云专辑元数据", confidence=0.85
+    )
     report = validate_evidence_consistency(entity, [], [netease], [])
     assert len(report.kept_citations) == 1
     assert report.ok is True
@@ -164,16 +209,29 @@ def test_album_key_tracks_filtered_by_artist():
 
 # ── build_dossier 集成：歧义/证据冲突抑制完整合成 ────────────────────────────
 
+
 def test_off_target_review_dropped_for_known_artist():
     """已知艺人时，同名异作品乐评被剔除，不进入最终 dossier 引用。"""
     from app.knowledge import build_dossier
     from app.models import MusicCitation, MusicEntity
 
     entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
-    on_target = MusicCitation(source="pitchfork", title="Blonde - Frank Ocean", url="https://pitchfork.com/a",
-                              kind="review", excerpt="Frank Ocean's Blonde is a 2016 album", confidence=0.9)
-    off_target = MusicCitation(source="web", title="Blonde on Blonde review", url="https://x.com/b",
-                               kind="review", excerpt="Bob Dylan's Blonde on Blonde is a 1966 double album", confidence=0.5)
+    on_target = MusicCitation(
+        source="pitchfork",
+        title="Blonde - Frank Ocean",
+        url="https://pitchfork.com/a",
+        kind="review",
+        excerpt="Frank Ocean's Blonde is a 2016 album",
+        confidence=0.9,
+    )
+    off_target = MusicCitation(
+        source="web",
+        title="Blonde on Blonde review",
+        url="https://x.com/b",
+        kind="review",
+        excerpt="Bob Dylan's Blonde on Blonde is a 1966 double album",
+        confidence=0.5,
+    )
     dossier = build_dossier(None, "Blonde", "album_deep_dive", [entity], [], [], [on_target, off_target], [], [])
     titles = " ".join(c.title for c in dossier.citations)
     assert "Frank Ocean" in titles
@@ -187,10 +245,16 @@ def test_all_off_target_reviews_block_confident_synthesis():
     from app.models import MusicCitation, MusicEntity
 
     entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
-    off1 = MusicCitation(source="web", title="Blonde on Blonde", kind="review",
-                         excerpt="Bob Dylan's Blonde on Blonde landmark", confidence=0.5)
-    off2 = MusicCitation(source="web", title="Another Blonde", kind="review",
-                         excerpt="Some other artist's Blonde record", confidence=0.5)
+    off1 = MusicCitation(
+        source="web",
+        title="Blonde on Blonde",
+        kind="review",
+        excerpt="Bob Dylan's Blonde on Blonde landmark",
+        confidence=0.5,
+    )
+    off2 = MusicCitation(
+        source="web", title="Another Blonde", kind="review", excerpt="Some other artist's Blonde record", confidence=0.5
+    )
     dossier = build_dossier(None, "Blonde", "album_deep_dive", [entity], [], [], [off1, off2], [], [])
     assert dossier.partial is True
     assert "Bob Dylan" not in dossier.summary
@@ -203,12 +267,24 @@ def test_ambiguous_entity_returns_disambiguation_prompt():
     from app.models import MusicCitation, MusicEntity
 
     entity = MusicEntity(
-        type="album", name="Blonde", artist="", ambiguity="ambiguous",
-        candidates=[{"title": "Blonde", "artist": "Frank Ocean"},
-                    {"title": "Blonde", "artist": "West Norwood Cassette Library"}],
+        type="album",
+        name="Blonde",
+        artist="",
+        ambiguity="ambiguous",
+        candidates=[
+            {"title": "Blonde", "artist": "Frank Ocean"},
+            {"title": "Blonde", "artist": "West Norwood Cassette Library"},
+        ],
     )
-    reviews = [MusicCitation(source="web", title="Blonde review", kind="review",
-                             excerpt="Another Blonde by someone else entirely", confidence=0.5)]
+    reviews = [
+        MusicCitation(
+            source="web",
+            title="Blonde review",
+            kind="review",
+            excerpt="Another Blonde by someone else entirely",
+            confidence=0.5,
+        )
+    ]
     dossier = build_dossier(None, "讲讲 Blonde", "album_deep_dive", [entity], [], [], reviews, [], [])
     text = dossier_answer(dossier)
     assert dossier.partial is True
@@ -222,8 +298,13 @@ def test_resolved_entity_still_synthesizes_normally():
     from app.models import MusicCitation, MusicEntity
 
     entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean", ambiguity="resolved")
-    review = MusicCitation(source="pitchfork", title="Blonde - Frank Ocean", kind="review",
-                           excerpt="Frank Ocean's Blonde is acclaimed", confidence=0.9)
+    review = MusicCitation(
+        source="pitchfork",
+        title="Blonde - Frank Ocean",
+        kind="review",
+        excerpt="Frank Ocean's Blonde is acclaimed",
+        confidence=0.9,
+    )
     dossier = build_dossier(None, "Blonde", "album_deep_dive", [entity], [], [], [review], [], [])
     # agent=None → 无 LLM → 机械兜底，但仍是「正常」路径（非歧义/非证据冲突），
     # 有命中艺人的乐评 → dossier 不应被判 partial。
@@ -236,6 +317,7 @@ def test_resolved_entity_still_synthesizes_normally():
 
 
 # ── 黄金评测集可加载 ───────────────────────────────────────────────────────────
+
 
 def test_golden_cases_json_loads():
     import json
@@ -253,6 +335,7 @@ def test_golden_cases_json_loads():
 
 # ── Phase 1：artist 职业生涯时间线（务实版，与专辑解读结构区分）─────────────────
 
+
 def test_artist_deep_dive_produces_career_timeline():
     """artist_deep_dive 产出 career_phases，回答以「职业生涯脉络+代表作」组织。"""
     from app.knowledge import build_dossier, dossier_answer
@@ -261,18 +344,24 @@ def test_artist_deep_dive_produces_career_timeline():
     entity = MusicEntity(type="artist", name="Radiohead", artist="Radiohead", ambiguity="resolved")
     albums = [{"name": "Pablo Honey"}, {"name": "OK Computer"}, {"name": "Kid A"}, {"name": "In Rainbows"}]
     dossier = build_dossier(
-        None, "Radiohead 的音乐路线", "artist_deep_dive", [entity],
+        None,
+        "Radiohead 的音乐路线",
+        "artist_deep_dive",
+        [entity],
         [{"summary": "British rock band formed in 1985, broke through in 1997, electronic turn in 2000."}],
-        [], [], [], [TrackRef(title="Karma Police", artist="Radiohead")],
+        [],
+        [],
+        [],
+        [TrackRef(title="Karma Police", artist="Radiohead")],
         albums=albums,
     )
     phase_names = [p.phase_name for p in dossier.career_phases]
-    assert "时间跨度" in phase_names          # bio 有 ≥2 年份 → 给跨度
+    assert "时间跨度" in phase_names  # bio 有 ≥2 年份 → 给跨度
     assert "代表作品" in phase_names
     text = dossier_answer(dossier)
     assert "职业生涯脉络" in text
-    assert "OK Computer" in text              # 代表专辑出现
-    assert "1985" in text or "1997" in text   # 真实年份锚点
+    assert "OK Computer" in text  # 代表专辑出现
+    assert "1985" in text or "1997" in text  # 真实年份锚点
 
 
 def test_artist_timeline_honest_without_year_data():
@@ -282,8 +371,15 @@ def test_artist_timeline_honest_without_year_data():
 
     entity = MusicEntity(type="artist", name="SZA", artist="SZA")
     dossier = build_dossier(
-        None, "SZA 的音乐路线", "artist_deep_dive", [entity],
-        [{"summary": "contemporary R&B singer"}], [], [], [], [],
+        None,
+        "SZA 的音乐路线",
+        "artist_deep_dive",
+        [entity],
+        [{"summary": "contemporary R&B singer"}],
+        [],
+        [],
+        [],
+        [],
         albums=[{"name": "Ctrl"}, {"name": "SOS"}],
     )
     phase_names = [p.phase_name for p in dossier.career_phases]
@@ -299,8 +395,14 @@ def test_album_deep_dive_stays_tracklist_shaped():
 
     entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
     dossier = build_dossier(
-        None, "Blonde", "album_deep_dive", [entity],
-        [{"summary": "alternative R&B album"}], [], [], [],
+        None,
+        "Blonde",
+        "album_deep_dive",
+        [entity],
+        [{"summary": "alternative R&B album"}],
+        [],
+        [],
+        [],
         [TrackRef(title="Nikes", artist="Frank Ocean")],
     )
     assert dossier.career_phases == []
@@ -354,4 +456,3 @@ def test_clarification_lead_phrases_do_not_garble_entity():
         canon = canonicalize_entities([ent])[0]
         assert canon.name.lower() == "blonde", f"{q!r} 解析出 name={canon.name!r}"
         assert "frank ocean" in canon.artist.lower(), f"{q!r} 解析出 artist={canon.artist!r}"
-

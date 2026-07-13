@@ -75,11 +75,7 @@ class ProfileEvidence:
         # 会被判成「零证据」、置信度卡在地板（见 builder.compute_confidence）。
         # 与 ratings 存在不同粒度的轻度重合计（ratings 会喂进 taste_profile），
         # 可接受：下游 evidence_score/evidence_strength 都有自然封顶防膨胀。
-        taste = (
-            len(self.taste.top_genres)
-            + len(self.taste.top_artists)
-            + len(self.taste.top_moods)
-        )
+        taste = len(self.taste.top_genres) + len(self.taste.top_artists) + len(self.taste.top_moods)
         return (
             len(self.scored_preferences)
             + len(self.ratings)
@@ -166,9 +162,9 @@ def collect_profile_evidence(memory: UserMemory) -> ProfileEvidence:
         delta = (rating.score - 5.0) / 5.0  # [-1, 1]
         if delta <= 0:
             continue
-        for g in (rating.genre or []):
+        for g in rating.genre or []:
             _bump(ev.genre_weights, g, delta)
-        for m in (rating.mood or []):
+        for m in rating.mood or []:
             _bump(ev.mood_weights, m, delta)
         if rating.artist and rating.score >= 7:
             _bump(ev.artist_weights, rating.artist.strip().lower(), delta)

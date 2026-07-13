@@ -4,6 +4,7 @@
 阶段改写成自包含的正向 search_query（融合多轮历史 + 否定转正向），检索层优先用它，
 而非把否定原样发给搜索 API 再事后删空。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,10 +36,13 @@ def test_negative_constraint_rewritten_to_positive_query():
         '"use_web":true,"search_query":"深夜 英文歌 欧美 安静","language":"en",'
         '"target_count":null,"reasoning":"延续深夜场景转英文"}'
     )
-    plan = asyncio.run(plan_with_llm_async(
-        _Agent(stub), "不要中文歌曲",
-        history_text="user: 推荐几首适合深夜的歌\nassistant: 推荐了7首深夜歌曲",
-    ))
+    plan = asyncio.run(
+        plan_with_llm_async(
+            _Agent(stub),
+            "不要中文歌曲",
+            history_text="user: 推荐几首适合深夜的歌\nassistant: 推荐了7首深夜歌曲",
+        )
+    )
     assert plan is not None
     rp = plan.retrieval_plan
     # 关键：否定被转成正向检索词，且保留了上一轮"深夜"上下文
@@ -73,8 +77,12 @@ def _track(title, artist=""):
 
 
 def test_language_filter_keeps_only_target_language():
-    tracks = [_track("Blinding Lights", "The Weeknd"), _track("晴天", "周杰伦"),
-              _track("Shape of You", "Ed Sheeran"), _track("七里香", "周杰伦")]
+    tracks = [
+        _track("Blinding Lights", "The Weeknd"),
+        _track("晴天", "周杰伦"),
+        _track("Shape of You", "Ed Sheeran"),
+        _track("七里香", "周杰伦"),
+    ]
     kept = _apply_language_filter(tracks, "en", target=2)
     titles = {t.title for t in kept}
     assert "Blinding Lights" in titles and "Shape of You" in titles
@@ -117,6 +125,7 @@ def test_mock_llm_also_rewrites_negation():
         system=QUERY_PLAN_SYSTEM,
     )
     import json
+
     data = json.loads(raw)
     assert data["language"] == "en"
     assert "英文" in data["search_query"] or "欧美" in data["search_query"]

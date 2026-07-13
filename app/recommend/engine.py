@@ -60,7 +60,7 @@ def score_track(
         remaining += weights.energy
     if tempo is not None:
         tempo_center = sum(taste.preferred_tempo_range) / 2
-        tempo_fit = math.exp(-((tempo - tempo_center) ** 2) / (2 * 30 ** 2))
+        tempo_fit = math.exp(-((tempo - tempo_center) ** 2) / (2 * 30**2))
         terms += weights.tempo * tempo_fit
         remaining += weights.tempo
     base = terms / max(remaining, 1e-6)
@@ -115,6 +115,7 @@ def compute_taste_profile(
     # 听完 → +1（奖励），秒跳 → -1（惩罚），中途 → 按比例。多次听指数衰减累加。
     # 这样品味随使用时间真正流动——库里没听过的歌贡献 1，听完的贡献 2，秒跳的贡献 0。
     from app.memory import compute_behavior_scores  # 延迟导入避免循环依赖
+
     asset_durations = {a.asset_id: a.duration_seconds for a in assets if a.duration_seconds}
     behavior = compute_behavior_scores(listening_history, asset_durations)
 
@@ -260,9 +261,6 @@ class RecommendEngine:
         recent_ids: set[str],
         behavior_scores: dict[str, float] | None = None,
     ) -> list[tuple[Asset | ExternalTrack, float]]:
-        scored = [
-            (t, score_track(t, taste, time_moods, recent_ids, behavior_scores))
-            for t in candidates
-        ]
+        scored = [(t, score_track(t, taste, time_moods, recent_ids, behavior_scores)) for t in candidates]
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored

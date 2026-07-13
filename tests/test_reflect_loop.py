@@ -11,8 +11,12 @@ from app.storage import JsonStore
 
 def _track(title: str, eid: str) -> ExternalTrack:
     return ExternalTrack(
-        external_id=eid, title=title, artist="x", source="netease",
-        genre=["流行"], mood=["欢快"],
+        external_id=eid,
+        title=title,
+        artist="x",
+        source="netease",
+        genre=["流行"],
+        mood=["欢快"],
     )
 
 
@@ -29,9 +33,14 @@ def test_async_reflect_marks_refine_and_excluded_tracks(tmp_path, monkeypatch):
     drop, keep = _track("Douyin Hit", "drop"), _track("Real Song", "keep")
     plan = AgentPlan(intent="recommend", target_count=2)
     state = {
-        "user_id": "u", "query": "推荐两首，不要抖音热歌", "plan": plan,
+        "user_id": "u",
+        "query": "推荐两首，不要抖音热歌",
+        "plan": plan,
         "results": [{"type": "web_music_search", "tracks": [drop, keep]}],
-        "trace": [], "events": [], "context": {}, "_refine_count": 0,
+        "trace": [],
+        "events": [],
+        "context": {},
+        "_refine_count": 0,
     }
 
     out = asyncio.run(reflect_async(agent, state))
@@ -52,10 +61,14 @@ def test_async_reflect_stops_after_limit(tmp_path, monkeypatch):
 
     monkeypatch.setattr(agent.llm, "agenerate", generate)
     state = {
-        "user_id": "u", "query": "推荐两首，不要抖音热歌",
+        "user_id": "u",
+        "query": "推荐两首，不要抖音热歌",
         "plan": AgentPlan(intent="recommend", target_count=2),
         "results": [{"type": "web_music_search", "tracks": [_track("Douyin Hit", "drop")]}],
-        "trace": [], "events": [], "context": {}, "_refine_count": 1,
+        "trace": [],
+        "events": [],
+        "context": {},
+        "_refine_count": 1,
     }
 
     out = asyncio.run(reflect_async(agent, state))
@@ -72,10 +85,15 @@ def _knowledge_state(*, resolve_status: str, dossier: dict, entities=None, refin
         retrieval_plan=RetrievalPlan(entities=entities or [], search_query="The Weeknd 的音乐路线"),
     )
     return {
-        "user_id": "u", "query": "The Weeknd 的音乐路线", "plan": plan,
+        "user_id": "u",
+        "query": "The Weeknd 的音乐路线",
+        "plan": plan,
         "results": [{"type": "music_dossier", "dossier": dossier}],
         "tool_outcomes": [{"tool": "resolve_music_entity", "status": resolve_status, "attempt": refine_count}],
-        "trace": [], "events": [], "context": {}, "_refine_count": refine_count,
+        "trace": [],
+        "events": [],
+        "context": {},
+        "_refine_count": refine_count,
     }
 
 

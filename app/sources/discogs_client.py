@@ -4,6 +4,7 @@
 Discogs 的独特价值是细粒度 styles(比 genres 更准)和权威发行年份/版本。
 token 缺失或调用失败时返回空，知识链路降级。
 """
+
 from __future__ import annotations
 
 import json
@@ -28,7 +29,9 @@ def _best_discogs_match(results: list[dict], title: str, artist: str) -> dict:
     """从 Discogs 候选里挑最匹配的：title 形如 "Artist - Album"。
     优先同时含查询标题与 artist 的候选；其次只含标题的；都没有才回落 results[0]。"""
     nt, na = _norm(title), _norm(artist)
-    both = [r for r in results if nt and nt in _norm(r.get("title", "")) and (not na or na in _norm(r.get("title", "")))]
+    both = [
+        r for r in results if nt and nt in _norm(r.get("title", "")) and (not na or na in _norm(r.get("title", "")))
+    ]
     if both:
         return both[0]
     title_only = [r for r in results if nt and nt in _norm(r.get("title", ""))]
@@ -108,7 +111,7 @@ class DiscogsClient:
         if not resolved or not resolved.get("id"):
             return ""
         rid = resolved["id"]
-        rtype = (resolved.get("type") or "master")
+        rtype = resolved.get("type") or "master"
         # master 走 /masters/{id}；release 走 /releases/{id}。两者都有 notes 字段。
         data = self._get(f"{rtype}s/{rid}") if rtype in {"master", "release"} else {}
         notes = str(data.get("notes") or "").strip()

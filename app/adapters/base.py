@@ -1,4 +1,5 @@
 """适配器共享工具：AgentAnswer / StreamEvent → BotResponse 转换。"""
+
 from __future__ import annotations
 
 from app.adapters.protocol import BotResponse, SongCard

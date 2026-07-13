@@ -54,20 +54,28 @@ def _seed_heavy_user(agent: Any, user_id: str) -> None:
     memory = UserMemory(
         user_id=user_id,
         structured_preferences=[
-            MemoryEntry(text=text, frequency=freq, source="live_heavy_eval")
-            for text, freq in prefs
+            MemoryEntry(text=text, frequency=freq, source="live_heavy_eval") for text, freq in prefs
         ],
         preferences=[text for text, _ in prefs],
         exclusion_rules=["抖音神曲", "type beat", "AI翻唱", "纯白噪音", "古装剧OST", "低质翻唱", "喊麦"],
         taste_profile=TasteProfile(
             top_genres=[
-                ("R&B", 12.0), ("电子", 10.5), ("爵士", 9.5), ("后摇", 8.0),
-                ("city pop", 8.0), ("dream pop", 7.5), ("国风电子", 6.5),
+                ("R&B", 12.0),
+                ("电子", 10.5),
+                ("爵士", 9.5),
+                ("后摇", 8.0),
+                ("city pop", 8.0),
+                ("dream pop", 7.5),
+                ("国风电子", 6.5),
             ],
             top_moods=[("深夜", 10.0), ("专注", 9.5), ("空间感", 9.0), ("冷感", 7.0)],
             top_artists=[
-                ("Frank Ocean", 9.0), ("SZA", 8.5), ("Four Tet", 8.0),
-                ("Nujabes", 8.0), ("toe", 7.5), ("Cocteau Twins", 7.0),
+                ("Frank Ocean", 9.0),
+                ("SZA", 8.5),
+                ("Four Tet", 8.0),
+                ("Nujabes", 8.0),
+                ("toe", 7.5),
+                ("Cocteau Twins", 7.0),
             ],
         ),
         episodic_memory=[
@@ -79,10 +87,19 @@ def _seed_heavy_user(agent: Any, user_id: str) -> None:
 
 
 LIVE_CASES = [
-    ("night_rnb", "给我 6 首适合深夜做品牌 moodboard 的 R&B neo-soul，类似 SZA Frank Ocean Daniel Caesar，空间感强，不要抖音神曲。"),
-    ("idm_design", "给我 6 首适合做界面动效设计时听的 ambient techno IDM glitch electronica，参考 Four Tet Jon Hopkins Aphex Twin。"),
+    (
+        "night_rnb",
+        "给我 6 首适合深夜做品牌 moodboard 的 R&B neo-soul，类似 SZA Frank Ocean Daniel Caesar，空间感强，不要抖音神曲。",
+    ),
+    (
+        "idm_design",
+        "给我 6 首适合做界面动效设计时听的 ambient techno IDM glitch electronica，参考 Four Tet Jon Hopkins Aphex Twin。",
+    ),
     ("citypop_bossa", "推荐 6 首通勤听的 city pop bossa nova，类似 Lamp 小野リサ Tomoko Aran，轻盈但不俗。"),
-    ("post_math_rock", "推荐 6 首适合搭视觉灵感板的 post-rock math rock，参考 toe Explosions in the Sky American Football。"),
+    (
+        "post_math_rock",
+        "推荐 6 首适合搭视觉灵感板的 post-rock math rock，参考 toe Explosions in the Sky American Football。",
+    ),
     ("dream_shoegaze", "来 6 首女性主唱或柔和人声的 dream pop shoegaze，参考 Cocteau Twins Slowdive Alvvays。"),
     ("jazzhop_lofi", "给我 6 首编码专注用的 jazz hip-hop lo-fi beats，参考 Nujabes J Dilla Uyama Hiroto。"),
     ("guofeng_electronic", "推荐 6 首国风电子 future bass 融合，适合做东方视觉概念，不要古装剧 OST 感。"),
@@ -122,17 +139,23 @@ def run_eval(top_k: int) -> dict[str, Any]:
         tracks = [item.asset for item in (recommendation.tracks if recommendation else [])]
         checked: list[dict[str, Any]] = []
         for track in tracks:
-            detail = fetch_netease_song_detail(getattr(track, "external_id", "")) if getattr(track, "source", "") == "netease" else None
+            detail = (
+                fetch_netease_song_detail(getattr(track, "external_id", ""))
+                if getattr(track, "source", "") == "netease"
+                else None
+            )
             hits = _recommendation_anchor_hits(track, anchors)
-            checked.append({
-                "title": getattr(track, "title", ""),
-                "artist": getattr(track, "artist", ""),
-                "source": getattr(track, "source", ""),
-                "source_id": getattr(track, "external_id", ""),
-                "detail_found": bool(detail),
-                "metadata_match": _metadata_match(track, detail),
-                "relevance_hits": hits,
-            })
+            checked.append(
+                {
+                    "title": getattr(track, "title", ""),
+                    "artist": getattr(track, "artist", ""),
+                    "source": getattr(track, "source", ""),
+                    "source_id": getattr(track, "external_id", ""),
+                    "detail_found": bool(detail),
+                    "metadata_match": _metadata_match(track, detail),
+                    "relevance_hits": hits,
+                }
+            )
         returned = len(checked)
         relevant = sum(1 for item in checked if item["relevance_hits"])
         metadata_match = sum(1 for item in checked if item["metadata_match"])
@@ -141,19 +164,21 @@ def run_eval(top_k: int) -> dict[str, Any]:
             and metadata_match == returned
             and (relevant >= min(4, top_k) or (returned < top_k and returned == relevant))
         )
-        results.append({
-            "id": case_id,
-            "query": query,
-            "crashed": crashed,
-            "error": error,
-            "latency_s": round(time.time() - started, 2),
-            "returned": returned,
-            "metadata_match": metadata_match,
-            "relevant": relevant,
-            "pass": pass_case,
-            "trace_tail": (recommendation.agent_trace[-8:] if recommendation else []),
-            "tracks": checked,
-        })
+        results.append(
+            {
+                "id": case_id,
+                "query": query,
+                "crashed": crashed,
+                "error": error,
+                "latency_s": round(time.time() - started, 2),
+                "returned": returned,
+                "metadata_match": metadata_match,
+                "relevant": relevant,
+                "pass": pass_case,
+                "trace_tail": (recommendation.agent_trace[-8:] if recommendation else []),
+                "tracks": checked,
+            }
+        )
 
     aggregate = {
         "cases": len(results),

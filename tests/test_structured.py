@@ -1,4 +1,5 @@
 """structured.py JSON 提取器测试：覆盖嵌套、字符串内括号、多片段、fenced block。"""
+
 from __future__ import annotations
 
 from app.llm.structured import extract_json_dict, extract_json_list
@@ -54,12 +55,12 @@ class TestExtractJsonDict:
 
     def test_array_input_returns_none(self):
         # extract_json_dict 只认对象
-        assert extract_json_dict('[1, 2, 3]') is None
+        assert extract_json_dict("[1, 2, 3]") is None
 
 
 class TestExtractJsonList:
     def test_plain_array(self):
-        assert extract_json_list('[1, 2, 3]') == [1, 2, 3]
+        assert extract_json_list("[1, 2, 3]") == [1, 2, 3]
 
     def test_array_of_objects(self):
         text = '[{"title": "A"}, {"title": "B"}]'
@@ -74,7 +75,7 @@ class TestExtractJsonList:
         assert extract_json_list(text) == [{"id": 1}, {"id": 2}]
 
     def test_array_with_prose_around(self):
-        text = '结果是 [10, 20] 这些。'
+        text = "结果是 [10, 20] 这些。"
         assert extract_json_list(text) == [10, 20]
 
     def test_no_array_returns_none(self):

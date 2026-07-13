@@ -32,18 +32,18 @@ class AssetSimilarity:
             union = target_tags | other_tags
             jaccard = len(shared) / len(union)
             if jaccard > 0:
-                scored.append(SimilarAssetResult(
-                    asset_id=other.asset_id,
-                    title=other.title,
-                    score=round(jaccard, 4),
-                    shared_tags=sorted(shared),
-                ))
+                scored.append(
+                    SimilarAssetResult(
+                        asset_id=other.asset_id,
+                        title=other.title,
+                        score=round(jaccard, 4),
+                        shared_tags=sorted(shared),
+                    )
+                )
         scored.sort(key=lambda r: r.score, reverse=True)
         return scored[:top_k]
 
-    def find_similar_segments(
-        self, asset_id: str, segment_id: str, top_k: int = 5
-    ) -> list[SimilarSegmentResult]:
+    def find_similar_segments(self, asset_id: str, segment_id: str, top_k: int = 5) -> list[SimilarSegmentResult]:
         segments = self.store.read_models("segments", asset_id, Segment)
         if not segments:
             raise ValueError(f"No segments for asset_id: {asset_id}")
@@ -73,9 +73,11 @@ class AssetSimilarity:
             seen.add(ev.segment_id)
             seg = seg_map.get(ev.segment_id)
             if seg:
-                results.append(SimilarSegmentResult(
-                    segment=seg,
-                    score=ev.similarity,
-                    matching_modalities=[ev.modality.value],
-                ))
+                results.append(
+                    SimilarSegmentResult(
+                        segment=seg,
+                        score=ev.similarity,
+                        matching_modalities=[ev.modality.value],
+                    )
+                )
         return results[:top_k]

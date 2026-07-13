@@ -54,9 +54,7 @@ class UserProfileService:
             return ProfileContextForLLM()
         # 用户否定的画像判断（纠错回流）：原文标题给 LLM，让规划/推荐反转或回避这些信号。
         # 此前这里算了一个 rejected 集合却丢弃——现在真正 surface 出去。
-        rejected_signals = [
-            ins.title for ins in profile.insights if ins.status == "rejected"
-        ][:6]
+        rejected_signals = [ins.title for ins in profile.insights if ins.status == "rejected"][:6]
         active_scene = ""
         for scene in profile.scenes:
             if scene.confidence >= 0.4:
@@ -76,7 +74,10 @@ class UserProfileService:
 
     # ── 写 ────────────────────────────────────────────────────────────────
     def update_insight_feedback(
-        self, user_id: str, insight_id: str, status: str,
+        self,
+        user_id: str,
+        insight_id: str,
+        status: str,
     ) -> UserProfileResponse:
         """记录用户对某条 insight 的反馈，并返回刷新后的画像。
 
@@ -132,6 +133,7 @@ class UserProfileService:
             # taste_profile 缺失时尝试回填；失败不阻断，builder 用空 TasteProfile 也能跑。
             try:
                 from app.api.main import agent  # 延迟导入避免循环
+
                 library = [a for a in agent.list_assets() if a.status == "analyzed"]
                 memory = self.memory.refresh_taste_profile(user_id, library)
             except Exception:

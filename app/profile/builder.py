@@ -43,32 +43,32 @@ _SOUND_DIMENSIONS: list[tuple[str, str]] = [
 
 # genre → {维度: 贡献}。贡献是该 genre 对维度的「典型强度」。
 _GENRE_TO_SOUND: dict[str, dict[str, float]] = {
-    "R&B":  {"groove": 0.9, "melody": 0.7, "vocal_intimacy": 0.8, "softness": 0.5},
-    "说唱":  {"groove": 0.95, "energy": 0.6, "vocal_intimacy": 0.5, "experimental": 0.3},
-    "电子":  {"electronic": 0.95, "groove": 0.7, "energy": 0.7, "experimental": 0.4},
-    "流行":  {"melody": 0.9, "vocal_intimacy": 0.5, "energy": 0.5},
-    "摇滚":  {"energy": 0.85, "experimental": 0.4, "melody": 0.5},
-    "金属":  {"energy": 0.95, "experimental": 0.6},
-    "民谣":  {"acoustic": 0.95, "melody": 0.8, "softness": 0.8, "vocal_intimacy": 0.7},
-    "古典":  {"acoustic": 0.9, "melody": 0.85, "softness": 0.7, "experimental": 0.3},
-    "爵士":  {"acoustic": 0.7, "groove": 0.6, "experimental": 0.6, "softness": 0.5},
-    "国风":  {"melody": 0.8, "acoustic": 0.6, "experimental": 0.3},
+    "R&B": {"groove": 0.9, "melody": 0.7, "vocal_intimacy": 0.8, "softness": 0.5},
+    "说唱": {"groove": 0.95, "energy": 0.6, "vocal_intimacy": 0.5, "experimental": 0.3},
+    "电子": {"electronic": 0.95, "groove": 0.7, "energy": 0.7, "experimental": 0.4},
+    "流行": {"melody": 0.9, "vocal_intimacy": 0.5, "energy": 0.5},
+    "摇滚": {"energy": 0.85, "experimental": 0.4, "melody": 0.5},
+    "金属": {"energy": 0.95, "experimental": 0.6},
+    "民谣": {"acoustic": 0.95, "melody": 0.8, "softness": 0.8, "vocal_intimacy": 0.7},
+    "古典": {"acoustic": 0.9, "melody": 0.85, "softness": 0.7, "experimental": 0.3},
+    "爵士": {"acoustic": 0.7, "groove": 0.6, "experimental": 0.6, "softness": 0.5},
+    "国风": {"melody": 0.8, "acoustic": 0.6, "experimental": 0.3},
 }
 
 # mood → {维度: 贡献}。
 _MOOD_TO_SOUND: dict[str, dict[str, float]] = {
-    "律动":  {"groove": 0.9, "energy": 0.5},
-    "激昂":  {"energy": 0.95},
-    "欢快":  {"energy": 0.6, "melody": 0.5},
-    "放松":  {"softness": 0.9, "energy": 0.0},
-    "治愈":  {"softness": 0.8, "vocal_intimacy": 0.6, "melody": 0.5},
-    "宁静":  {"softness": 0.95},
-    "梦幻":  {"electronic": 0.6, "experimental": 0.6, "softness": 0.5},
-    "暗黑":  {"experimental": 0.7, "electronic": 0.4},
-    "性感":  {"vocal_intimacy": 0.8, "groove": 0.5, "softness": 0.4},
-    "浪漫":  {"vocal_intimacy": 0.7, "melody": 0.6, "softness": 0.5},
-    "伤感":  {"vocal_intimacy": 0.6, "softness": 0.6, "melody": 0.5},
-    "励志":  {"energy": 0.7, "melody": 0.5},
+    "律动": {"groove": 0.9, "energy": 0.5},
+    "激昂": {"energy": 0.95},
+    "欢快": {"energy": 0.6, "melody": 0.5},
+    "放松": {"softness": 0.9, "energy": 0.0},
+    "治愈": {"softness": 0.8, "vocal_intimacy": 0.6, "melody": 0.5},
+    "宁静": {"softness": 0.95},
+    "梦幻": {"electronic": 0.6, "experimental": 0.6, "softness": 0.5},
+    "暗黑": {"experimental": 0.7, "electronic": 0.4},
+    "性感": {"vocal_intimacy": 0.8, "groove": 0.5, "softness": 0.4},
+    "浪漫": {"vocal_intimacy": 0.7, "melody": 0.6, "softness": 0.5},
+    "伤感": {"vocal_intimacy": 0.6, "softness": 0.6, "melody": 0.5},
+    "励志": {"energy": 0.7, "melody": 0.5},
 }
 
 # mood → 情绪地图坐标 valence(明亮↔阴郁) × arousal(平静↔激昂)，计划 §5.2。
@@ -212,7 +212,8 @@ def _build_sound_fingerprint(ev: ProfileEvidence) -> SoundFingerprint:
     top_labels = "、".join(d.label for d in top if d.value > 0)
     summary = (
         f"你的声音指纹偏向 {top_labels}：更喜欢有结构、有质感的声音，而非单一维度的极端。"
-        if top_labels else "声音指纹还在形成中。"
+        if top_labels
+        else "声音指纹还在形成中。"
     )
     return SoundFingerprint(dimensions=dims, explanation=summary)
 
@@ -225,11 +226,15 @@ def _build_mood_landscape(ev: ProfileEvidence) -> MoodLandscape:
         if not coord:
             continue
         valence, arousal = coord
-        points.append(MoodPoint(
-            mood=mood, valence=valence, arousal=arousal,
-            weight=round(weight, 2),
-            evidence_count=int(ev.mood_weights.get(mood, 0) > 0),
-        ))
+        points.append(
+            MoodPoint(
+                mood=mood,
+                valence=valence,
+                arousal=arousal,
+                weight=round(weight, 2),
+                evidence_count=int(ev.mood_weights.get(mood, 0) > 0),
+            )
+        )
     if not points:
         return MoodLandscape(summary="还没有足够的情绪信号来描绘你的情绪地图。")
 
@@ -257,20 +262,25 @@ def _build_scenes(ev: ProfileEvidence) -> list[ScenePreference]:
         if hits <= 0:
             continue
         conf = compute_confidence(
-            evidence_count=hits, explicit=hits >= 2,
-            recency=0.6, consistency=0.6, contradiction=0.0,
+            evidence_count=hits,
+            explicit=hits >= 2,
+            recency=0.6,
+            consistency=0.6,
+            contradiction=0.0,
         )
         avoid = list(ev.exclusions)[:4]
-        scenes.append(ScenePreference(
-            scene=scene,
-            label=SCENE_LABELS.get(scene, scene),
-            preferred_genres=top_genres,
-            preferred_moods=top_moods,
-            avoid_features=avoid,
-            recommendation_strategy=_SCENE_STRATEGY.get(scene, "按你整体品味挑选合适曲目。"),
-            confidence=conf,
-            examples=[],
-        ))
+        scenes.append(
+            ScenePreference(
+                scene=scene,
+                label=SCENE_LABELS.get(scene, scene),
+                preferred_genres=top_genres,
+                preferred_moods=top_moods,
+                avoid_features=avoid,
+                recommendation_strategy=_SCENE_STRATEGY.get(scene, "按你整体品味挑选合适曲目。"),
+                confidence=conf,
+                examples=[],
+            )
+        )
     return scenes
 
 
@@ -295,23 +305,34 @@ def _build_artists(ev: ProfileEvidence) -> list[ArtistRelation]:
             relation = "occasional"
             reasons = ["弱信号，出现次数较少。"]
         conf = compute_confidence(
-            evidence_count=int(weight * 4), explicit=False,
-            recency=0.5, consistency=weight, contradiction=0.0,
+            evidence_count=int(weight * 4),
+            explicit=False,
+            recency=0.5,
+            consistency=weight,
+            contradiction=0.0,
         )
-        relations.append(ArtistRelation(
-            artist=artist, relation_type=relation, reasons=reasons,
-            evidence_tracks=[], confidence=conf,
-        ))
+        relations.append(
+            ArtistRelation(
+                artist=artist,
+                relation_type=relation,
+                reasons=reasons,
+                evidence_tracks=[],
+                confidence=conf,
+            )
+        )
     # 明确不喜欢但未出现在权重表里的艺人，单列为 avoid。
     seen = {r.artist for r in relations}
     for dislike in ev.dislikes:
         key = dislike.strip().lower()
         if key and key not in seen:
-            relations.append(ArtistRelation(
-                artist=dislike, relation_type="avoid",
-                reasons=["你明确表达过不想要这类。"],
-                confidence=0.7,
-            ))
+            relations.append(
+                ArtistRelation(
+                    artist=dislike,
+                    relation_type="avoid",
+                    reasons=["你明确表达过不想要这类。"],
+                    confidence=0.7,
+                )
+            )
             seen.add(key)
     return relations[:12]
 
@@ -339,15 +360,21 @@ def _build_discovery_style(ev: ProfileEvidence) -> DiscoveryStyle:
         label = "保守型"
         explanation = "你更偏好熟悉的艺人和风格，新东西需要更贴近你的口味才会买账。"
     return DiscoveryStyle(
-        label=label, novelty_tolerance=novelty, mainstream_preference=mainstream,
-        niche_openness=niche, language_openness=round(lang_balance, 2),
+        label=label,
+        novelty_tolerance=novelty,
+        mainstream_preference=mainstream,
+        niche_openness=niche,
+        language_openness=round(lang_balance, 2),
         explanation=explanation,
     )
 
 
 def _build_summary(
-    ev: ProfileEvidence, sound: SoundFingerprint, mood: MoodLandscape,
-    discovery: DiscoveryStyle, overall_conf: float,
+    ev: ProfileEvidence,
+    sound: SoundFingerprint,
+    mood: MoodLandscape,
+    discovery: DiscoveryStyle,
+    overall_conf: float,
 ) -> TasteSummary:
     top_genres = [g for g, _ in sorted(ev.genre_weights.items(), key=lambda x: x[1], reverse=True)][:3]
     top_sound = [d.label for d in sorted(sound.dimensions, key=lambda d: d.value, reverse=True)[:2] if d.value > 0]
@@ -380,8 +407,11 @@ def _build_summary(
     if ev.exclusions:
         hint += f" 同时严格避开你排除的：{('、'.join(ev.exclusions[:3]))}。"
     return TasteSummary(
-        headline=headline, core_preferences=core, recommendation_hint=hint,
-        chips=chips, confidence=overall_conf,
+        headline=headline,
+        core_preferences=core,
+        recommendation_hint=hint,
+        chips=chips,
+        confidence=overall_conf,
     )
 
 

@@ -161,13 +161,13 @@ class AudioVisualAgent:
         # 注入临时 store（测试/隔离运行）时，资源库必须落在该 store 自己的目录内，实现真正
         # 按测试隔离。曾用 .parent 导致所有 tmp store 共享同一个 /tmp/resource_library.sqlite，
         # 跨测试互相污染（_dense_library_fallback 召回别家入库的「夜曲(钢琴曲)」）。
-        resource_path = Path(self.store.root) / "resource_library.sqlite" if store is not None else settings.resource_library_path
+        resource_path = (
+            Path(self.store.root) / "resource_library.sqlite" if store is not None else settings.resource_library_path
+        )
         self.library = ResourceLibrary(resource_path)
         self.llm: LLMProvider = build_llm()
         self._llm_default_ref: LLMProvider = self.llm
-        self.llm_fast: LLMProvider = (
-            self.llm if settings.llm_fast_model == settings.llm_model else build_llm("fast")
-        )
+        self.llm_fast: LLMProvider = self.llm if settings.llm_fast_model == settings.llm_model else build_llm("fast")
         self.llm_strong: LLMProvider = (
             self.llm if settings.llm_strong_model == settings.llm_model else build_llm("strong")
         )
@@ -299,6 +299,7 @@ class AudioVisualAgent:
         self.library.sync_assets(self.list_assets())
         try:
             from app.graph.builder import build_agent_graph
+
             self.graph = build_agent_graph(self)
         except Exception:
             logger.exception("LangGraph wrapper unavailable")
@@ -371,7 +372,11 @@ class AudioVisualAgent:
         playlist_genres: list[str] | None = None,
     ) -> tuple[list[str], list[str]]:
         return self.library_svc._ensure_track_tags(
-            title, artist, genre, mood, playlist_genres=playlist_genres,
+            title,
+            artist,
+            genre,
+            mood,
+            playlist_genres=playlist_genres,
         )
 
     def import_netease_playlist(
@@ -382,7 +387,10 @@ class AudioVisualAgent:
         limit: int = 200,
     ) -> dict[str, Any]:
         return self.library_svc.import_netease_playlist(
-            playlist_ref, cookie=cookie, user_id=user_id, limit=limit,
+            playlist_ref,
+            cookie=cookie,
+            user_id=user_id,
+            limit=limit,
         )
 
     def list_assets(self) -> list[Asset]:
@@ -411,6 +419,7 @@ class AudioVisualAgent:
         try:
             from app.netease_auth import load_cookie
             from app.sources import netease as netease_source
+
             info = load_cookie(user_id) or {}
             netease_source.set_default_cookie(info.get("cookie") or "")
         except Exception:
@@ -453,7 +462,11 @@ class AudioVisualAgent:
         # local_ratio：默认 0.3（略压本地、让位线上发现）；每日 tab「仅线上」开关 → 0.0。
         local_ratio = 0.0 if no_local else settings.daily_local_ratio
         return self.recommend_for_query(
-            user_id, goal, top_k=count, prefer_playlist=True, local_ratio=local_ratio,
+            user_id,
+            goal,
+            top_k=count,
+            prefer_playlist=True,
+            local_ratio=local_ratio,
         )
 
     def find_similar_assets(self, asset_id: str, top_k: int = 5) -> list[SimilarAssetResult]:
@@ -464,7 +477,9 @@ class AudioVisualAgent:
 
     # --- 搜索 ---
 
-    def search(self, user_id: str, query: str, include_external: bool = True, top_k: int = 20, offset: int = 0) -> SearchResponse:
+    def search(
+        self, user_id: str, query: str, include_external: bool = True, top_k: int = 20, offset: int = 0
+    ) -> SearchResponse:
         self._apply_netease_cookie(user_id)
         return self._discover_service().search(
             user_id,
@@ -574,16 +589,18 @@ class AudioVisualAgent:
             for i, item in enumerate(raw[:limit]):
                 if not isinstance(item, dict):
                     continue
-                tracks.append(ExternalTrack(
-                    external_id=f"llm-search-{i:03d}",
-                    title=item.get("title", ""),
-                    artist=item.get("artist", ""),
-                    genre=[item.get("genre", "")] if item.get("genre") else [],
-                    mood=[item.get("mood", "")] if item.get("mood") else [],
-                    # source="llm" 是"未核实"标记：这些曲目由 LLM 生成、未经真实回查，
-                    # Answer Guard 不会把它们放进面向用户答案的白名单（除非显式标注未核实）。
-                    source="llm",
-                ))
+                tracks.append(
+                    ExternalTrack(
+                        external_id=f"llm-search-{i:03d}",
+                        title=item.get("title", ""),
+                        artist=item.get("artist", ""),
+                        genre=[item.get("genre", "")] if item.get("genre") else [],
+                        mood=[item.get("mood", "")] if item.get("mood") else [],
+                        # source="llm" 是"未核实"标记：这些曲目由 LLM 生成、未经真实回查，
+                        # Answer Guard 不会把它们放进面向用户答案的白名单（除非显式标注未核实）。
+                        source="llm",
+                    )
+                )
             return tracks
         except Exception:
             logger.debug("LLM search failed; returning no unverified candidates", exc_info=True)
@@ -591,11 +608,30 @@ class AudioVisualAgent:
 
     # --- 用户反馈/状态（薄委托到 FeedbackService）---
 
-    def record_listen(self, user_id: str, asset_id: str, duration: int, completed: bool, context: str | None = None,
-                      title: str = "", artist: str = "", cover_url: str = "", source: str = "", source_id: str = "") -> UserMemory:
+    def record_listen(
+        self,
+        user_id: str,
+        asset_id: str,
+        duration: int,
+        completed: bool,
+        context: str | None = None,
+        title: str = "",
+        artist: str = "",
+        cover_url: str = "",
+        source: str = "",
+        source_id: str = "",
+    ) -> UserMemory:
         return self.feedback.record_listen(
-            user_id, asset_id, duration, completed, context,
-            title=title, artist=artist, cover_url=cover_url, source=source, source_id=source_id,
+            user_id,
+            asset_id,
+            duration,
+            completed,
+            context,
+            title=title,
+            artist=artist,
+            cover_url=cover_url,
+            source=source,
+            source_id=source_id,
         )
 
     def rate_asset(self, user_id: str, asset_id: str, score: float) -> UserMemory:
@@ -618,8 +654,13 @@ class AudioVisualAgent:
         if self.graph is not None:
             try:
                 return await self.graph.ainvoke(
-                    user_id=user_id, asset_id=asset_id, query=message, history=history, top_k=5,
-                    thread_id=thread_id, run_id=run_id,
+                    user_id=user_id,
+                    asset_id=asset_id,
+                    query=message,
+                    history=history,
+                    top_k=5,
+                    thread_id=thread_id,
+                    run_id=run_id,
                 )
             except Exception:
                 logger.exception("LangGraph invoke failed")
@@ -670,6 +711,7 @@ class AudioVisualAgent:
                 yield event
             return
         from app.models import StreamEvent
+
         answer = _graph_unavailable_answer()
         yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))
 
@@ -717,6 +759,7 @@ class AudioVisualAgent:
 
     def get_external_url(self, track: Asset | ExternalTrack) -> str | None:
         import urllib.parse
+
         if isinstance(track, Asset) and track.source_url:
             return track.source_url
         if isinstance(track, ExternalTrack):
@@ -803,10 +846,17 @@ class AudioVisualAgent:
         self._playlist_service().save_playlist(user_id, playlist)
 
     def create_playlist_from_assets(
-        self, user_id: str, name: str, asset_ids: list[str], description: str = "",
+        self,
+        user_id: str,
+        name: str,
+        asset_ids: list[str],
+        description: str = "",
     ) -> Playlist:
         return self._playlist_service().create_playlist_from_assets(
-            user_id, name, asset_ids, description=description,
+            user_id,
+            name,
+            asset_ids,
+            description=description,
         )
 
     def list_playlists(self, user_id: str) -> list[Playlist]:
@@ -903,11 +953,16 @@ class AudioVisualAgent:
         return self._catalog_service().recommend_artist_albums(user_id, artist, limit)
 
     async def recommend_artist_albums_async(
-        self, user_id: str, artist: str, limit: int = 12,
+        self,
+        user_id: str,
+        artist: str,
+        limit: int = 12,
     ) -> list[dict[str, Any]]:
         return await self._catalog_service().recommend_artist_albums_async(user_id, artist, limit)
 
-    def generate_taste_experiment(self, user_id: str, prompt: str, total: int = 12, online_only: bool = False) -> TasteExperiment:
+    def generate_taste_experiment(
+        self, user_id: str, prompt: str, total: int = 12, online_only: bool = False
+    ) -> TasteExperiment:
         """生成 safe/stretch/bold 三档品味实验。online_only=True 时只拉库外新歌（探索页）。"""
         return self._taste_experiment_service().generate_taste_experiment(
             user_id,
@@ -934,7 +989,10 @@ class AudioVisualAgent:
         online_only: bool = False,
     ) -> list[tuple[Any, dict[str, float], str, float]]:
         return self._taste_experiment_service().collect_taste_candidates(
-            user_id, seeds, total, online_only=online_only,
+            user_id,
+            seeds,
+            total,
+            online_only=online_only,
         )
 
     def regenerate_taste_experiment_bucket(self, user_id: str, experiment_id: str, bucket: str) -> TasteExperiment:
@@ -1169,26 +1227,33 @@ class AudioVisualAgent:
 
         if verified:
             verified = rec_service.prioritize_fresh_candidates(
-                verified, memory.recommendation_history, top_k=top_k,
+                verified,
+                memory.recommendation_history,
+                top_k=top_k,
             )
             rerank_query = ctx.search_goal or goal
             # 先对完整候选池排序，再做来源平衡。若这里只取 top_k，标签更完整的
             # local 会在平衡前就把 online 全挤掉，后续再设配额也无候选可选。
             ranked_pool = self._rerank_tracks(
-                user_id, rerank_query, _dedupe_tracks(verified), top_k=len(verified),
+                user_id,
+                rerank_query,
+                _dedupe_tracks(verified),
+                top_k=len(verified),
             )
             ranked = self._balance_recommendation_sources(ranked_pool, top_k, local_ratio=ctx.local_ratio)
             self.library.record_exposure([t for t, _ in ranked])
             self.library.decay_exposure_ts([t for t, _ in ranked])
             tracks: list[RecommendedTrack] = []
             for track, breakdown in ranked:
-                tracks.append(RecommendedTrack(
-                    asset=track,
-                    score=breakdown.score,
-                    reason=breakdown.reason or _online_candidate_reason(track, ctx.memory_query),
-                    category="discovery",
-                    components=breakdown.components,
-                ))
+                tracks.append(
+                    RecommendedTrack(
+                        asset=track,
+                        score=breakdown.score,
+                        reason=breakdown.reason or _online_candidate_reason(track, ctx.memory_query),
+                        category="discovery",
+                        components=breakdown.components,
+                    )
+                )
             self._record_recommendation_history(user_id, [track for track, _ in ranked])
             local_count = sum(_is_local_recommendation_track(track) for track, _ in ranked)
             online_count = len(ranked) - local_count
@@ -1196,8 +1261,7 @@ class AudioVisualAgent:
                 user_id=user_id,
                 tracks=tracks,
                 reason_summary=(
-                    f"采用 {local_count} 首曲库歌曲 + {online_count} 首真实线上候选，"
-                    "经三锚精排、来源平衡与多样性重排。"
+                    f"采用 {local_count} 首曲库歌曲 + {online_count} 首真实线上候选，经三锚精排、来源平衡与多样性重排。"
                 ),
                 agent_trace=[
                     *trace_lines,
@@ -1223,7 +1287,10 @@ class AudioVisualAgent:
         limit: int = 120,
     ) -> list[Asset]:
         return self._recommendation_service().local_recommendation_candidates(
-            user_id, query, memory, limit=limit,
+            user_id,
+            query,
+            memory,
+            limit=limit,
         )
 
     @staticmethod
@@ -1452,5 +1519,7 @@ class AudioVisualAgent:
 
     def _require_segments(self, asset_id: str) -> list[Segment]:
         return self.rag._require_segments(asset_id)
+
+
 # 向后兼容别名
 CineSonicAgent = AudioVisualAgent

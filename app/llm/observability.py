@@ -30,16 +30,24 @@ def merge_runtime_metrics(
             continue
         merged["llm_calls"] = int(merged.get("llm_calls", 0)) + int(update.get("llm_calls", 0) or 0)
         merged["prompt_tokens"] = int(merged.get("prompt_tokens", 0)) + int(update.get("prompt_tokens", 0) or 0)
-        merged["completion_tokens"] = int(merged.get("completion_tokens", 0)) + int(update.get("completion_tokens", 0) or 0)
+        merged["completion_tokens"] = int(merged.get("completion_tokens", 0)) + int(
+            update.get("completion_tokens", 0) or 0
+        )
         merged["total_tokens"] = int(merged.get("total_tokens", 0)) + int(update.get("total_tokens", 0) or 0)
-        merged["latency_ms"] = round(float(merged.get("latency_ms", 0.0)) + float(update.get("latency_ms", 0.0) or 0.0), 2)
+        merged["latency_ms"] = round(
+            float(merged.get("latency_ms", 0.0)) + float(update.get("latency_ms", 0.0) or 0.0), 2
+        )
         merged["estimated_cost_usd"] = round(
             float(merged.get("estimated_cost_usd", 0.0)) + float(update.get("estimated_cost_usd", 0.0) or 0.0),
             8,
         )
-        merged["default_llm_calls"] = int(merged.get("default_llm_calls", 0)) + int(update.get("default_llm_calls", 0) or 0)
+        merged["default_llm_calls"] = int(merged.get("default_llm_calls", 0)) + int(
+            update.get("default_llm_calls", 0) or 0
+        )
         merged["fast_llm_calls"] = int(merged.get("fast_llm_calls", 0)) + int(update.get("fast_llm_calls", 0) or 0)
-        merged["strong_llm_calls"] = int(merged.get("strong_llm_calls", 0)) + int(update.get("strong_llm_calls", 0) or 0)
+        merged["strong_llm_calls"] = int(merged.get("strong_llm_calls", 0)) + int(
+            update.get("strong_llm_calls", 0) or 0
+        )
     return merged
 
 

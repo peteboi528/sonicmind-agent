@@ -21,10 +21,10 @@ def _utc_now_iso() -> str:
 class TasteSummary(BaseModel):
     """画像首页摘要：用自然语言总结当前品味，而非罗列标签。"""
 
-    headline: str = ""                                  # 当前品味一句话
+    headline: str = ""  # 当前品味一句话
     core_preferences: list[str] = Field(default_factory=list)  # 三个核心偏好
-    recommendation_hint: str = ""                       # 一个系统判断（推荐时应注意什么）
-    chips: list[str] = Field(default_factory=list)      # 首页小组件用的极简标签（轻快律动·治愈流行…）
+    recommendation_hint: str = ""  # 一个系统判断（推荐时应注意什么）
+    chips: list[str] = Field(default_factory=list)  # 首页小组件用的极简标签（轻快律动·治愈流行…）
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     updated_at: str = Field(default_factory=_utc_now_iso)
 
@@ -35,7 +35,7 @@ class SoundDimension(BaseModel):
 
     key: str
     label: str
-    value: float = Field(default=0.0, ge=0.0, le=1.0)   # 0-1，前端按需 ×100 展示
+    value: float = Field(default=0.0, ge=0.0, le=1.0)  # 0-1，前端按需 ×100 展示
     explanation: str = ""
 
 

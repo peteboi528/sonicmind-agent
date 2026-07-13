@@ -15,6 +15,7 @@ builder / tests / evals / handlers 以及子模块内部的 lazy seam（planning
 均 ``from app.graph.nodes import select_llm`` 等，使外部对 ``nodes.<name>`` 的 monkeypatch 生效）
 都依赖此门面集中可注入。新增业务逻辑请落到对应子模块，而非此处。
 """
+
 from __future__ import annotations
 
 from app.answer import guard_answer  # noqa: F401  # re-export: finalize lazy 从本模块读取

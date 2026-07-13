@@ -61,8 +61,23 @@ CANONICAL_PREFERENCE_TERMS = [
 ]
 
 POSITIVE_PREFERENCE_CUES = (
-    "喜欢", "偏好", "更想要", "更喜欢", "爱听", "超爱", "很爱", "也爱", "爱",
-    "迷上", "迷", "长期", "平时", "就吃", "吃", "换点", "来点",
+    "喜欢",
+    "偏好",
+    "更想要",
+    "更喜欢",
+    "爱听",
+    "超爱",
+    "很爱",
+    "也爱",
+    "爱",
+    "迷上",
+    "迷",
+    "长期",
+    "平时",
+    "就吃",
+    "吃",
+    "换点",
+    "来点",
 )
 
 # 负面偏好提取：匹配"不要/别推/讨厌/不喜欢"等 + 后续的风格/类型词
@@ -184,8 +199,20 @@ class MemoryManager:
     # 不应升级成长期排除规则。"这轮/这次/上一批/今天" = 临时；"但/不过/尤其" 前缀的
     # 否定 = 句内修饰（如"有铜管但鼓不要太炸"里的"太炸"）。
     _EPHEMERAL_CONSTRAINT_MARKERS = (
-        "这轮", "这次", "本轮", "本次", "这批", "上一批", "上一首", "这一批",
-        "今天", "今晚", "现在", "暂时", "临时", "刚才那批",
+        "这轮",
+        "这次",
+        "本轮",
+        "本次",
+        "这批",
+        "上一批",
+        "上一首",
+        "这一批",
+        "今天",
+        "今晚",
+        "现在",
+        "暂时",
+        "临时",
+        "刚才那批",
     )
 
     @staticmethod
@@ -238,7 +265,9 @@ class MemoryManager:
     def _normalize_correction_target(raw: str) -> str:
         text = (raw or "").strip().strip("，,。.的了吧").strip()
         text = re.sub(r"^(?:把|我)?(?:之前所有关于|之前关于|所有关于|关于)", "", text).strip()
-        text = re.sub(r"^(?:刚才那个|刚才那些|刚才的|刚才|之前那个|之前那些|之前|那个|这个|那条|这条)", "", text).strip()
+        text = re.sub(
+            r"^(?:刚才那个|刚才那些|刚才的|刚才|之前那个|之前那些|之前|那个|这个|那条|这条)", "", text
+        ).strip()
         text = re.sub(r"^(?:从没说过的|从未说过的|没说过的)", "", text).strip()
         text = re.sub(r"(?:那条|这条)?(?:偏好)?(?:也)?$", "", text).strip()
         text = text.strip("，,。.的了吧").strip()
@@ -324,14 +353,16 @@ class MemoryManager:
                 existing.score = score
                 existing.timestamp = utc_now_iso()
             else:
-                memory.ratings.append(RatingEntry(
-                    asset_id=asset.asset_id,
-                    score=score,
-                    title=asset.title,
-                    artist=asset.artist or "",
-                    genre=asset.genre,
-                    mood=asset.mood,
-                ))
+                memory.ratings.append(
+                    RatingEntry(
+                        asset_id=asset.asset_id,
+                        score=score,
+                        title=asset.title,
+                        artist=asset.artist or "",
+                        genre=asset.genre,
+                        mood=asset.mood,
+                    )
+                )
             memory.updated_at = utc_now_iso()
             self.store.write_model("memory", user_id, memory)
             return memory
@@ -410,20 +441,22 @@ class MemoryManager:
                 track_genres = _dedupe_preserve([str(tag) for tag in getattr(track, "genre", []) or []])[:3]
                 track_moods = _dedupe_preserve([str(tag) for tag in getattr(track, "mood", []) or []])[:3]
                 genres = _dedupe_preserve([*album_tags, *track_genres])[:4]
-                seeds.append(Asset(
-                    asset_id=f"saved-album::{album.album_id}::{idx}",
-                    source_url=f"saved-album://{album.album_id}/{idx}",
-                    title=(getattr(track, "title", "") or album.name or f"Saved Album {album.album_id}").strip(),
-                    duration_seconds=180,
-                    status=AssetStatus.ANALYZED,
-                    genre=genres,
-                    mood=track_moods,
-                    artist=((getattr(track, "artist", "") or album.artist or "").strip() or None),
-                    album=album.name,
-                    cover_url=album.image or None,
-                    source="external",
-                    external_id=f"{album.album_id}:{idx}",
-                ))
+                seeds.append(
+                    Asset(
+                        asset_id=f"saved-album::{album.album_id}::{idx}",
+                        source_url=f"saved-album://{album.album_id}/{idx}",
+                        title=(getattr(track, "title", "") or album.name or f"Saved Album {album.album_id}").strip(),
+                        duration_seconds=180,
+                        status=AssetStatus.ANALYZED,
+                        genre=genres,
+                        mood=track_moods,
+                        artist=((getattr(track, "artist", "") or album.artist or "").strip() or None),
+                        album=album.name,
+                        cover_url=album.image or None,
+                        source="external",
+                        external_id=f"{album.album_id}:{idx}",
+                    )
+                )
         return seeds
 
     def weighted_query(self, memory: UserMemory, *, include_artists: bool = True) -> str:
@@ -462,7 +495,10 @@ class MemoryManager:
         return " ".join(deduped)
 
     async def auto_learn_from_turn_async(
-        self, user_id: str, query: str, results: list[dict[str, Any]],
+        self,
+        user_id: str,
+        query: str,
+        results: list[dict[str, Any]],
     ) -> bool:
         """Conservatively learn from an agent turn without requiring an explicit memory tool call."""
         explicit = extract_preference(query)
@@ -551,11 +587,7 @@ class MemoryManager:
     # ── P1-G 记忆升级：LLM 抽取 / 语义召回 / 巩固 ─────────────────────
     def _llm_ready(self) -> bool:
         """仅当注入了真实 LLM（非 mock、非空）时做 LLM 抽取/巩固。"""
-        return (
-            settings.enable_semantic_memory
-            and self.llm is not None
-            and not settings.mock_mode
-        )
+        return settings.enable_semantic_memory and self.llm is not None and not settings.mock_mode
 
     async def _llm_extract_preferences_async(self, query: str) -> list[str]:
         """正则未命中时用 LLM 兜底抽结构化偏好；失败/不可用返回 []。"""
@@ -597,9 +629,7 @@ class MemoryManager:
                     vector = encoded[0]
             except Exception:
                 logger.debug("情景记忆 embed 失败，降级为无向量", exc_info=True)
-        memory.episodic_memory.append(
-            EpisodicMemory(text=text, kind="episodic", embedding=vector, source=source)
-        )
+        memory.episodic_memory.append(EpisodicMemory(text=text, kind="episodic", embedding=vector, source=source))
         cap = max(10, settings.episodic_memory_cap)
         if len(memory.episodic_memory) > cap:
             memory.episodic_memory = memory.episodic_memory[-cap:]
@@ -628,9 +658,7 @@ class MemoryManager:
                 query_vec = None
         if query_vec is not None:
             scored = [
-                (ep.text, embeddings.cosine_normalized(query_vec, ep.embedding))
-                for ep in episodes
-                if ep.embedding
+                (ep.text, embeddings.cosine_normalized(query_vec, ep.embedding)) for ep in episodes if ep.embedding
             ]
             scored = [s for s in scored if s[1] > 0.35]  # 弱相关过滤，避免噪声召回
             scored.sort(key=lambda x: x[1], reverse=True)
@@ -653,9 +681,7 @@ class MemoryManager:
         if not scored:
             return ""
         signals = "\n".join(f"- {entry.text}（权重 {weight:.1f}）" for entry, weight in scored[:10])
-        prompt = CONSOLIDATION_USER.format(
-            existing=memory.consolidated_profile or "（无）", signals=signals
-        )
+        prompt = CONSOLIDATION_USER.format(existing=memory.consolidated_profile or "（无）", signals=signals)
         try:
             raw = await self.llm.agenerate(prompt, system=CONSOLIDATION_SYSTEM, temperature=0.3)
             data = extract_json_dict(raw)
@@ -754,9 +780,7 @@ class MemoryManager:
                 entry.frequency += 1
                 entry.last_used = utc_now_iso()
                 return True
-        memory.structured_preferences.append(
-            MemoryEntry(text=text, frequency=1, source=source)
-        )
+        memory.structured_preferences.append(MemoryEntry(text=text, frequency=1, source=source))
         return True
 
     @staticmethod
@@ -770,9 +794,7 @@ class MemoryManager:
         if not key:
             return False
         before_struct = len(memory.structured_preferences)
-        memory.structured_preferences = [
-            e for e in memory.structured_preferences if key not in e.text.lower()
-        ]
+        memory.structured_preferences = [e for e in memory.structured_preferences if key not in e.text.lower()]
         before_legacy = len(memory.preferences)
         memory.preferences = [p for p in memory.preferences if key not in p.lower()]
         return (len(memory.structured_preferences) < before_struct) or (len(memory.preferences) < before_legacy)
@@ -803,9 +825,7 @@ class MemoryManager:
     def _migrate_preferences(self, memory: UserMemory) -> None:
         if memory.preferences and not memory.structured_preferences:
             for pref in memory.preferences:
-                memory.structured_preferences.append(
-                    MemoryEntry(text=pref, frequency=1, source="migrated")
-                )
+                memory.structured_preferences.append(MemoryEntry(text=pref, frequency=1, source="migrated"))
 
 
 def score_entries(entries: list[MemoryEntry]) -> list[tuple[MemoryEntry, float]]:
@@ -967,7 +987,8 @@ def _extract_known_music_preference(text: str) -> str | None:
         return None
     first_cue = min(cue_positions)
     neg_positions = [
-        pos for pos in (
+        pos
+        for pos in (
             text.find("不喜欢"),
             text.find("不要"),
             text.find("别再"),

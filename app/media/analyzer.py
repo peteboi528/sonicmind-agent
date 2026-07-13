@@ -10,6 +10,7 @@
 与下游检索无需改动。asset.genre/mood/tempo/energy 的真实来源是 tag_rules 规则映射与各数据源
 元数据（enrich）；未识别时 pipeline 标「未分类」、tempo/energy 保持 None，绝不随机伪造。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -105,15 +106,17 @@ class DemoAnalyzer:
         for i in range(num_segments):
             start = i * chunk
             end = min((i + 1) * chunk, duration)
-            segments.append(Segment(
-                segment_id=f"{asset.asset_id}-{i + 1:02d}",
-                asset_id=asset.asset_id,
-                start_seconds=start,
-                end_seconds=end,
-                transcript=TRANSCRIPT_POOL[transcript_choices[i]],
-                keyframe_path=None,
-                visual_tags=VISUAL_TAG_POOL[visual_choices[i]],
-                audio_tags=AUDIO_TAG_POOL[audio_choices[i]],
-                scene_summary=SUMMARY_POOL[summary_choices[i]],
-            ))
+            segments.append(
+                Segment(
+                    segment_id=f"{asset.asset_id}-{i + 1:02d}",
+                    asset_id=asset.asset_id,
+                    start_seconds=start,
+                    end_seconds=end,
+                    transcript=TRANSCRIPT_POOL[transcript_choices[i]],
+                    keyframe_path=None,
+                    visual_tags=VISUAL_TAG_POOL[visual_choices[i]],
+                    audio_tags=AUDIO_TAG_POOL[audio_choices[i]],
+                    scene_summary=SUMMARY_POOL[summary_choices[i]],
+                )
+            )
         return segments

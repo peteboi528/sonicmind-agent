@@ -106,13 +106,16 @@ async def _run_case(agent: AudioVisualAgent, case: GoldenCase) -> EvalCaseResult
 
 
 async def _plan_snapshot(agent: AudioVisualAgent, case: GoldenCase) -> dict[str, Any]:
-    state = load_context(agent, {
-        "user_id": f"eval:{case.id}",
-        "asset_id": None,
-        "query": case.query,
-        "history": [],
-        "top_k": 5,
-    })
+    state = load_context(
+        agent,
+        {
+            "user_id": f"eval:{case.id}",
+            "asset_id": None,
+            "query": case.query,
+            "history": [],
+            "top_k": 5,
+        },
+    )
     state["context"]["dialogue_state"] = case.dialogue_state
     state["context"]["memory_query"] = case.memory_query
     output = await plan_intent_async(agent, state)
@@ -138,16 +141,28 @@ async def _multiturn_plan_snapshot(agent: AudioVisualAgent, case: GoldenCase) ->
     if not case.prior_query:
         raise ValueError(f"Multiturn case {case.id} requires prior_query")
     user_id = f"eval:{case.id}"
-    first = load_context(agent, {
-        "user_id": user_id, "asset_id": None, "query": case.prior_query,
-        "history": [], "top_k": 5,
-    })
+    first = load_context(
+        agent,
+        {
+            "user_id": user_id,
+            "asset_id": None,
+            "query": case.prior_query,
+            "history": [],
+            "top_k": 5,
+        },
+    )
     first = await plan_intent_async(agent, first)
     _persist_dialogue_state(agent, first)
-    second = load_context(agent, {
-        "user_id": user_id, "asset_id": None, "query": case.query,
-        "history": [], "top_k": 5,
-    })
+    second = load_context(
+        agent,
+        {
+            "user_id": user_id,
+            "asset_id": None,
+            "query": case.query,
+            "history": [],
+            "top_k": 5,
+        },
+    )
     second = await plan_intent_async(agent, second)
     plan = second["plan"]
     return {

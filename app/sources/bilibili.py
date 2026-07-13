@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 _SEARCH_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://www.bilibili.com/",
     "Cookie": "buvid3=infoc;",
 }
@@ -62,8 +62,7 @@ def search_bilibili_many(query: str, limit: int = 5) -> list[dict[str, Any]]:
     Returns list of {"bvid", "title", "author", "description"} dicts.
     """
     search_url = (
-        "https://api.bilibili.com/x/web-interface/search/type"
-        f"?search_type=video&keyword={urllib.parse.quote(query)}"
+        f"https://api.bilibili.com/x/web-interface/search/type?search_type=video&keyword={urllib.parse.quote(query)}"
     )
     try:
         req = urllib.request.Request(search_url, headers=_SEARCH_HEADERS)
@@ -80,9 +79,13 @@ async def asearch_bilibili_many(query: str, limit: int = 5) -> list[dict[str, An
 
     try:
         response = await source_transport.request(
-            "bilibili", "GET", "https://api.bilibili.com/x/web-interface/search/type",
-            params={"search_type": "video", "keyword": query}, headers=_SEARCH_HEADERS,
-            retries=1, concurrency=3,
+            "bilibili",
+            "GET",
+            "https://api.bilibili.com/x/web-interface/search/type",
+            params={"search_type": "video", "keyword": query},
+            headers=_SEARCH_HEADERS,
+            retries=1,
+            concurrency=3,
         )
         return _parse_bilibili_results(response.json(), limit)
     except Exception:
@@ -98,10 +101,12 @@ def _parse_bilibili_results(data: dict[str, Any], limit: int) -> list[dict[str, 
         bvid = item.get("bvid")
         title = item.get("title")
         if bvid and title:
-            items.append({
-                "bvid": bvid,
-                "title": unescape(re.sub(r"</?em[^>]*>", "", title).strip()),
-                "author": (item.get("author") or "").strip(),
-                "description": unescape(re.sub(r"</?em[^>]*>", "", (item.get("description") or "")).strip()),
-            })
+            items.append(
+                {
+                    "bvid": bvid,
+                    "title": unescape(re.sub(r"</?em[^>]*>", "", title).strip()),
+                    "author": (item.get("author") or "").strip(),
+                    "description": unescape(re.sub(r"</?em[^>]*>", "", (item.get("description") or "")).strip()),
+                }
+            )
     return items

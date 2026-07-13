@@ -1,2 +1,1 @@
 """CineSonic Agent package."""
-

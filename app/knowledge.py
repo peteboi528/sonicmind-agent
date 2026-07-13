@@ -32,15 +32,42 @@ logger = logging.getLogger(__name__)
 
 KNOWLEDGE_INTENTS = {"album_deep_dive", "artist_deep_dive", "review_summary", "music_compare", "sample_lookup"}
 KNOWLEDGE_TOOLS = {
-    "resolve_music_entity", "music_metadata_lookup", "review_search", "build_music_dossier",
-    "sample_relation_search", "locate_sample_sources", "build_sample_dossier",
+    "resolve_music_entity",
+    "music_metadata_lookup",
+    "review_search",
+    "build_music_dossier",
+    "sample_relation_search",
+    "locate_sample_sources",
+    "build_sample_dossier",
 }
 
 TIER_A_SOURCES = {
-    "pitchfork", "pitchforkmedia", "allmusic", "theguardian", "guardian", "rollingstone",
-    "nme", "bbc", "time", "ew", "chicagotribune", "residentadvisor", "stereogum", "musicbrainz",
+    "pitchfork",
+    "pitchforkmedia",
+    "allmusic",
+    "theguardian",
+    "guardian",
+    "rollingstone",
+    "nme",
+    "bbc",
+    "time",
+    "ew",
+    "chicagotribune",
+    "residentadvisor",
+    "stereogum",
+    "musicbrainz",
 }
-TIER_B_SOURCES = {"wikipedia", "lastfm", "last", "albumoftheyear", "rateyourmusic", "musicboard", "discogs", "genius", "whosampled"}
+TIER_B_SOURCES = {
+    "wikipedia",
+    "lastfm",
+    "last",
+    "albumoftheyear",
+    "rateyourmusic",
+    "musicboard",
+    "discogs",
+    "genius",
+    "whosampled",
+}
 
 
 class KnowledgeCacheItem(BaseModel):
@@ -131,7 +158,8 @@ def resolve_music_entities(query: str, intent: str, plan: dict[str, Any] | None 
             entity_type = _infer_entity_type(query, intent)
             return [
                 MusicEntity(type=entity_type, name=name, artist=_infer_artist(query, name, entity_type), source="query")
-                for name in names if name
+                for name in names
+                if name
             ][:2]
     structured = _structured_entity_from_query(query, intent)
     if structured:
@@ -144,13 +172,14 @@ def resolve_music_entities(query: str, intent: str, plan: dict[str, Any] | None 
     planned_entities = [str(e).strip() for e in (retrieval.get("entities") or []) if str(e).strip()]
     names = _compare_names(query) if intent == "music_compare" else []
     if not names and planned_entities:
-        names = planned_entities[:2 if intent == "music_compare" else 1]
+        names = planned_entities[: 2 if intent == "music_compare" else 1]
     if not names:
         names = [_guess_entity_name(query)]
     return [
         MusicEntity(type=entity_type, name=name, artist=_infer_artist(query, name, entity_type), source="query")
-        for name in names if name
-    ][:2 if intent == "music_compare" else 1]
+        for name in names
+        if name
+    ][: 2 if intent == "music_compare" else 1]
 
 
 # 实体名噪声剥离（卡片 + 自然语言共用）：去开口动词前缀 + 去引用短语尾巴，
@@ -194,19 +223,24 @@ def _structured_entity_from_query(query: str, intent: str) -> MusicEntity | None
     会用 _strip_entity_noise 去掉开口动词（介绍/讲一下…）和引用短语（这个专辑/这张…），
     否则 UI 拼出的卡片会把「介绍X 这个专辑」解析成 name='介绍X'、artist='这个专辑'。
     """
-    lines = [
-        re.sub(r"^[\s:：\-•]+|[\s:：]+$", "", line).strip()
-        for line in (query or "").splitlines()
-        if line.strip()
-    ]
+    lines = [re.sub(r"^[\s:：\-•]+|[\s:：]+$", "", line).strip() for line in (query or "").splitlines() if line.strip()]
     if len(lines) < 2:
         return None
 
     first = lines[0].lower().strip()
     kind_aliases = {
-        "album": "album", "专辑": "album", "唱片": "album", "release": "album",
-        "track": "track", "song": "track", "歌曲": "track", "单曲": "track",
-        "artist": "artist", "艺人": "artist", "歌手": "artist", "乐队": "artist",
+        "album": "album",
+        "专辑": "album",
+        "唱片": "album",
+        "release": "album",
+        "track": "track",
+        "song": "track",
+        "歌曲": "track",
+        "单曲": "track",
+        "artist": "artist",
+        "艺人": "artist",
+        "歌手": "artist",
+        "乐队": "artist",
     }
     entity_type = kind_aliases.get(first)
     if entity_type is None and len(lines) == 2 and intent in {"album_deep_dive", "review_summary", "sample_lookup"}:
@@ -226,7 +260,9 @@ def _structured_entity_from_query(query: str, intent: str) -> MusicEntity | None
     name = _canonical_music_name(_strip_entity_noise(lines[1]))
     artist = ""
     if entity_type in {"album", "track"} and len(lines) >= 3:
-        candidate = _strip_entity_noise(re.sub(r"^(?:artist|艺人|歌手|乐队)\s*[:：]\s*", "", lines[2], flags=re.I).strip())
+        candidate = _strip_entity_noise(
+            re.sub(r"^(?:artist|艺人|歌手|乐队)\s*[:：]\s*", "", lines[2], flags=re.I).strip()
+        )
         if candidate and not _is_noise_only(candidate):
             artist = candidate
     # If a UI includes field labels on following lines, strip the most common ones.
@@ -300,9 +336,14 @@ def _canonicalize_release_entity(client: Any, entity: MusicEntity) -> None:
     artist_key = _match_norm(entity.artist)
 
     if entity.artist:
-        with_artist = [h for h in exact_title if artist_key and (
-            artist_key in _match_norm(h.get("artist", "")) or _match_norm(h.get("artist", "")).endswith(artist_key)
-        )]
+        with_artist = [
+            h
+            for h in exact_title
+            if artist_key
+            and (
+                artist_key in _match_norm(h.get("artist", "")) or _match_norm(h.get("artist", "")).endswith(artist_key)
+            )
+        ]
         if with_artist:
             best = max(with_artist, key=lambda h: h.get("score", 0))
             _apply_release_hit(entity, best)
@@ -321,9 +362,7 @@ def _canonicalize_release_entity(client: Any, entity: MusicEntity) -> None:
 
     # 未给艺人：精确同名候选里出现 ≥2 个不同艺人 → 歧义过大
     if exact_title:
-        distinct_artists = {
-            _match_norm(h.get("artist", "")) for h in exact_title if h.get("artist")
-        }
+        distinct_artists = {_match_norm(h.get("artist", "")) for h in exact_title if h.get("artist")}
         best = max(exact_title, key=lambda h: h.get("score", 0))
         _apply_release_hit(entity, best)
         entity.candidates = exact_title[:5]
@@ -463,13 +502,29 @@ def _latin_name_in_text(name: str, text: str) -> bool:
         return False
     raw = text or ""
     for match in re.finditer(rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])", raw, flags=re.I):
-        prefix = raw[:match.start()].rstrip()
+        prefix = raw[: match.start()].rstrip()
         prev = re.search(r"([A-Za-z0-9']+)$", prefix)
         prev_token = (prev.group(1) if prev else "").lower()
         if prev_token and prev_token not in {
-            "review", "reviews", "album", "albums", "artist", "artists",
-            "biography", "discography", "guide", "feature", "essay",
-            "the", "a", "an", "of", "for", "by", "vs", "and",
+            "review",
+            "reviews",
+            "album",
+            "albums",
+            "artist",
+            "artists",
+            "biography",
+            "discography",
+            "guide",
+            "feature",
+            "essay",
+            "the",
+            "a",
+            "an",
+            "of",
+            "for",
+            "by",
+            "vs",
+            "and",
         }:
             continue
         return True
@@ -535,8 +590,11 @@ def validate_evidence_consistency(
     if all_citations and not on_target:
         problems.append("所有资料都未明确指向目标实体")
         ok = False
-    if entity.type in {"album", "track"} and artist and all_citations and not any(
-        citation_entity_score(c, entity) >= 0.5 for c in kept
+    if (
+        entity.type in {"album", "track"}
+        and artist
+        and all_citations
+        and not any(citation_entity_score(c, entity) >= 0.5 for c in kept)
     ):
         ok = False
     return EvidenceConsistencyReport(
@@ -639,30 +697,35 @@ def _build_career_timeline(
     years = sorted({y for y in _extract_years(meta_text) if 1950 <= y <= 2039})
     has_span = len(years) >= 2 and years[-1] > years[0]
     if has_span:
-        phases.append(CareerPhase(
-            period=f"{years[0]}–{years[-1]}",
-            phase_name="时间跨度",
-            sound_change="；".join(style_tags[:2]) if style_tags else "",
-            career_context=(
-                f"可追溯资料的时间跨度约 {years[0]}–{years[-1]} 年。受限于来源，"
-                f"无法精确把每张专辑钉到具体阶段，下面按代表作品组织。"
-            ),
-        ))
+        phases.append(
+            CareerPhase(
+                period=f"{years[0]}–{years[-1]}",
+                phase_name="时间跨度",
+                sound_change="；".join(style_tags[:2]) if style_tags else "",
+                career_context=(
+                    f"可追溯资料的时间跨度约 {years[0]}–{years[-1]} 年。受限于来源，"
+                    f"无法精确把每张专辑钉到具体阶段，下面按代表作品组织。"
+                ),
+            )
+        )
     # 始终给出「代表作品」阶段（仅基于真实拥有的专辑；不足时回落曲目）
     releases = album_names or [t.title for t in tracks if t.title]
-    phases.append(CareerPhase(
-        period="代表作品",
-        phase_name="代表作品",
-        key_releases=releases[:6],
-        career_context=(
-            "来源未提供明确发行年份，按可追溯的代表作品组织，不臆造分期。"
-            if not has_span else "职业生涯中可追溯的代表专辑。"
-        ),
-    ))
+    phases.append(
+        CareerPhase(
+            period="代表作品",
+            phase_name="代表作品",
+            key_releases=releases[:6],
+            career_context=(
+                "来源未提供明确发行年份，按可追溯的代表作品组织，不臆造分期。"
+                if not has_span
+                else "职业生涯中可追溯的代表专辑。"
+            ),
+        )
+    )
     return phases
 
 
-_CAREER_YEAR_RE = re.compile(r"(19[5-9]\d|20[0-3]\d)")   # 1950–2039
+_CAREER_YEAR_RE = re.compile(r"(19[5-9]\d|20[0-3]\d)")  # 1950–2039
 _CAREER_TITLE_RE = re.compile(r"《([^》]{1,40})》")
 
 
@@ -723,7 +786,13 @@ def _extract_career_phases_from_text(text: str) -> list[CareerPhase]:
 def lookup_metadata(agent: Any, entities: list[MusicEntity], deadline_at: float | None = None) -> dict[str, Any]:
     remaining = remaining_seconds(deadline_at)
     if remaining is not None and remaining < 1.0:
-        return {"metadata": [], "citations": [], "tracks": [], "albums": [], "skipped_due_to_deadline": ["music_metadata_lookup"]}
+        return {
+            "metadata": [],
+            "citations": [],
+            "tracks": [],
+            "albums": [],
+            "skipped_due_to_deadline": ["music_metadata_lookup"],
+        }
     # 元数据现在是单波并行（MB/Spotify/Discogs/netease/web 同时发），墙钟≈最慢单源，
     # 不再是各源之和——所以这一波该拿到比旧串行模型(3s)更宽的预算，否则慢源(Spotify
     # OAuth/Discogs/web)永远跑不完，只剩最快的 netease 活下来(实测"来源 netease only")。
@@ -797,11 +866,13 @@ def search_reviews(
     if intent == "music_compare" and len(entities) >= 2:
         left, right = entities[:2]
         pair = f"{left.name} {right.name}".strip()
-        queries.extend([
-            f"{pair} comparison style",
-            _review_queries_for_entity(left)[0],
-            _review_queries_for_entity(right)[0],
-        ])
+        queries.extend(
+            [
+                f"{pair} comparison style",
+                _review_queries_for_entity(left)[0],
+                _review_queries_for_entity(right)[0],
+            ]
+        )
     else:
         for entity in entities:
             queries.extend(_review_queries_for_entity(entity))
@@ -814,7 +885,7 @@ def search_reviews(
         if key not in seen:
             seen.add(key)
             deduped.append(q)
-    queries = deduped[:settings.knowledge_max_search_queries]
+    queries = deduped[: settings.knowledge_max_search_queries]
     # Leave a small margin for parsing/ToolRuntime bookkeeping.  Otherwise the
     # outer wait_for may cancel the whole handler at exactly the same wall-clock
     # boundary and report a misleading "skipped due to deadline" even though the
@@ -822,12 +893,15 @@ def search_reviews(
     batch_timeout = max(0.5, timeout - 0.3)
     request_timeout = max(0.5, batch_timeout)
     tasks = [
-        (f"review:{q}", lambda q=q: web_search_source.search_web_info(
-            q,
-            max_results=max(2, settings.knowledge_max_review_sources),
-            api_key=settings.tavily_api_key,
-            timeout=request_timeout,
-        ))
+        (
+            f"review:{q}",
+            lambda q=q: web_search_source.search_web_info(
+                q,
+                max_results=max(2, settings.knowledge_max_review_sources),
+                api_key=settings.tavily_api_key,
+                timeout=request_timeout,
+            ),
+        )
         for q in queries
     ]
     batches = run_parallel(tasks, timeout=batch_timeout, default=[])
@@ -842,19 +916,21 @@ def search_reviews(
             if not title and not url:
                 continue
             source = _source_from_url(url) or "web"
-            citations.append(MusicCitation(
-                source=source,
-                title=title,
-                url=url,
-                kind="review",
-                excerpt=excerpt[:500],
-                confidence=_source_confidence(source, url),
-            ))
+            citations.append(
+                MusicCitation(
+                    source=source,
+                    title=title,
+                    url=url,
+                    kind="review",
+                    excerpt=excerpt[:500],
+                    confidence=_source_confidence(source, url),
+                )
+            )
     citations = sorted(
         _dedupe_citations(citations),
         key=lambda item: item.confidence,
         reverse=True,
-    )[:settings.knowledge_max_review_sources]
+    )[: settings.knowledge_max_review_sources]
     opinions = [
         ReviewOpinion(
             source=c.source,
@@ -868,11 +944,17 @@ def search_reviews(
     return {"citations": citations, "opinions": opinions}
 
 
-def search_sample_relations(entities: list[MusicEntity], query: str, deadline_at: float | None = None) -> dict[str, Any]:
+def search_sample_relations(
+    entities: list[MusicEntity], query: str, deadline_at: float | None = None
+) -> dict[str, Any]:
     target = _target_track_from_entities(entities, query)
     remaining = remaining_seconds(deadline_at)
     if remaining is not None and remaining < 1.0:
-        return {"target": target.model_dump(mode="json"), "evidence": [], "skipped_due_to_deadline": ["sample_relation_search"]}
+        return {
+            "target": target.model_dump(mode="json"),
+            "evidence": [],
+            "skipped_due_to_deadline": ["sample_relation_search"],
+        }
     timeout = min(settings.knowledge_review_timeout_seconds, remaining or settings.knowledge_review_timeout_seconds)
     base = " ".join(part for part in [target.artist, target.title] if part).strip() or target.title
     queries = [
@@ -880,11 +962,16 @@ def search_sample_relations(entities: list[MusicEntity], query: str, deadline_at
         f"{base} sampled what song",
         f"{base} Genius sample interpolation",
         f"{base} Discogs sample credits",
-    ][:settings.knowledge_max_search_queries]
+    ][: settings.knowledge_max_search_queries]
     tasks = [
-        (f"sample:{q}", lambda q=q: web_search_source.search_web_info(
-            q, max_results=3, api_key=settings.tavily_api_key,
-        ))
+        (
+            f"sample:{q}",
+            lambda q=q: web_search_source.search_web_info(
+                q,
+                max_results=3,
+                api_key=settings.tavily_api_key,
+            ),
+        )
         for q in queries
     ]
     batches = run_parallel(tasks, timeout=max(0.2, timeout), default=[])
@@ -899,19 +986,23 @@ def search_sample_relations(entities: list[MusicEntity], query: str, deadline_at
             if not title and not url:
                 continue
             source = _source_from_url(url) or "web"
-            evidence.append(SampleEvidence(
-                source=source,
-                title=title,
-                url=url,
-                excerpt=excerpt[:500],
-                confidence=_sample_source_confidence(source, url),
-                source_tier=_source_tier(source, url),
-            ))
+            evidence.append(
+                SampleEvidence(
+                    source=source,
+                    title=title,
+                    url=url,
+                    excerpt=excerpt[:500],
+                    confidence=_sample_source_confidence(source, url),
+                    source_tier=_source_tier(source, url),
+                )
+            )
     evidence = _dedupe_sample_evidence([*_canonical_sample_evidence(target), *evidence])[:6]
     return {"target": target.model_dump(mode="json"), "evidence": [e.model_dump(mode="json") for e in evidence]}
 
 
-def locate_sample_sources(agent: Any, target: TrackRef, evidence: list[SampleEvidence], deadline_at: float | None = None) -> dict[str, Any]:
+def locate_sample_sources(
+    agent: Any, target: TrackRef, evidence: list[SampleEvidence], deadline_at: float | None = None
+) -> dict[str, Any]:
     remaining = remaining_seconds(deadline_at)
     if remaining is not None and remaining < 1.0:
         return {"relations": [], "source_cards": [], "skipped_due_to_deadline": ["locate_sample_sources"]}
@@ -930,12 +1021,14 @@ def locate_sample_sources(agent: Any, target: TrackRef, evidence: list[SampleEvi
 
             cards.append(song_card(found[0]))
         else:
-            cards.append({
-                "title": relation.source_track.title,
-                "artist": relation.source_track.artist,
-                "source": relation.source_track.source or "sample_source",
-                "source_id": relation.source_track.source_id,
-            })
+            cards.append(
+                {
+                    "title": relation.source_track.title,
+                    "artist": relation.source_track.artist,
+                    "source": relation.source_track.source or "sample_source",
+                    "source_id": relation.source_track.source_id,
+                }
+            )
     return {
         "relations": [r.model_dump(mode="json") for r in relations],
         "source_cards": cards,
@@ -1008,12 +1101,31 @@ def build_evidence_pack(
     texts.extend(c.excerpt for c in citations)
     joined = "\n".join(texts).lower()
     sound_terms = [
-        "ambient", "electronic", "guitar-based", "minimal", "dense", "art rock",
-        "alternative rock", "r&b", "neo-soul", "krautrock", "jazz", "experimental",
+        "ambient",
+        "electronic",
+        "guitar-based",
+        "minimal",
+        "dense",
+        "art rock",
+        "alternative rock",
+        "r&b",
+        "neo-soul",
+        "krautrock",
+        "jazz",
+        "experimental",
     ]
     theme_terms = [
-        "alienation", "technology", "anxiety", "memory", "identity", "intimacy",
-        "consumer", "modernity", "isolation", "dread", "nostalgia",
+        "alienation",
+        "technology",
+        "anxiety",
+        "memory",
+        "identity",
+        "intimacy",
+        "consumer",
+        "modernity",
+        "isolation",
+        "dread",
+        "nostalgia",
     ]
     disagreement_terms = [
         ("difficult", "难入门"),
@@ -1024,10 +1136,9 @@ def build_evidence_pack(
         ("fragmented", "结构碎片化"),
     ]
     source_quality = {c.source: _source_tier(c.source, c.url) for c in citations}
-    critic_points = [
-        c.excerpt[:400] for c in sorted(citations, key=lambda c: c.confidence, reverse=True)
-        if c.excerpt
-    ][:10]
+    critic_points = [c.excerpt[:400] for c in sorted(citations, key=lambda c: c.confidence, reverse=True) if c.excerpt][
+        :10
+    ]
     return KnowledgeEvidencePack(
         facts=[t[:300] for t in texts if t][:6],
         critic_points=critic_points,
@@ -1110,6 +1221,7 @@ def _synthesize_dossier_prose(
         evidence_lines.append(f"- 风格标签：{'、'.join(style_tags[:8])}")
     has_reviews = bool(review_citations or critic_points)
     from app.prompts.untrusted_boundary import UNTRUSTED_CONTENT_RULE, strip_directive_phrases, wrap_untrusted
+
     evidence_block = wrap_untrusted(strip_directive_phrases("\n".join(evidence_lines)), "证据资料")
 
     system = (
@@ -1135,12 +1247,14 @@ def _synthesize_dossier_prose(
         '  "summary": 4-6 句中文，专业、详尽地介绍这张专辑/这位艺人：背景与发行脉络、整体风格与声音特征、'
         "在艺人作品序列或乐坛中的定位与意义；只用证据里的内容，行文流畅成段、信息密度高。\n"
         '  "critical_consensus": ' + consensus_rule + "\n"
-        "示例：{\"summary\": \"...\", \"critical_consensus\": \"...\"}"
+        '示例：{"summary": "...", "critical_consensus": "..."}'
     )
     try:
         # 仅此一处开思考模式：组织多源英文证据成专业中文长文，收益最大、且不拖慢其它链路。
         raw = llm.generate(
-            prompt, system=system, temperature=0.3,
+            prompt,
+            system=system,
+            temperature=0.3,
             thinking=settings.knowledge_synth_thinking_enabled,
         )
     except Exception:
@@ -1227,9 +1341,7 @@ def _match_library_to_entity(
         if not (is_artist_hit or is_genre_hit):
             continue
         seen.add(key)
-        taste_aligned = bool(
-            (asset_artists & taste_artists) or (asset_genres_norm & taste_genres)
-        )
+        taste_aligned = bool((asset_artists & taste_artists) or (asset_genres_norm & taste_genres))
         match = LibraryMatch(
             title=title,
             artist=asset.artist or "",
@@ -1269,7 +1381,11 @@ def build_dossier(
     web_knowledge_style_tags: list[str] | None = None,
     user_id: str = "",
 ) -> MusicDossier:
-    entity = entities[0] if entities else MusicEntity(type=_infer_entity_type(query, intent), name=_guess_entity_name(query), source="query")
+    entity = (
+        entities[0]
+        if entities
+        else MusicEntity(type=_infer_entity_type(query, intent), name=_guess_entity_name(query), source="query")
+    )
     is_compare = intent == "music_compare" and len(entities) >= 2
     cached = read_cached_dossier(
         agent,
@@ -1282,26 +1398,30 @@ def build_dossier(
         # 必须用当前 user_id 重算，否则会把别的用户/旧用户的库命中带出来。
         refreshed_matches = (
             _match_library_to_entity(agent, user_id, cached.entity, cached.style_tags)
-            if cached.entity.ambiguity != "ambiguous" else []
+            if cached.entity.ambiguity != "ambiguous"
+            else []
         )
-        return cached.model_copy(update={
-            "partial": False,
-            "degraded_reason": None,
-            "library_matches": refreshed_matches,
-        })
+        return cached.model_copy(
+            update={
+                "partial": False,
+                "degraded_reason": None,
+                "library_matches": refreshed_matches,
+            }
+        )
 
     # ── Phase 0 证据一致性校验：剔除归属错误的 citation/曲目，治同名实体资料混拼 ──
     report = (
         validate_compare_evidence_consistency(entities[:2], metadata_citations, review_citations, tracks)
-        if is_compare else
-        validate_evidence_consistency(entity, metadata_citations, review_citations, tracks)
+        if is_compare
+        else validate_evidence_consistency(entity, metadata_citations, review_citations, tracks)
     )
     citations = _limit_citations(report.kept_citations)
     tracks = report.kept_tracks
     # 合成只喂「命中目标实体」的资料，避免把同名异作品的乐评混进 LLM 总结。
     if is_compare:
         on_target = [
-            c for c in report.kept_citations
+            c
+            for c in report.kept_citations
             if any(citation_entity_score(c, compare_entity) >= 0.5 for compare_entity in entities[:2])
         ]
     else:
@@ -1311,19 +1431,24 @@ def build_dossier(
     if is_compare:
         meta_chunks: list[str] = []
         for compare_entity in entities[:2]:
-            matched = next((
-                str(item.get("summary") or item.get("bio") or "").strip()
-                for item in metadata
-                if _norm((item.get("entity") or {}).get("name") or "") == _norm(compare_entity.name)
-                and str(item.get("summary") or item.get("bio") or "").strip()
-            ), "")
+            matched = next(
+                (
+                    str(item.get("summary") or item.get("bio") or "").strip()
+                    for item in metadata
+                    if _norm((item.get("entity") or {}).get("name") or "") == _norm(compare_entity.name)
+                    and str(item.get("summary") or item.get("bio") or "").strip()
+                ),
+                "",
+            )
             if matched:
                 meta_chunks.append(f"{compare_entity.name}: {matched}")
         meta_text = "\n".join(meta_chunks[:2])
     else:
         meta_text = _first_nonempty(*(m.get("summary", "") for m in metadata), *(m.get("bio", "") for m in metadata))
     evidence_pack = build_evidence_pack(metadata, synth_citations, opinions)
-    style_tags = _merge_unique([*(web_knowledge_style_tags or []), *_tags_from_metadata(metadata), *evidence_pack.sound_descriptors])[:8]
+    style_tags = _merge_unique(
+        [*(web_knowledge_style_tags or []), *_tags_from_metadata(metadata), *evidence_pack.sound_descriptors]
+    )[:8]
     partial_reasons: list[str] = []
     skipped = skipped or []
     timed_out = timed_out or []
@@ -1344,16 +1469,18 @@ def build_dossier(
 
     # 强搜索 provider 走 DeepSeek 先验（无真网页来源）时：去掉"乐评未取回/外部资料不足"的失败性描述，
     # 换成诚实的先验声明——仍标 partial 让前端 dossier-warning 显示，但内容来自直答/claim，不再是"资料不足"。
-    is_parametric = web_knowledge_provider == "deepseek_parametric" and bool(web_knowledge_answer or web_knowledge_claims)
+    is_parametric = web_knowledge_provider == "deepseek_parametric" and bool(
+        web_knowledge_answer or web_knowledge_claims
+    )
     if is_parametric:
         # parametric 直答是完整正文（只是未联网核实），不是"资料不完整"——
         # 剔除"乐评未取回/外部资料不足"这类失败性描述（它们不适用于一份成文的直答），
         # 但不再往 partial_reasons 塞免责声明：改由 is_parametric 标志承载，前端显柔和徽标、
         # 气泡出短声明，避免「明明是完整深度解读却挂琥珀色"资料不完整"警告」。
         partial_reasons = [
-            r for r in partial_reasons
-            if "乐评来源本轮未在时间预算内取回足够结果" not in r
-            and "外部资料来源不足，无法做完整乐评总结" not in r
+            r
+            for r in partial_reasons
+            if "乐评来源本轮未在时间预算内取回足够结果" not in r and "外部资料来源不足，无法做完整乐评总结" not in r
         ]
 
     ambiguous = entity.ambiguity == "ambiguous" and not is_compare
@@ -1375,7 +1502,8 @@ def build_dossier(
         # 失败性描述，与 album/artist 的 is_parametric 清洗一致，避免富正文却挂"部分降级"。
         if profiled or is_parametric:
             partial_reasons = [
-                reason for reason in partial_reasons
+                reason
+                for reason in partial_reasons
                 if "乐评来源本轮未在时间预算内取回足够结果" not in reason
                 and "外部资料来源不足，无法做完整乐评总结" not in reason
             ]
@@ -1421,7 +1549,14 @@ def build_dossier(
             # 连贯中文 summary/乐评共识，治"原始摘录直出、半句英文"。失败/无预算/无证据时
             # 回落机械摘要，保证 offline(MockLLM)与降级路径确定可用。
             synth = _synthesize_dossier_prose(
-                agent, entity, meta_text, style_tags, evidence_pack, synth_citations, opinions, deadline_at,
+                agent,
+                entity,
+                meta_text,
+                style_tags,
+                evidence_pack,
+                synth_citations,
+                opinions,
+                deadline_at,
                 web_knowledge_claims=web_knowledge_claims,
                 parametric=is_parametric,
             )
@@ -1437,7 +1572,9 @@ def build_dossier(
         if profiled and profiled.get("entry_tracks"):
             track_map = profiled["entry_tracks"]
             key_tracks = [
-                TrackRef(title=title, artist=artist_name.title() if artist_name.islower() else artist_name, source="guide")
+                TrackRef(
+                    title=title, artist=artist_name.title() if artist_name.islower() else artist_name, source="guide"
+                )
                 for artist_name, titles in track_map.items()
                 for title in titles
             ][:10]
@@ -1487,7 +1624,7 @@ def build_dossier(
         related_entities=related,
         library_matches=library_matches,
         citations=citations,
-        review_opinions=opinions[:settings.knowledge_max_review_sources],
+        review_opinions=opinions[: settings.knowledge_max_review_sources],
         uncertainties=[*partial_reasons, *evidence_pack.disagreements[:2]][:4],
         partial=bool(partial_reasons) or ambiguous or (not report.ok and not is_parametric),
         degraded_reason="；".join(partial_reasons) if partial_reasons else None,
@@ -1510,13 +1647,29 @@ def _polish_narrative(text: str) -> str:
         return ""
     # 元信息行前缀：整行以这些标签开头时视为机械尾巴，删除（值可在冒号后任意）。
     meta_prefixes = (
-        "资料状态", "资料来源状态", "风格标签", "风格定位", "乐评/资料共识", "乐评共识",
-        "免责声明", "声明", "注：本", "备注：", "数据来源", "信息来源",
+        "资料状态",
+        "资料来源状态",
+        "风格标签",
+        "风格定位",
+        "乐评/资料共识",
+        "乐评共识",
+        "免责声明",
+        "声明",
+        "注：本",
+        "备注：",
+        "数据来源",
+        "信息来源",
     )
     # 这些是模型自带的"没拿到来源/未联网"句式，整行命中即删（避免与卡片声明重复）。
     meta_substrings = (
-        "未联网核实", "没有拿到足够乐评", "不硬凑专业评价", "基于模型先验",
-        "以上内容基于", "仅供参考", "请以官方", "请另行确认",
+        "未联网核实",
+        "没有拿到足够乐评",
+        "不硬凑专业评价",
+        "基于模型先验",
+        "以上内容基于",
+        "仅供参考",
+        "请以官方",
+        "请另行确认",
     )
     kept: list[str] = []
     for raw in text.splitlines():
@@ -1693,7 +1846,15 @@ def _musicbrainz_metadata(entity: MusicEntity) -> dict[str, Any] | None:
                     hit = client.lookup_artist(hit["mbid"]) or hit
             if not hit or not hit.get("name"):
                 return None
-            summary_bits = [b for b in (hit.get("type"), f"来自 {hit['country']}" if hit.get("country") else "", hit.get("disambiguation", "")) if b]
+            summary_bits = [
+                b
+                for b in (
+                    hit.get("type"),
+                    f"来自 {hit['country']}" if hit.get("country") else "",
+                    hit.get("disambiguation", ""),
+                )
+                if b
+            ]
             return {
                 "source": "musicbrainz",
                 "canonical_name": hit.get("name", ""),
@@ -1713,11 +1874,15 @@ def _musicbrainz_metadata(entity: MusicEntity) -> dict[str, Any] | None:
                 hit = client.lookup_release_group(hit["mbid"]) or hit
         if not hit or not hit.get("title"):
             return None
-        summary_bits = [b for b in (
-            f"艺人 {hit['artist']}" if hit.get("artist") else "",
-            f"发行 {hit['date']}" if hit.get("date") else "",
-            hit.get("type", ""),
-        ) if b]
+        summary_bits = [
+            b
+            for b in (
+                f"艺人 {hit['artist']}" if hit.get("artist") else "",
+                f"发行 {hit['date']}" if hit.get("date") else "",
+                hit.get("type", ""),
+            )
+            if b
+        ]
         return {
             "source": "musicbrainz",
             "canonical_name": hit.get("title", ""),
@@ -1871,23 +2036,27 @@ def _apply_structured_sources(
             mbid = mb.get("mbid", "")
             path = "artist" if entity.type == "artist" else "release-group"
             metadata.append({"entity": entity.model_dump(mode="json"), "summary": mb.get("summary", ""), "tags": tags})
-            citations.append(MusicCitation(
-                source="musicbrainz", title=f"{entity.name} - MusicBrainz",
-                url=f"https://musicbrainz.org/{path}/{mbid}" if mbid else "",
-                kind="encyclopedia", excerpt=mb.get("summary", ""), confidence=_source_confidence("musicbrainz"),
-            ))
+            citations.append(
+                MusicCitation(
+                    source="musicbrainz",
+                    title=f"{entity.name} - MusicBrainz",
+                    url=f"https://musicbrainz.org/{path}/{mbid}" if mbid else "",
+                    kind="encyclopedia",
+                    excerpt=mb.get("summary", ""),
+                    confidence=_source_confidence("musicbrainz"),
+                )
+            )
         relation_citations = _musicbrainz_relation_citations(entity, mb.get("relations") or [])
         if relation_citations:
-            relation_labels = [
-                f"{c.source}: {c.title or c.url}"
-                for c in relation_citations[:5]
-            ]
-            metadata.append({
-                "entity": entity.model_dump(mode="json"),
-                "summary": "MusicBrainz 关联链接：" + "；".join(relation_labels),
-                "tags": [],
-                "relations": [c.model_dump(mode="json") for c in relation_citations],
-            })
+            relation_labels = [f"{c.source}: {c.title or c.url}" for c in relation_citations[:5]]
+            metadata.append(
+                {
+                    "entity": entity.model_dump(mode="json"),
+                    "summary": "MusicBrainz 关联链接：" + "；".join(relation_labels),
+                    "tags": [],
+                    "relations": [c.model_dump(mode="json") for c in relation_citations],
+                }
+            )
             citations.extend(relation_citations)
     if sp:
         if sp.get("external_id"):
@@ -1901,11 +2070,16 @@ def _apply_structured_sources(
             sp_id = sp.get("external_id", "")
             sp_path = entity.type if entity.type in {"artist", "album"} else "album"
             metadata.append({"entity": entity.model_dump(mode="json"), "summary": sp.get("summary", ""), "tags": tags})
-            citations.append(MusicCitation(
-                source="spotify", title=f"{entity.name} - Spotify",
-                url=f"https://open.spotify.com/{sp_path}/{sp_id}" if sp_id else "",
-                kind="platform", excerpt=sp.get("summary", ""), confidence=0.72,
-            ))
+            citations.append(
+                MusicCitation(
+                    source="spotify",
+                    title=f"{entity.name} - Spotify",
+                    url=f"https://open.spotify.com/{sp_path}/{sp_id}" if sp_id else "",
+                    kind="platform",
+                    excerpt=sp.get("summary", ""),
+                    confidence=0.72,
+                )
+            )
     if dc:
         if dc.get("external_id"):
             entity.external_ids["discogs"] = dc["external_id"]
@@ -1914,21 +2088,46 @@ def _apply_structured_sources(
             dc_id = dc.get("external_id", "")
             dc_path = dc.get("type") or "master"
             metadata.append({"entity": entity.model_dump(mode="json"), "summary": dc.get("summary", ""), "tags": tags})
-            citations.append(MusicCitation(
-                source="discogs", title=f"{entity.name} - Discogs",
-                url=f"https://www.discogs.com/{dc_path}/{dc_id}" if dc_id else "",
-                kind="encyclopedia", excerpt=dc.get("summary", ""), confidence=_source_confidence("discogs"),
-            ))
+            citations.append(
+                MusicCitation(
+                    source="discogs",
+                    title=f"{entity.name} - Discogs",
+                    url=f"https://www.discogs.com/{dc_path}/{dc_id}" if dc_id else "",
+                    kind="encyclopedia",
+                    excerpt=dc.get("summary", ""),
+                    confidence=_source_confidence("discogs"),
+                )
+            )
 
 
 _MB_RELATION_ALLOW_TERMS = {
-    "review", "allmusic", "bbc music page", "discogs", "wikidata", "wikipedia",
-    "discography entry", "discography page", "other databases", "lyrics",
-    "secondhandsongs", "whosampled", "imdb", "official homepage",
+    "review",
+    "allmusic",
+    "bbc music page",
+    "discogs",
+    "wikidata",
+    "wikipedia",
+    "discography entry",
+    "discography page",
+    "other databases",
+    "lyrics",
+    "secondhandsongs",
+    "whosampled",
+    "imdb",
+    "official homepage",
 }
 _MB_RELATION_SKIP_TERMS = {
-    "social network", "youtube", "streaming", "download", "purchase for download",
-    "free streaming", "license", "setlistfm", "bandsintown", "songkick", "patronage",
+    "social network",
+    "youtube",
+    "streaming",
+    "download",
+    "purchase for download",
+    "free streaming",
+    "license",
+    "setlistfm",
+    "bandsintown",
+    "songkick",
+    "patronage",
 }
 
 
@@ -1958,7 +2157,11 @@ def _musicbrainz_relation_citations(entity: MusicEntity, relations: list[dict[st
             continue
 
         kind: str = "encyclopedia"
-        if "review" in rel_key or (source_key in {"allmusic", "bbc", "pitchfork", "guardian", "rollingstone", "nme", "time", "ew", "chicagotribune"} and entity.type != "artist"):
+        if "review" in rel_key or (
+            source_key
+            in {"allmusic", "bbc", "pitchfork", "guardian", "rollingstone", "nme", "time", "ew", "chicagotribune"}
+            and entity.type != "artist"
+        ):
             kind = "review"
         elif source_key in {"rateyourmusic", "albumoftheyear", "musicboard"}:
             kind = "user_comment"
@@ -1978,14 +2181,16 @@ def _musicbrainz_relation_citations(entity: MusicEntity, relations: list[dict[st
             confidence = max(confidence, 0.72)
         if rel.get("ended"):
             confidence = max(0.45, confidence - 0.08)
-        citations.append(MusicCitation(
-            source=source_key or source,
-            title=title,
-            url=url,
-            kind=kind,  # type: ignore[arg-type]
-            excerpt="",
-            confidence=min(0.92, confidence),
-        ))
+        citations.append(
+            MusicCitation(
+                source=source_key or source,
+                title=title,
+                url=url,
+                kind=kind,  # type: ignore[arg-type]
+                excerpt="",
+                confidence=min(0.92, confidence),
+            )
+        )
     return sorted(
         _dedupe_citations(citations),
         key=lambda c: (c.confidence, _music_relation_source_priority(c.source), c.kind == "review"),
@@ -2097,17 +2302,28 @@ def _enrich_review_content(
         if api_key and not _has_domain("last.fm"):
             artist_slug = entity.artist.strip().replace(" ", "+")
             name_slug = entity.name.strip().replace(" ", "+")
-            pool.append(MusicCitation(
-                source="lastfm", title=f"{entity.artist} - {entity.name}",
-                url=f"https://www.last.fm/music/{artist_slug}/{name_slug}",
-                kind="encyclopedia", excerpt="", confidence=0.7,
-            ))
+            pool.append(
+                MusicCitation(
+                    source="lastfm",
+                    title=f"{entity.artist} - {entity.name}",
+                    url=f"https://www.last.fm/music/{artist_slug}/{name_slug}",
+                    kind="encyclopedia",
+                    excerpt="",
+                    confidence=0.7,
+                )
+            )
         if discogs_enabled and not _has_domain("discogs.com"):
             # Discogs 走 API 按名搜索，URL 仅作占位/去重标识。
-            pool.append(MusicCitation(
-                source="discogs", title=f"{entity.artist} - {entity.name}",
-                url="https://www.discogs.com/", kind="encyclopedia", excerpt="", confidence=0.6,
-            ))
+            pool.append(
+                MusicCitation(
+                    source="discogs",
+                    title=f"{entity.artist} - {entity.name}",
+                    url="https://www.discogs.com/",
+                    kind="encyclopedia",
+                    excerpt="",
+                    confidence=0.6,
+                )
+            )
 
     def _worth(c: MusicCitation) -> bool:
         domain = _citation_domain(c.url)
@@ -2131,7 +2347,10 @@ def _enrich_review_content(
                 return ""
             try:
                 from app.sources.discogs_client import DiscogsClient
-                return DiscogsClient(getattr(settings, "discogs_token", "")).fetch_release_notes(entity.name, entity.artist)
+
+                return DiscogsClient(getattr(settings, "discogs_token", "")).fetch_release_notes(
+                    entity.name, entity.artist
+                )
             except Exception:
                 logger.debug("Discogs notes fetch failed for %s", entity.name, exc_info=True)
                 return ""
@@ -2167,12 +2386,14 @@ def _opinions_from_citations(citations: list[MusicCitation]) -> list[ReviewOpini
         text = (c.excerpt or "").strip()
         if len(text) < 60:
             continue
-        out.append(ReviewOpinion(
-            source=c.source,
-            sentiment=_sentiment_from_text(text),
-            aspects=_aspects_from_text(text),
-            summary=text[:180],
-        ))
+        out.append(
+            ReviewOpinion(
+                source=c.source,
+                sentiment=_sentiment_from_text(text),
+                aspects=_aspects_from_text(text),
+                summary=text[:180],
+            )
+        )
     return out
 
 
@@ -2239,31 +2460,50 @@ def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None 
     try:
         # 1) 结构化权威源合流（顺序：MB 纠正实体名 → Spotify 补声音/封面 → Discogs 补细类）。
         _apply_structured_sources(
-            entity, [res.get("musicbrainz"), res.get("spotify"), res.get("discogs")], metadata, citations,
+            entity,
+            [res.get("musicbrainz"), res.get("spotify"), res.get("discogs")],
+            metadata,
+            citations,
         )
         # 2) 网易云艺人专辑。
         albums = res.get("netease_albums") or []
         for album in albums:
-            citations.append(MusicCitation(
-                source="netease", title=album.get("name", ""), url="", kind="platform",
-                excerpt=f"网易云专辑结果：{album.get('name', '')}", confidence=0.8,
-            ))
+            citations.append(
+                MusicCitation(
+                    source="netease",
+                    title=album.get("name", ""),
+                    url="",
+                    kind="platform",
+                    excerpt=f"网易云专辑结果：{album.get('name', '')}",
+                    confidence=0.8,
+                )
+            )
         # 3) Last.fm 简介 + 热门曲。
         lf = res.get("lastfm")
         if lf and lf.get("info"):
             info = lf["info"]
-            metadata.append({
-                "entity": entity.model_dump(mode="json"),
-                "summary": info.get("bio", ""),
-                "tags": info.get("tags", []),
-                "image": info.get("image", ""),
-            })
-            citations.append(MusicCitation(
-                source="lastfm", title=f"{entity.name} - Last.fm", url="", kind="metadata",
-                excerpt=(info.get("bio") or "")[:500], confidence=0.7,
-            ))
+            metadata.append(
+                {
+                    "entity": entity.model_dump(mode="json"),
+                    "summary": info.get("bio", ""),
+                    "tags": info.get("tags", []),
+                    "image": info.get("image", ""),
+                }
+            )
+            citations.append(
+                MusicCitation(
+                    source="lastfm",
+                    title=f"{entity.name} - Last.fm",
+                    url="",
+                    kind="metadata",
+                    excerpt=(info.get("bio") or "")[:500],
+                    confidence=0.7,
+                )
+            )
             for t in lf.get("top") or []:
-                tracks.append(TrackRef(title=t.get("title", ""), artist=t.get("artist") or entity.name, source="lastfm"))
+                tracks.append(
+                    TrackRef(title=t.get("title", ""), artist=t.get("artist") or entity.name, source="lastfm")
+                )
         # 4) 网易云专辑元数据 + 曲目（合流时再回写 entity，线程安全）。
         nb = res.get("netease_album")
         if nb:
@@ -2271,21 +2511,50 @@ def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None 
             entity.external_ids["netease_album"] = str(album.get("id") or "")
             entity.image = album.get("cover", "") or entity.image
             entity.artist = album.get("artist", "") or entity.artist
-            metadata.append({"entity": entity.model_dump(mode="json"), "summary": f"网易云识别到专辑《{album.get('name')}》，艺人 {album.get('artist') or '未知'}。"})
-            citations.append(MusicCitation(source="netease", title=album.get("name", ""), kind="platform", excerpt="网易云专辑元数据", confidence=0.85))
+            metadata.append(
+                {
+                    "entity": entity.model_dump(mode="json"),
+                    "summary": f"网易云识别到专辑《{album.get('name')}》，艺人 {album.get('artist') or '未知'}。",
+                }
+            )
+            citations.append(
+                MusicCitation(
+                    source="netease",
+                    title=album.get("name", ""),
+                    kind="platform",
+                    excerpt="网易云专辑元数据",
+                    confidence=0.85,
+                )
+            )
             for item in (nb.get("detail") or {}).get("tracks", [])[:8]:
-                tracks.append(TrackRef(
-                    title=item.get("title", ""), artist=item.get("artist", "") or entity.artist,
-                    source="netease", source_id=str(item.get("song_id") or ""),
-                ))
+                tracks.append(
+                    TrackRef(
+                        title=item.get("title", ""),
+                        artist=item.get("artist", "") or entity.artist,
+                        source="netease",
+                        source_id=str(item.get("song_id") or ""),
+                    )
+                )
         # 5) Web 背景资料。
         for item in (res.get("web") or [])[:2]:
-            metadata.append({"entity": entity.model_dump(mode="json"), "summary": item.get("content", ""), "title": item.get("title", ""), "url": item.get("url", "")})
-            citations.append(MusicCitation(
-                source=_source_from_url(item.get("url", "")) or "web",
-                title=item.get("title", ""), url=item.get("url", ""), kind="encyclopedia",
-                excerpt=(item.get("content") or "")[:500], confidence=0.65,
-            ))
+            metadata.append(
+                {
+                    "entity": entity.model_dump(mode="json"),
+                    "summary": item.get("content", ""),
+                    "title": item.get("title", ""),
+                    "url": item.get("url", ""),
+                }
+            )
+            citations.append(
+                MusicCitation(
+                    source=_source_from_url(item.get("url", "")) or "web",
+                    title=item.get("title", ""),
+                    url=item.get("url", ""),
+                    kind="encyclopedia",
+                    excerpt=(item.get("content") or "")[:500],
+                    confidence=0.65,
+                )
+            )
     except Exception:
         pass
     return {"metadata": metadata, "citations": citations, "tracks": tracks, "albums": albums}
@@ -2294,7 +2563,9 @@ def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None 
 def _guess_entity_name(query: str) -> str:
     text = re.sub(r"[《》“”\"']", " ", query or "")
     text = _strip_entity_noise(text)
-    text = re.sub(r"(区别在哪|有什么区别|区别|不同|系统|音乐路线|是什么|怎么样|如何|风格差异|差异在哪)", " ", text, flags=re.I)
+    text = re.sub(
+        r"(区别在哪|有什么区别|区别|不同|系统|音乐路线|是什么|怎么样|如何|风格差异|差异在哪)", " ", text, flags=re.I
+    )
     text = re.sub(r"(并给我|给我|顺便给我|再给我|分别给我|各自的).*$", " ", text, flags=re.I)
     text = re.sub(r"(入门歌|入门曲|代表作|代表歌|推荐歌单|推荐歌曲).*$", " ", text, flags=re.I)
     text = text.strip(" ？?，,。.")
@@ -2468,7 +2739,13 @@ def _artist_compare_profile(left: MusicEntity, right: MusicEntity) -> dict[str, 
                     "sound_focus": "hook、旋律化 rap、人声亲近感，容易进入流行语境。",
                     "narrative": "把关系、成功焦虑、城市夜生活写成可引用的个人独白。",
                     "entry_path": "适合从旋律说唱、R&B crossover、俱乐部单曲进入。",
-                    "entry_tracks": ["Headlines", "Hold On, We're Going Home", "Marvins Room", "Passionfruit", "Nonstop"],
+                    "entry_tracks": [
+                        "Headlines",
+                        "Hold On, We're Going Home",
+                        "Marvins Room",
+                        "Passionfruit",
+                        "Nonstop",
+                    ],
                     "preference_test": "旋律、歌词可引用度和 pop 结构",
                     "card_reason": "旋律说唱、R&B crossover、hook 感和流行结构更强。",
                 },
@@ -2476,7 +2753,13 @@ def _artist_compare_profile(left: MusicEntity, right: MusicEntity) -> dict[str, 
                     "sound_focus": "低频、808、迷幻合成器和 Auto-Tune 人声纹理，听感更黏、更暗。",
                     "narrative": "把情绪压进重复短句和 ad-lib，叙事不一定完整但状态非常强。",
                     "entry_path": "适合从 trap banger、mixtape 气质和夜晚驾驶感进入。",
-                    "entry_tracks": ["March Madness", "Mask Off", "Codeine Crazy", "Thought It Was a Drought", "Low Life"],
+                    "entry_tracks": [
+                        "March Madness",
+                        "Mask Off",
+                        "Codeine Crazy",
+                        "Thought It Was a Drought",
+                        "Low Life",
+                    ],
                     "preference_test": "氛围、低频冲击和情绪沉浸",
                     "card_reason": "808、Auto-Tune、trap 氛围和夜晚驾驶感更强。",
                 },
@@ -2505,7 +2788,13 @@ def _artist_compare_profile(left: MusicEntity, right: MusicEntity) -> dict[str, 
                     "sound_focus": "hook、旋律化 rap、R&B 过门和更贴近主流流行的歌曲结构。",
                     "narrative": "把关系、虚荣、成功焦虑和城市夜生活写成第一人称独白，句子感很强。",
                     "entry_path": "适合从旋律说唱、情歌向 rap、俱乐部 crossover 单曲进入。",
-                    "entry_tracks": ["Headlines", "Hold On, We're Going Home", "Marvins Room", "Passionfruit", "One Dance"],
+                    "entry_tracks": [
+                        "Headlines",
+                        "Hold On, We're Going Home",
+                        "Marvins Room",
+                        "Passionfruit",
+                        "One Dance",
+                    ],
                     "preference_test": "旋律说唱、歌词可引用度和流行结构",
                     "card_reason": "旋律 rap 与 R&B 过门自然，最强项是可引用的人称叙事与单曲感。",
                 },
@@ -2513,7 +2802,13 @@ def _artist_compare_profile(left: MusicEntity, right: MusicEntity) -> dict[str, 
                     "sound_focus": "假声、暗色合成器、80s synth-pop 光泽和更强的夜色氛围包裹感。",
                     "narrative": "更少直接讲完整故事，更擅长把欲望、空虚、堕落和自毁写成一整片情绪场。",
                     "entry_path": "适合从 dark R&B 代表作、流行爆单和电影感长线作品三条线切入。",
-                    "entry_tracks": ["Wicked Games", "The Hills", "Can't Feel My Face", "Blinding Lights", "After Hours"],
+                    "entry_tracks": [
+                        "Wicked Games",
+                        "The Hills",
+                        "Can't Feel My Face",
+                        "Blinding Lights",
+                        "After Hours",
+                    ],
                     "preference_test": "氛围、假声质感、夜色电影感和 synth-pop 包裹感",
                     "card_reason": "暗色 alt-R&B 与 synth-pop 气质更浓，最强项是夜色氛围和人声质感。",
                 },
@@ -2557,7 +2852,7 @@ def _infer_artist(query: str, name: str, entity_type: str) -> str:
     if entity_type != "album":
         return ""
     m = re.search(r"(.+?)\s*(?:的|-)\s*" + re.escape(name), query or "", re.I)
-    return (m.group(1).strip() if m else "")
+    return m.group(1).strip() if m else ""
 
 
 def _source_from_url(url: str) -> str:
@@ -2571,10 +2866,23 @@ def _source_from_url(url: str) -> str:
 def _source_from_host(host: str) -> str:
     host = (host or "").lower()
     known_domains = [
-        "pitchforkmedia.com", "pitchfork.com", "chicagotribune.com", "time.com",
-        "theguardian.com", "rollingstone.com", "residentadvisor.net", "stereogum.com",
-        "allmusic.com", "bbc.co.uk", "bbc.com", "rateyourmusic.com", "discogs.com",
-        "wikidata.org", "wikipedia.org", "genius.com", "whosampled.com",
+        "pitchforkmedia.com",
+        "pitchfork.com",
+        "chicagotribune.com",
+        "time.com",
+        "theguardian.com",
+        "rollingstone.com",
+        "residentadvisor.net",
+        "stereogum.com",
+        "allmusic.com",
+        "bbc.co.uk",
+        "bbc.com",
+        "rateyourmusic.com",
+        "discogs.com",
+        "wikidata.org",
+        "wikipedia.org",
+        "genius.com",
+        "whosampled.com",
     ]
     for domain in known_domains:
         if host == domain or host.endswith("." + domain):
@@ -2631,7 +2939,12 @@ def _target_track_from_entities(entities: list[MusicEntity], query: str) -> Trac
 
 def _guess_sample_track_name(query: str) -> str:
     text = re.sub(r"[《》“”\"']", " ", query or "")
-    text = re.sub(r"(采样了什么|采样了哪首|采样|源曲|给我调出来|用了哪些 sample|用了哪些sample|sample|interpolation|插值|翻唱|这首歌|哪首歌|什么歌)", " ", text, flags=re.I)
+    text = re.sub(
+        r"(采样了什么|采样了哪首|采样|源曲|给我调出来|用了哪些 sample|用了哪些sample|sample|interpolation|插值|翻唱|这首歌|哪首歌|什么歌)",
+        " ",
+        text,
+        flags=re.I,
+    )
     text = re.sub(r"\s+", " ", text).strip(" ？?，,。.")
     return _canonical_music_name(text)
 
@@ -2656,14 +2969,16 @@ def _sample_source_confidence(source: str, url: str = "") -> float:
 def _canonical_sample_evidence(target: TrackRef) -> list[SampleEvidence]:
     key = _canonical_music_name(target.title).lower()
     if key == "bound 2":
-        return [SampleEvidence(
-            source="whosampled",
-            title="Kanye West's Bound 2 sample of Ponderosa Twins Plus One's Bound",
-            url="https://www.whosampled.com/Kanye-West/Bound-2/",
-            excerpt="Bound 2 by Kanye West contains a sample of Bound by Ponderosa Twins Plus One.",
-            confidence=0.9,
-            source_tier="B",
-        )]
+        return [
+            SampleEvidence(
+                source="whosampled",
+                title="Kanye West's Bound 2 sample of Ponderosa Twins Plus One's Bound",
+                url="https://www.whosampled.com/Kanye-West/Bound-2/",
+                excerpt="Bound 2 by Kanye West contains a sample of Bound by Ponderosa Twins Plus One.",
+                confidence=0.9,
+                source_tier="B",
+            )
+        ]
     return []
 
 
@@ -2678,14 +2993,16 @@ def _relations_from_evidence(target: TrackRef, evidence: list[SampleEvidence]) -
         confidence = min(0.95, ev.confidence + (0.05 if relation_type != "unknown" else 0.0))
         if relation_type == "unknown":
             confidence = min(confidence, 0.55)
-        relations.append(SampleRelation(
-            target_track=target,
-            source_track=TrackRef(title=source_title, artist=source_artist, source="sample_source"),
-            relation_type=relation_type,
-            confidence=confidence,
-            evidence=[idx],
-            note=_sample_note_from_text(text, relation_type),
-        ))
+        relations.append(
+            SampleRelation(
+                target_track=target,
+                source_track=TrackRef(title=source_title, artist=source_artist, source="sample_source"),
+                relation_type=relation_type,
+                confidence=confidence,
+                evidence=[idx],
+                note=_sample_note_from_text(text, relation_type),
+            )
+        )
     return _dedupe_relations(relations)
 
 
@@ -2831,7 +3148,7 @@ def _tags_from_metadata(metadata: list[dict[str, Any]]) -> list[str]:
 
 
 def _limit_citations(citations: list[MusicCitation]) -> list[MusicCitation]:
-    return _dedupe_citations(citations)[:settings.knowledge_max_citations]
+    return _dedupe_citations(citations)[: settings.knowledge_max_citations]
 
 
 def _dedupe_citations(citations: list[MusicCitation]) -> list[MusicCitation]:

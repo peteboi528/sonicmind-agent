@@ -6,6 +6,7 @@
 3. 全维度有值时重归一化是恒等（remaining=1.0，与旧公式向后兼容）。
 4. 行为奖惩保持加性（不参与重归一化，保留 BaRT 语义）。
 """
+
 from __future__ import annotations
 
 from app.models import Asset, AssetStatus, TasteProfile
@@ -14,10 +15,15 @@ from app.recommend.engine import score_track
 
 def _track(aid, genre=None, mood=None, tempo=None, energy=None):
     return Asset(
-        asset_id=aid, source_url=f"x/{aid}", title=aid, duration_seconds=200,
+        asset_id=aid,
+        source_url=f"x/{aid}",
+        title=aid,
+        duration_seconds=200,
         status=AssetStatus.ANALYZED,
-        genre=genre or [], mood=mood or [],
-        tempo_bpm=tempo, energy_level=energy,
+        genre=genre or [],
+        mood=mood or [],
+        tempo_bpm=tempo,
+        energy_level=energy,
     )
 
 
@@ -36,8 +42,8 @@ def test_unmappable_features_degrade_without_constant():
 
 def test_estimated_energy_restores_discrimination():
     # 两首 genre 相同（流行→tempo 115 估算一致），仅 mood 不同 → energy 不同 → 分数不同
-    high = _track("h", genre=["流行"], mood=["激昂"])   # energy≈0.85
-    low = _track("l", genre=["流行"], mood=["放松"])    # energy≈0.30
+    high = _track("h", genre=["流行"], mood=["激昂"])  # energy≈0.85
+    low = _track("l", genre=["流行"], mood=["放松"])  # energy≈0.30
     sh = score_track(high, _taste(), ["欢快"], set())
     sl = score_track(low, _taste(), ["欢快"], set())
     assert sh != sl

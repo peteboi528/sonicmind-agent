@@ -1,4 +1,5 @@
 """Web 前端路由 测试。"""
+
 from __future__ import annotations
 
 import io
@@ -77,10 +78,13 @@ class TestWebRoutes:
 
     @pytest.mark.anyio
     async def test_playback_audio_with_track(self, client):
-        resp = await client.post("/api/playback/audio", json={
-            "track": {"title": "测试歌", "artist": "测试歌手", "source": "mock"},
-            "user_id": "test_user",
-        })
+        resp = await client.post(
+            "/api/playback/audio",
+            json={
+                "track": {"title": "测试歌", "artist": "测试歌手", "source": "mock"},
+                "user_id": "test_user",
+            },
+        )
         assert resp.status_code == 200
 
     @pytest.mark.anyio
@@ -88,16 +92,19 @@ class TestWebRoutes:
         """播放 ≠ 入库：playback 成功只回一个逻辑 asset_id 供收听采集，不能把歌写进库。"""
         monkeypatch.setattr(agent, "get_audio_url", lambda *_args, **_kwargs: "https://cdn.example.com/test.mp3")
         source_id = f"manual-{uuid.uuid4().hex[:10]}"
-        resp = await client.post("/api/playback/audio", json={
-            "track": {
-                "title": "播放测试歌",
-                "artist": "测试歌手",
-                "source": "netease",
-                "source_id": source_id,
-                "cover_url": "https://img.example.com/cover.jpg",
+        resp = await client.post(
+            "/api/playback/audio",
+            json={
+                "track": {
+                    "title": "播放测试歌",
+                    "artist": "测试歌手",
+                    "source": "netease",
+                    "source_id": source_id,
+                    "cover_url": "https://img.example.com/cover.jpg",
+                },
+                "user_id": "test_user",
             },
-            "user_id": "test_user",
-        })
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["reason"] == "ok"
@@ -110,10 +117,13 @@ class TestWebRoutes:
     @pytest.mark.anyio
     async def test_playback_audio_returns_reason(self, client):
         """无 URL 时返回结构化原因，便于前端区分提示。"""
-        resp = await client.post("/api/playback/audio", json={
-            "track": {"title": "无流歌", "artist": "x", "source": "bilibili"},
-            "user_id": "nobody",
-        })
+        resp = await client.post(
+            "/api/playback/audio",
+            json={
+                "track": {"title": "无流歌", "artist": "x", "source": "bilibili"},
+                "user_id": "nobody",
+            },
+        )
         data = resp.json()
         assert "reason" in data
         assert data["reason"] in {"ok", "vip_required", "not_found", "error"}
@@ -121,10 +131,13 @@ class TestWebRoutes:
     @pytest.mark.anyio
     async def test_playback_audio_netease_no_cookie_vip(self, client):
         """网易云无 cookie 取不到流 → vip_required 提示登录。"""
-        resp = await client.post("/api/playback/audio", json={
-            "track": {"title": "付费歌", "artist": "x", "source": "netease"},
-            "user_id": "no_cookie_user",
-        })
+        resp = await client.post(
+            "/api/playback/audio",
+            json={
+                "track": {"title": "付费歌", "artist": "x", "source": "netease"},
+                "user_id": "no_cookie_user",
+            },
+        )
         data = resp.json()
         # 拿到流则 ok，否则应提示需要 VIP/登录
         assert data["reason"] in {"ok", "vip_required"}
@@ -133,15 +146,20 @@ class TestWebRoutes:
     async def test_playback_audio_anonymous_ignores_body_user_id(self, client, monkeypatch):
         """匿名模式（AUTH_ENABLED=false）下播放代理不能按 body user_id 加载他人 cookie。"""
         loaded = []
+
         def spy_load(user_id):  # noqa: ARG001
             loaded.append(user_id)
             return None
+
         monkeypatch.setattr(netease_auth, "load_cookie", spy_load)
 
-        resp = await client.post("/api/playback/audio", json={
-            "track": {"title": "x", "artist": "y", "source": "netease"},
-            "user_id": "victim_user",
-        })
+        resp = await client.post(
+            "/api/playback/audio",
+            json={
+                "track": {"title": "x", "artist": "y", "source": "netease"},
+                "user_id": "victim_user",
+            },
+        )
         assert resp.status_code == 200
         assert loaded == ["web_user"]
 
@@ -229,7 +247,13 @@ class TestBotRoutes:
     @pytest.mark.anyio
     async def test_wechat_verify_not_configured(self, client):
         """未配置微信凭证时返回 503。"""
-        resp = await client.get("/webhook/wechat", params={
-            "signature": "xxx", "timestamp": "123", "nonce": "n", "echostr": "echo",
-        })
+        resp = await client.get(
+            "/webhook/wechat",
+            params={
+                "signature": "xxx",
+                "timestamp": "123",
+                "nonce": "n",
+                "echostr": "echo",
+            },
+        )
         assert resp.status_code in (200, 403, 503)

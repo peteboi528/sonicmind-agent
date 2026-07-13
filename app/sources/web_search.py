@@ -3,6 +3,7 @@
 Tavily 专为 AI agent 设计，返回高质量摘要文本，适合直接注入 LLM prompt。
 未配置 TAVILY_API_KEY 时自动降级到 DuckDuckGo（纯 urllib，无需 key）。
 """
+
 from __future__ import annotations
 
 import json
@@ -78,7 +79,10 @@ def fetch_url_content(url: str, api_key: str = "", timeout: float | None = None,
     }
     try:
         req = urllib.request.Request(
-            "https://api.tavily.com/extract", data=payload, headers=headers, method="POST",
+            "https://api.tavily.com/extract",
+            data=payload,
+            headers=headers,
+            method="POST",
         )
         with urllib.request.urlopen(req, timeout=timeout) as response:
             data = json.loads(response.read().decode("utf-8"))
@@ -114,12 +118,18 @@ async def _asearch_tavily(query: str, max_results: int, api_key: str) -> list[di
 
     try:
         response = await source_transport.request(
-            "tavily", "POST", "https://api.tavily.com/search",
+            "tavily",
+            "POST",
+            "https://api.tavily.com/search",
             json={
-                "query": query, "max_results": max_results,
-                "search_depth": "basic", "include_answer": False,
+                "query": query,
+                "max_results": max_results,
+                "search_depth": "basic",
+                "include_answer": False,
             },
-            headers={"Authorization": f"Bearer {api_key}"}, retries=0, concurrency=3,
+            headers={"Authorization": f"Bearer {api_key}"},
+            retries=0,
+            concurrency=3,
         )
         # transport 只对 429/5xx 抛错；432(超额)/401/403 会原样返回，这里显式判一下再解析。
         status = getattr(response, "status_code", 200)
@@ -137,9 +147,13 @@ async def _asearch_duckduckgo(query: str, max_results: int) -> list[dict[str, st
 
     try:
         response = await source_transport.request(
-            "duckduckgo", "GET", "https://api.duckduckgo.com/",
+            "duckduckgo",
+            "GET",
+            "https://api.duckduckgo.com/",
             params={"q": query, "format": "json", "no_html": 1, "skip_disambig": 1},
-            headers={"User-Agent": "Mozilla/5.0"}, retries=1, concurrency=3,
+            headers={"User-Agent": "Mozilla/5.0"},
+            retries=1,
+            concurrency=3,
         )
         return _parse_duckduckgo_results(response.json(), max_results)
     except Exception:
@@ -150,12 +164,14 @@ async def _asearch_duckduckgo(query: str, max_results: int) -> list[dict[str, st
 def _search_tavily(query: str, max_results: int, api_key: str, timeout: float = 15.0) -> list[dict[str, str]]:
     """Tavily Search API — 高质量结构化搜索结果。"""
     url = "https://api.tavily.com/search"
-    payload = json.dumps({
-        "query": query,
-        "max_results": max_results,
-        "search_depth": "basic",
-        "include_answer": False,
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "query": query,
+            "max_results": max_results,
+            "search_depth": "basic",
+            "include_answer": False,
+        }
+    ).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -176,10 +192,7 @@ def _search_duckduckgo(query: str, max_results: int, timeout: float = 10.0) -> l
 
     质量不如 Tavily，但零配置可用。
     """
-    url = (
-        "https://api.duckduckgo.com/"
-        f"?q={urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"
-    )
+    url = f"https://api.duckduckgo.com/?q={urllib.parse.quote(query)}&format=json&no_html=1&skip_disambig=1"
     headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"}
     try:
         req = urllib.request.Request(url, headers=headers)
@@ -202,10 +215,13 @@ def _parse_duckduckgo_results(data: dict, max_results: int) -> list[dict[str, st
     results: list[dict[str, str]] = []
     abstract = data.get("Abstract", "")
     if abstract:
-        results.append({
-            "title": data.get("Heading", ""), "content": abstract,
-            "url": data.get("AbstractURL", ""),
-        })
+        results.append(
+            {
+                "title": data.get("Heading", ""),
+                "content": abstract,
+                "url": data.get("AbstractURL", ""),
+            }
+        )
     for topic in data.get("RelatedTopics", [])[:max_results]:
         if isinstance(topic, dict) and (topic.get("Text") or topic.get("text")):
             text = topic.get("Text") or topic.get("text") or ""

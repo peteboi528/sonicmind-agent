@@ -7,6 +7,7 @@
 - 倒序：最近一次播放排最前。
 另直接断言 record_listen 把元数据落进 ListeningEvent。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -32,9 +33,15 @@ async def test_listening_history_new_metadata_online_track(client):
     """新格式：在线曲写入时带 title/source/source_id → 端点直接回显，available=True。"""
     uid = "lstn-new"
     agent.record_listen(
-        uid, "netease-123", duration=210, completed=True,
-        title="夜曲", artist="周杰伦", cover_url="https://img/1.jpg",
-        source="netease", source_id="123",
+        uid,
+        "netease-123",
+        duration=210,
+        completed=True,
+        title="夜曲",
+        artist="周杰伦",
+        cover_url="https://img/1.jpg",
+        source="netease",
+        source_id="123",
     )
     resp = await client.get(f"/history/listening/{uid}")
     assert resp.status_code == 200
@@ -104,9 +111,15 @@ async def test_record_listen_persists_display_metadata():
     """record_listen 把展示元数据落进 ListeningEvent（不止 asset_id）。"""
     uid = "lstn-persist"
     memory = agent.record_listen(
-        uid, "netease-555", duration=180, completed=True,
-        title="晴天", artist="周杰伦", cover_url="https://img/q.jpg",
-        source="netease", source_id="555",
+        uid,
+        "netease-555",
+        duration=180,
+        completed=True,
+        title="晴天",
+        artist="周杰伦",
+        cover_url="https://img/q.jpg",
+        source="netease",
+        source_id="555",
     )
     ev = memory.listening_history[-1]
     assert ev.title == "晴天"

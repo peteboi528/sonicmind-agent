@@ -1,4 +1,5 @@
 """凭证静态加密（secret_box）+ netease_auth 加密落盘测试。"""
+
 from __future__ import annotations
 
 import json
@@ -75,7 +76,9 @@ def test_migrate_noop_when_disabled(monkeypatch, tmp_path):
     (auth_dir / "u.json").write_text(json.dumps({"cookie": "x"}))
     # 未启用加密时 early-return，不扫不写
     assert secret_box.migrate_plaintext_cookies(str(tmp_path)) == {
-        "scanned": 0, "migrated": 0, "skipped": 0,
+        "scanned": 0,
+        "migrated": 0,
+        "skipped": 0,
     }
     assert json.loads((auth_dir / "u.json").read_text())["cookie"] == "x"
 

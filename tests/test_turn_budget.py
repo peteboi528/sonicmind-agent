@@ -7,6 +7,7 @@
 3. 旧 checkpoint state 无 turn_deadline_at → 向后兼容，不卡。
 4. max_attempts=2 允许第二 attempt 恢复（reflect 阶梯），不被 max_attempts=1 卡死。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -27,21 +28,41 @@ def _agent(tmp_path) -> AudioVisualAgent:
 def _outcome(tool: str, status: str, *, query: str = "q", kind: str = "", message: str = "", attempt: int = 0) -> dict:
     error = {"kind": kind, "message": message, "retryable": False} if kind else None
     return {
-        "call_id": f"{tool}-1", "tool": tool, "status": status,
-        "arguments": {"query": query}, "summary": "", "error": error,
-        "card_count": 0, "provenance": [], "metrics": {}, "attempt": attempt,
+        "call_id": f"{tool}-1",
+        "tool": tool,
+        "status": status,
+        "arguments": {"query": query},
+        "summary": "",
+        "error": error,
+        "card_count": 0,
+        "provenance": [],
+        "metrics": {},
+        "attempt": attempt,
     }
 
 
-def _state(plan: AgentPlan, outcomes: list[dict] | None = None, *, turn_deadline: float | None = None,
-           refine_count: int = 0, query: str = "来点深夜放松的歌曲") -> dict:
+def _state(
+    plan: AgentPlan,
+    outcomes: list[dict] | None = None,
+    *,
+    turn_deadline: float | None = None,
+    refine_count: int = 0,
+    query: str = "来点深夜放松的歌曲",
+) -> dict:
     ctx: dict = {"dialogue_state": {}}
     if turn_deadline is not None:
         ctx["turn_deadline_at"] = turn_deadline
     return {
-        "user_id": "u", "query": query, "top_k": 5, "plan": plan,
-        "results": [], "tool_outcomes": outcomes or [], "trace": [], "events": [],
-        "context": ctx, "_refine_count": refine_count,
+        "user_id": "u",
+        "query": query,
+        "top_k": 5,
+        "plan": plan,
+        "results": [],
+        "tool_outcomes": outcomes or [],
+        "trace": [],
+        "events": [],
+        "context": ctx,
+        "_refine_count": refine_count,
     }
 
 
@@ -49,7 +70,9 @@ def test_reflect_stops_refine_when_turn_budget_exceeded(tmp_path, monkeypatch):
     """通用路径 turn_deadline_at 过期 → reflect 直接 _need_refine=False，不走 recovery。"""
     monkeypatch.setattr(settings, "enable_empty_result_recovery", True)
     plan = AgentPlan(
-        intent="recommend", tools_needed=["recommend"], target_count=5,
+        intent="recommend",
+        tools_needed=["recommend"],
+        target_count=5,
         retrieval_plan=RetrievalPlan(search_query="放松"),
     )
     state = _state(plan, [], turn_deadline=time.monotonic() - 1.0)
@@ -63,7 +86,8 @@ def test_reflect_ignores_turn_budget_for_knowledge(tmp_path, monkeypatch):
     """knowledge intent 即使 turn_deadline_at 过期也不卡（走自己的 deadline_at）。"""
     monkeypatch.setattr(settings, "enable_empty_result_recovery", True)
     plan = AgentPlan(
-        intent="album_deep_dive", tools_needed=["music_knowledge"],
+        intent="album_deep_dive",
+        tools_needed=["music_knowledge"],
         retrieval_plan=RetrievalPlan(search_query="专辑"),
     )
     state = _state(plan, [], turn_deadline=time.monotonic() - 1.0)
@@ -76,7 +100,9 @@ def test_turn_budget_not_set_does_not_block(tmp_path, monkeypatch):
     """旧 state 无 turn_deadline_at → 向后兼容，不卡，正常走 recovery/reflect。"""
     monkeypatch.setattr(settings, "enable_empty_result_recovery", True)
     plan = AgentPlan(
-        intent="recommend", tools_needed=["recommend"], target_count=5,
+        intent="recommend",
+        tools_needed=["recommend"],
+        target_count=5,
         retrieval_plan=RetrievalPlan(search_query="放松"),
     )
     state = _state(plan, [])  # 无 turn_deadline_at
@@ -89,11 +115,14 @@ def test_recovery_blocked_by_turn_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "enable_empty_result_recovery", True)
     monkeypatch.setattr(settings, "empty_result_recovery_max_attempts", 2)
     plan = AgentPlan(
-        intent="recommend", tools_needed=["web_music_search", "recommend"], target_count=5,
+        intent="recommend",
+        tools_needed=["web_music_search", "recommend"],
+        target_count=5,
         retrieval_plan=RetrievalPlan(search_query="深夜放松", entities=["The Weeknd"]),
     )
     state = _state(
-        plan, [_outcome("web_music_search", "empty", query="深夜放松")],
+        plan,
+        [_outcome("web_music_search", "empty", query="深夜放松")],
         turn_deadline=time.monotonic() - 1.0,
     )
     out = asyncio.run(reflect_async(_agent(tmp_path), state))
@@ -106,15 +135,21 @@ def test_recovery_two_step_ladder_allows_second_attempt(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "enable_empty_result_recovery", True)
     monkeypatch.setattr(settings, "empty_result_recovery_max_attempts", 2)
     plan = AgentPlan(
-        intent="recommend", tools_needed=["web_music_search", "recommend"], target_count=5,
+        intent="recommend",
+        tools_needed=["web_music_search", "recommend"],
+        target_count=5,
         retrieval_plan=RetrievalPlan(
-            search_query="深夜放松", entities=["The Weeknd"],
-            mood_filter=["放松"], search_variants=["late night rnb"],
+            search_query="深夜放松",
+            entities=["The Weeknd"],
+            mood_filter=["放松"],
+            search_variants=["late night rnb"],
         ),
     )
     state = _state(
-        plan, [_outcome("web_music_search", "empty", query="深夜放松", attempt=1)],
-        refine_count=1, query="深夜放松",
+        plan,
+        [_outcome("web_music_search", "empty", query="深夜放松", attempt=1)],
+        refine_count=1,
+        query="深夜放松",
     )
     state["context"]["dialogue_state"] = {"entities": ["The Weeknd"], "mood_tags": ["chill"]}
     out = asyncio.run(reflect_async(_agent(tmp_path), state))

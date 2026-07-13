@@ -84,15 +84,17 @@ def test_agent_builds_distinct_tier_llms_when_models_differ(monkeypatch, tmp_pat
 
 
 def test_runtime_metrics_track_model_tiers():
-    llm = SimpleNamespace(last_stats={
-        "llm_calls": 1,
-        "prompt_tokens": 10,
-        "completion_tokens": 5,
-        "total_tokens": 15,
-        "latency_ms": 12.3,
-        "estimated_cost_usd": 0.00001,
-        "tier": "strong",
-    })
+    llm = SimpleNamespace(
+        last_stats={
+            "llm_calls": 1,
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "latency_ms": 12.3,
+            "estimated_cost_usd": 0.00001,
+            "tier": "strong",
+        }
+    )
 
     metrics = capture_llm_stats(llm)
 

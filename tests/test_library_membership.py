@@ -16,7 +16,10 @@ def _agent(tmp_path):
 def test_asset_id_for_track_does_not_persist(tmp_path):
     agent = _agent(tmp_path)
     track = ExternalTrack(
-        external_id="111", title="t", artist="a", source="netease",
+        external_id="111",
+        title="t",
+        artist="a",
+        source="netease",
         playback_url="https://music.163.com/song?id=111",
     )
     assert agent.list_assets() == []
@@ -38,8 +41,11 @@ def test_asset_id_for_track_matches_persisted_id(tmp_path):
 def test_classify_asset_tags_unknown_track(tmp_path):
     agent = _agent(tmp_path)
     asset = Asset(
-        asset_id="x1", source_url="https://music.163.com/song?id=1",
-        title="God's Plan", artist="Drake", duration_seconds=200,
+        asset_id="x1",
+        source_url="https://music.163.com/song?id=1",
+        title="God's Plan",
+        artist="Drake",
+        duration_seconds=200,
         status=AssetStatus.ANALYZED,
     )
     agent.store.write_model("assets", "x1", asset)
@@ -54,26 +60,40 @@ def test_classify_asset_tags_unknown_track(tmp_path):
 def test_record_dislike_removes_matching_library_asset(tmp_path):
     agent = _agent(tmp_path)
     asset = Asset(
-        asset_id="d1", source_url="https://music.163.com/song?id=777",
-        title="Disliked", artist="X", duration_seconds=200,
-        status=AssetStatus.ANALYZED, source="local",
+        asset_id="d1",
+        source_url="https://music.163.com/song?id=777",
+        title="Disliked",
+        artist="X",
+        duration_seconds=200,
+        status=AssetStatus.ANALYZED,
+        source="local",
     )
     agent.store.write_model("assets", "d1", asset)
     assert any(a.asset_id == "d1" for a in agent.list_assets())
 
-    agent.record_dislike(DislikeRequest(
-        user_id="test-dislike-rm", title="Disliked", artist="X",
-        source="netease", source_id="777",
-    ))
+    agent.record_dislike(
+        DislikeRequest(
+            user_id="test-dislike-rm",
+            title="Disliked",
+            artist="X",
+            source="netease",
+            source_id="777",
+        )
+    )
     assert not any(a.asset_id == "d1" for a in agent.list_assets())  # 已移除
 
 
 def test_record_dislike_noop_when_not_in_library(tmp_path):
     agent = _agent(tmp_path)
-    agent.record_dislike(DislikeRequest(
-        user_id="test-dislike-noop", title="Never Imported", artist="Y",
-        source="netease", source_id="999",
-    ))
+    agent.record_dislike(
+        DislikeRequest(
+            user_id="test-dislike-noop",
+            title="Never Imported",
+            artist="Y",
+            source="netease",
+            source_id="999",
+        )
+    )
     assert agent.list_assets() == []  # 没入库的歌，× 不产生库副作用
 
 
@@ -81,15 +101,28 @@ def test_record_dislike_noop_when_not_in_library(tmp_path):
 def test_import_skips_disliked_tracks(tmp_path, monkeypatch):
     agent = _agent(tmp_path)
     # 先把 A 标为不喜欢
-    agent.record_dislike(DislikeRequest(
-        user_id="test-import-skip", title="Track A", artist="AA",
-        source="netease", source_id="100",
-    ))
+    agent.record_dislike(
+        DislikeRequest(
+            user_id="test-import-skip",
+            title="Track A",
+            artist="AA",
+            source="netease",
+            source_id="100",
+        )
+    )
+
     # 打桩歌单抓取：A(被嫌弃) + B(正常)
     def fake_fetch(pid, cookie="", limit=200):
-        return {"name": "pl", "total": 2, "tags": [],
-                "tracks": [{"song_id": "100", "title": "Track A", "artist": "AA"},
-                           {"song_id": "101", "title": "Track B", "artist": "Drake"}]}
+        return {
+            "name": "pl",
+            "total": 2,
+            "tags": [],
+            "tracks": [
+                {"song_id": "100", "title": "Track A", "artist": "AA"},
+                {"song_id": "101", "title": "Track B", "artist": "Drake"},
+            ],
+        }
+
     monkeypatch.setattr("app.netease_auth.fetch_playlist_tracks", fake_fetch)
     # LLM 分类打桩为空（走关键词/艺人映射兜底，离线确定）
     monkeypatch.setattr(agent.library_svc, "_batch_classify_tracks", lambda pairs: [{} for _ in pairs])
@@ -107,9 +140,15 @@ def test_import_rejects_junk_tracks(tmp_path, monkeypatch):
     agent = _agent(tmp_path)
 
     def fake_fetch(pid, cookie="", limit=200):
-        return {"name": "pl", "total": 2, "tags": [],
-                "tracks": [{"song_id": "1", "title": "真歌", "artist": "Drake"},
-                           {"song_id": "2", "title": "钢琴轻音乐教程合集", "artist": "教程君"}]}
+        return {
+            "name": "pl",
+            "total": 2,
+            "tags": [],
+            "tracks": [
+                {"song_id": "1", "title": "真歌", "artist": "Drake"},
+                {"song_id": "2", "title": "钢琴轻音乐教程合集", "artist": "教程君"},
+            ],
+        }
 
     monkeypatch.setattr("app.netease_auth.fetch_playlist_tracks", fake_fetch)
     monkeypatch.setattr(agent.library_svc, "_batch_classify_tracks", lambda pairs: [{} for _ in pairs])
@@ -125,23 +164,44 @@ def test_import_rejects_junk_tracks(tmp_path, monkeypatch):
 # ── D: 污染清理 ──────────────────────────────────────────────────────────────
 def test_cleanup_deletes_external_tagless_and_reclassifies_local(tmp_path):
     agent = _agent(tmp_path)
-    ext = Asset(asset_id="e1", source_url="https://music.163.com/song?id=2",
-                title="Played", artist="Q", duration_seconds=200,
-                status=AssetStatus.ANALYZED, source="external")  # 无标签 → 播放垃圾
-    untyped_local = Asset(asset_id="u1", source_url="https://music.163.com/song?id=3",
-                          title="Sicko Mode", artist="Travis Scott", duration_seconds=200,
-                          status=AssetStatus.ANALYZED, source="local", genre=["未分类"])  # 漏分类
-    tagged = Asset(asset_id="t1", source_url="https://music.163.com/song?id=4",
-                   title="Tagged", artist="Z", duration_seconds=200,
-                   status=AssetStatus.ANALYZED, source="local", genre=["流行"], mood=["欢快"])
+    ext = Asset(
+        asset_id="e1",
+        source_url="https://music.163.com/song?id=2",
+        title="Played",
+        artist="Q",
+        duration_seconds=200,
+        status=AssetStatus.ANALYZED,
+        source="external",
+    )  # 无标签 → 播放垃圾
+    untyped_local = Asset(
+        asset_id="u1",
+        source_url="https://music.163.com/song?id=3",
+        title="Sicko Mode",
+        artist="Travis Scott",
+        duration_seconds=200,
+        status=AssetStatus.ANALYZED,
+        source="local",
+        genre=["未分类"],
+    )  # 漏分类
+    tagged = Asset(
+        asset_id="t1",
+        source_url="https://music.163.com/song?id=4",
+        title="Tagged",
+        artist="Z",
+        duration_seconds=200,
+        status=AssetStatus.ANALYZED,
+        source="local",
+        genre=["流行"],
+        mood=["欢快"],
+    )
     for a in (ext, untyped_local, tagged):
         agent.store.write_model("assets", a.asset_id, a)
 
     result = agent.cleanup_play_pollution()
     assert result == {"deleted": 1, "reclassified": 1}
     ids = {a.asset_id for a in agent.list_assets()}
-    assert "e1" not in ids            # 外部无标签 → 删除
-    assert "u1" in ids                # 本地未分类 → 保留并重分类
+    assert "e1" not in ids  # 外部无标签 → 删除
+    assert "u1" in ids  # 本地未分类 → 保留并重分类
     u1 = agent.store.read_model("assets", "u1", Asset)
     assert u1.genre and u1.genre != ["未分类"]  # Travis Scott → 欧美说唱/Trap
-    assert "t1" in ids                # 有真实标签 → 不动
+    assert "t1" in ids  # 有真实标签 → 不动

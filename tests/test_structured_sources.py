@@ -1,4 +1,5 @@
 """结构化知识源合流测试：_apply_structured_sources + 无凭证降级。"""
+
 from __future__ import annotations
 
 from app.knowledge import _apply_structured_sources, _discogs_metadata, _source_from_url, _spotify_metadata
@@ -77,7 +78,9 @@ def test_apply_musicbrainz_relations_as_citations():
 
 
 def test_source_from_archive_url_uses_original_domain():
-    url = "http://web.archive.org/web/20010303103405/www.pitchforkmedia.com/record-reviews/r/radiohead/ok-computer.shtml"
+    url = (
+        "http://web.archive.org/web/20010303103405/www.pitchforkmedia.com/record-reviews/r/radiohead/ok-computer.shtml"
+    )
     assert _source_from_url(url) == "pitchforkmedia"
 
 
@@ -134,8 +137,11 @@ def test_enrich_review_content_constructs_lastfm_and_fills(monkeypatch):
     monkeypatch.setattr(knowledge.web_search_source, "fetch_url_content", fake_fetch)
 
     entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
-    cites = [MusicCitation(source="musicbrainz", url="https://musicbrainz.org/release-group/x",
-                           kind="encyclopedia", excerpt="")]
+    cites = [
+        MusicCitation(
+            source="musicbrainz", url="https://musicbrainz.org/release-group/x", kind="encyclopedia", excerpt=""
+        )
+    ]
     knowledge._enrich_review_content(cites, entity, time.monotonic() + 30)
 
     lastfm = [c for c in cites if "last.fm" in c.url]
@@ -152,8 +158,11 @@ def test_enrich_review_content_skips_when_budget_too_tight():
     from app.models import MusicCitation, MusicEntity
 
     entity = MusicEntity(type="album", name="Blonde", artist="Frank Ocean")
-    cites = [MusicCitation(source="lastfm", url="https://www.last.fm/music/Frank+Ocean/Blonde",
-                           kind="encyclopedia", excerpt="")]
+    cites = [
+        MusicCitation(
+            source="lastfm", url="https://www.last.fm/music/Frank+Ocean/Blonde", kind="encyclopedia", excerpt=""
+        )
+    ]
     before = len(cites)
     knowledge._enrich_review_content(cites, entity, time.monotonic() + 0.5)  # 剩余不足
     assert len(cites) == before

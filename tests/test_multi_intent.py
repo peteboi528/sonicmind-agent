@@ -52,12 +52,15 @@ def multi_off(monkeypatch):
 
 # ---- QueryPlanPayload.secondary 解析 ----
 
+
 def test_payload_parses_valid_secondary():
-    payload = QueryPlanPayload.model_validate({
-        "intent": "recommend",
-        "entities": ["The Weeknd"],
-        "secondary": {"intent": "artist_deep_dive", "entities": ["The Weeknd"], "search_query": "The Weeknd"},
-    })
+    payload = QueryPlanPayload.model_validate(
+        {
+            "intent": "recommend",
+            "entities": ["The Weeknd"],
+            "secondary": {"intent": "artist_deep_dive", "entities": ["The Weeknd"], "search_query": "The Weeknd"},
+        }
+    )
     assert payload.secondary is not None
     assert payload.secondary.intent == "artist_deep_dive"
 
@@ -68,15 +71,18 @@ def test_payload_no_secondary_defaults_none():
 
 
 def test_payload_invalid_secondary_intent_dropped():
-    payload = QueryPlanPayload.model_validate({
-        "intent": "recommend",
-        "secondary": {"intent": "not_a_real_intent", "entities": ["X"]},
-    })
+    payload = QueryPlanPayload.model_validate(
+        {
+            "intent": "recommend",
+            "secondary": {"intent": "not_a_real_intent", "entities": ["X"]},
+        }
+    )
     # 非法 intent → SecondaryIntent 归一空串 → model_validator 丢弃整个 secondary
     assert payload.secondary is None
 
 
 # ---- 白名单 ----
+
 
 def test_allowed_pairs_whitelist():
     assert is_allowed_multi_intent_pair("recommend", "artist_deep_dive")
@@ -89,14 +95,17 @@ def test_allowed_pairs_whitelist():
 
 # ---- 三重闸门：_build_secondary_sub_plans / _plan_from_query_payload ----
 
+
 def _payload_with_secondary():
-    return QueryPlanPayload.model_validate({
-        "intent": "recommend",
-        "entities": ["The Weeknd"],
-        "use_web": True,
-        "search_query": "The Weeknd",
-        "secondary": {"intent": "artist_deep_dive", "entities": ["The Weeknd"], "search_query": "The Weeknd"},
-    })
+    return QueryPlanPayload.model_validate(
+        {
+            "intent": "recommend",
+            "entities": ["The Weeknd"],
+            "use_web": True,
+            "search_query": "The Weeknd",
+            "secondary": {"intent": "artist_deep_dive", "entities": ["The Weeknd"], "search_query": "The Weeknd"},
+        }
+    )
 
 
 def test_flag_on_and_allowed_builds_sub_plan(multi_on):
@@ -115,10 +124,12 @@ def test_flag_off_discards_secondary(multi_off):
 
 
 def test_disallowed_pair_discards_secondary(multi_on):
-    payload = QueryPlanPayload.model_validate({
-        "intent": "recommend",
-        "secondary": {"intent": "playlist", "entities": []},  # recommend+playlist 不在白名单
-    })
+    payload = QueryPlanPayload.model_validate(
+        {
+            "intent": "recommend",
+            "secondary": {"intent": "playlist", "entities": []},  # recommend+playlist 不在白名单
+        }
+    )
     plan = nodes._plan_from_query_payload(payload, "推几首歌再做个歌单")
     assert plan.sub_plans == []
 
@@ -130,6 +141,7 @@ def test_no_secondary_single_intent(multi_on):
 
 
 # ---- AgentPlan 属性 ----
+
 
 def test_agent_plan_multi_intent_properties():
     sub = AgentPlan(intent="artist_deep_dive")
@@ -143,6 +155,7 @@ def test_agent_plan_multi_intent_properties():
 
 
 # ---- _merge_multi_intent_stages ----
+
 
 def test_merge_dedupes_shared_resolve_and_parallelizes(multi_on):
     plan = nodes._plan_from_query_payload(_payload_with_secondary(), "推几首 The Weeknd 顺便讲讲他")
@@ -165,6 +178,7 @@ def test_merge_dedupes_shared_resolve_and_parallelizes(multi_on):
 
 
 # ---- _select_listed_tracks：primary=知识 但 sub_plan=track 时仍出卡片 ----
+
 
 def _fake_search_results():
     tracks = [
@@ -201,6 +215,7 @@ def test_select_listed_tracks_single_intent_unchanged():
 
 # ---- 合成：一条答案出两段 ----
 
+
 def _dossier_result():
     dossier = MusicDossier(
         entity=MusicEntity(name="The Weeknd", type="artist"),
@@ -231,6 +246,7 @@ def test_compose_single_intent_flag_off_parity(multi_off):
 
 # ---- guard：多意图知识段跳过 guard ----
 
+
 def test_finalize_skips_guard_when_secondary_is_knowledge(monkeypatch):
     called = {"guard": False}
 
@@ -259,6 +275,7 @@ def test_guard_runs_for_plain_track_intent():
 
 # ---- 端到端：一条 final payload 同时带 cards 与 dossier ----
 
+
 def test_finalize_payload_has_both_cards_and_dossier(tmp_path, multi_on):
     from app.agent import AudioVisualAgent
     from app.storage import JsonStore
@@ -284,4 +301,3 @@ def test_finalize_payload_has_both_cards_and_dossier(tmp_path, multi_on):
     assert len(final_payload["cards"]) == 2
     assert final_payload.get("dossier"), "缺少 dossier"
     assert final_payload["dossier"]["entity"]["name"] == "The Weeknd"
-

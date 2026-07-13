@@ -2,6 +2,7 @@
 
 对应线上问题：bilibili/netease 把教程/合集当 song 返回，污染候选池。
 """
+
 from __future__ import annotations
 
 from app.models import ExternalTrack

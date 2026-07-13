@@ -4,14 +4,20 @@
 都成正激励、零梯度。改用相对自己均值的 z-score 后：基准分≈0（"喜欢"由入库表达）、低于常态
 的真负信号、全员同分自动归零。
 """
+
 from app.models import Asset, AssetStatus, RatingEntry
 from app.recommend.engine import compute_taste_profile
 
 
 def _asset(aid, genre):
     return Asset(
-        asset_id=aid, source_url=f"x/{aid}", title=aid, duration_seconds=200,
-        status=AssetStatus.ANALYZED, genre=genre, mood=["放松"],
+        asset_id=aid,
+        source_url=f"x/{aid}",
+        title=aid,
+        duration_seconds=200,
+        status=AssetStatus.ANALYZED,
+        genre=genre,
+        mood=["放松"],
     )
 
 

@@ -52,12 +52,14 @@ def build_recommend_explanation(
             evidence["source_trust"] += 1
         if getattr(track, "artist", ""):
             evidence["artist_or_style_similarity"] += 1
-        per_track.append({
-            "title": track.title,
-            "artist": track.artist,
-            "source": source,
-            "reasons": reasons,
-        })
+        per_track.append(
+            {
+                "title": track.title,
+                "artist": track.artist,
+                "source": source,
+                "reasons": reasons,
+            }
+        )
         suggested_tracks.append(track)
     return {
         "type": "recommend_explainer",

@@ -1,4 +1,5 @@
 """Bot 适配器协议层 + 飞书/微信解析 测试。"""
+
 from __future__ import annotations
 
 import hashlib
@@ -63,11 +64,14 @@ class TestBaseConversion:
     def test_stream_events_to_bot_response(self):
         events = [
             StreamEvent(type="thinking", content="规划中..."),
-            StreamEvent(type="candidates", payload={
-                "cards": [
-                    {"title": "夜曲", "artist": "周杰伦", "source": "netease", "reason": "经典"},
-                ]
-            }),
+            StreamEvent(
+                type="candidates",
+                payload={
+                    "cards": [
+                        {"title": "夜曲", "artist": "周杰伦", "source": "netease", "reason": "经典"},
+                    ]
+                },
+            ),
             StreamEvent(type="final", content="为你推荐了一首歌"),
         ]
         resp = stream_events_to_bot_response(events)
@@ -77,9 +81,14 @@ class TestBaseConversion:
 
     def test_stream_events_song_card(self):
         events = [
-            StreamEvent(type="song_card", payload={
-                "title": "晴天", "artist": "周杰伦", "cover_url": "http://x.com/c.jpg",
-            }),
+            StreamEvent(
+                type="song_card",
+                payload={
+                    "title": "晴天",
+                    "artist": "周杰伦",
+                    "cover_url": "http://x.com/c.jpg",
+                },
+            ),
             StreamEvent(type="final", content="OK"),
         ]
         resp = stream_events_to_bot_response(events)
@@ -102,11 +111,13 @@ class TestFeishuAdapter:
         )
 
     def test_handle_challenge(self, adapter):
-        body = json.dumps({
-            "type": "url_verification",
-            "challenge": "abc123",
-            "token": "token_test",
-        }).encode()
+        body = json.dumps(
+            {
+                "type": "url_verification",
+                "challenge": "abc123",
+                "token": "token_test",
+            }
+        ).encode()
         result = adapter.handle_challenge(body)
         assert result == {"challenge": "abc123"}
 
@@ -116,20 +127,22 @@ class TestFeishuAdapter:
         assert result is None
 
     def test_parse_text_message(self, adapter):
-        body = json.dumps({
-            "event": {
-                "message": {
-                    "message_type": "text",
-                    "content": json.dumps({"text": "推荐几首歌"}),
-                    "message_id": "msg_001",
-                    "chat_id": "oc_xxx",
+        body = json.dumps(
+            {
+                "event": {
+                    "message": {
+                        "message_type": "text",
+                        "content": json.dumps({"text": "推荐几首歌"}),
+                        "message_id": "msg_001",
+                        "chat_id": "oc_xxx",
+                    },
+                    "sender": {
+                        "sender_id": {"open_id": "ou_abc123"},
+                        "sender_type": "user",
+                    },
                 },
-                "sender": {
-                    "sender_id": {"open_id": "ou_abc123"},
-                    "sender_type": "user",
-                },
-            },
-        }).encode()
+            }
+        ).encode()
         msg = adapter.parse_request(body, {})
         assert msg is not None
         assert msg.content == "推荐几首歌"
@@ -137,16 +150,18 @@ class TestFeishuAdapter:
         assert msg.message_id == "msg_001"
 
     def test_parse_non_text_message(self, adapter):
-        body = json.dumps({
-            "event": {
-                "message": {
-                    "message_type": "image",
-                    "content": "{}",
-                    "message_id": "msg_002",
+        body = json.dumps(
+            {
+                "event": {
+                    "message": {
+                        "message_type": "image",
+                        "content": "{}",
+                        "message_id": "msg_002",
+                    },
+                    "sender": {"sender_id": {"open_id": "ou_x"}},
                 },
-                "sender": {"sender_id": {"open_id": "ou_x"}},
-            },
-        }).encode()
+            }
+        ).encode()
         msg = adapter.parse_request(body, {})
         assert msg is None
 
@@ -174,7 +189,9 @@ class TestFeishuAdapter:
 class TestFeishuVerification:
     def test_verify_signature_valid(self):
         adapter = FeishuAdapter(
-            app_id="cli", app_secret="s", verification_token="tok",
+            app_id="cli",
+            app_secret="s",
+            verification_token="tok",
             encrypt_key="enc_key_123",
         )
         body = b'{"encrypt":"xxx"}'
@@ -190,7 +207,9 @@ class TestFeishuVerification:
 
     def test_verify_signature_invalid_rejected(self):
         adapter = FeishuAdapter(
-            app_id="cli", app_secret="s", verification_token="tok",
+            app_id="cli",
+            app_secret="s",
+            verification_token="tok",
             encrypt_key="enc_key_123",
         )
         headers = {
@@ -203,7 +222,9 @@ class TestFeishuVerification:
     def test_verify_token_path_when_no_signature(self):
         """无签名头时回退到 verification_token 校验。"""
         adapter = FeishuAdapter(
-            app_id="cli", app_secret="s", verification_token="tok_secret",
+            app_id="cli",
+            app_secret="s",
+            verification_token="tok_secret",
             encrypt_key="",
         )
         good = json.dumps({"header": {"token": "tok_secret"}, "type": "event"}).encode()
@@ -213,7 +234,9 @@ class TestFeishuVerification:
 
     def test_verify_token_v1_top_level(self):
         adapter = FeishuAdapter(
-            app_id="cli", app_secret="s", verification_token="tok_secret",
+            app_id="cli",
+            app_secret="s",
+            verification_token="tok_secret",
             encrypt_key="",
         )
         v1 = json.dumps({"token": "tok_secret", "type": "event_callback"}).encode()
@@ -222,7 +245,10 @@ class TestFeishuVerification:
     def test_no_credentials_allows_dev_mode(self):
         """既没配 encrypt_key 也没配 token → 放行（本地开发），不抛异常。"""
         adapter = FeishuAdapter(
-            app_id="cli", app_secret="s", verification_token="", encrypt_key="",
+            app_id="cli",
+            app_secret="s",
+            verification_token="",
+            encrypt_key="",
         )
         assert adapter.verify_request(b'{"type":"event"}', {}) is True
 
@@ -236,12 +262,18 @@ class TestFeishuVerification:
 
         encrypt_key = "my_encrypt_key"
         adapter = FeishuAdapter(
-            app_id="cli", app_secret="s", verification_token="tok",
+            app_id="cli",
+            app_secret="s",
+            verification_token="tok",
             encrypt_key=encrypt_key,
         )
-        plaintext = json.dumps({
-            "type": "url_verification", "challenge": "chal_42", "token": "tok",
-        }).encode()
+        plaintext = json.dumps(
+            {
+                "type": "url_verification",
+                "challenge": "chal_42",
+                "token": "tok",
+            }
+        ).encode()
         key = hashlib.sha256(encrypt_key.encode()).digest()
         iv = _os.urandom(16)
         padder = sym_padding.PKCS7(128).padder()
@@ -270,6 +302,7 @@ class TestWeChatAdapter:
 
     def test_verify_signature_valid(self, adapter):
         import hashlib
+
         parts = sorted(["test_token", "1234567890", "nonce123"])
         sig = hashlib.sha1("".join(parts).encode()).hexdigest()
         assert adapter.verify_signature("1234567890", "nonce123", sig)
@@ -279,14 +312,14 @@ class TestWeChatAdapter:
 
     def test_parse_text_xml(self, adapter):
         xml = (
-            '<xml>'
-            '<ToUserName><![CDATA[gh_abc]]></ToUserName>'
-            '<FromUserName><![CDATA[o_user123]]></FromUserName>'
-            '<CreateTime>1700000000</CreateTime>'
-            '<MsgType><![CDATA[text]]></MsgType>'
-            '<Content><![CDATA[推荐好听的歌]]></Content>'
-            '<MsgId>123456</MsgId>'
-            '</xml>'
+            "<xml>"
+            "<ToUserName><![CDATA[gh_abc]]></ToUserName>"
+            "<FromUserName><![CDATA[o_user123]]></FromUserName>"
+            "<CreateTime>1700000000</CreateTime>"
+            "<MsgType><![CDATA[text]]></MsgType>"
+            "<Content><![CDATA[推荐好听的歌]]></Content>"
+            "<MsgId>123456</MsgId>"
+            "</xml>"
         )
         msg = adapter.parse_request(xml.encode(), {})
         assert msg is not None
@@ -296,11 +329,11 @@ class TestWeChatAdapter:
 
     def test_parse_non_text_xml(self, adapter):
         xml = (
-            '<xml>'
-            '<MsgType><![CDATA[image]]></MsgType>'
-            '<FromUserName><![CDATA[o_user]]></FromUserName>'
-            '<ToUserName><![CDATA[gh_abc]]></ToUserName>'
-            '</xml>'
+            "<xml>"
+            "<MsgType><![CDATA[image]]></MsgType>"
+            "<FromUserName><![CDATA[o_user]]></FromUserName>"
+            "<ToUserName><![CDATA[gh_abc]]></ToUserName>"
+            "</xml>"
         )
         msg = adapter.parse_request(xml.encode(), {})
         assert msg is None

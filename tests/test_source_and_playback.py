@@ -5,6 +5,7 @@
 2. get_audio_url 用 isinstance 严格判类型，Web 前端传的 SimpleNamespace
    两者都不匹配，VIP 登录后仍永远返回 None。
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -19,11 +20,13 @@ class TestSourceFactory:
         monkeypatch.setenv("EXTERNAL_SOURCE", "netease")
         # 重新读取 settings 的取值路径：直接构造工厂依赖的 settings 字段
         import app.config
+
         monkeypatch.setattr(app.config.settings, "external_source", "netease")
         assert isinstance(_build_source(), NeteaseSource)
 
     def test_mock_only_when_explicit(self, monkeypatch):
         import app.config
+
         monkeypatch.setattr(app.config.settings, "external_source", "mock")
         assert isinstance(_build_source(), MockSource)
 
@@ -33,9 +36,13 @@ class TestNeteaseSourceShape:
         """get_recommendations 的候选必须来自真实源（source=netease），非 mock。"""
         from app.sources import netease_source as ns
 
-        monkeypatch.setattr(ns, "search_netease_many", lambda kw, limit=20: [
-            {"song_id": "1", "title": f"{kw}-歌", "artist": "歌手", "album": None, "cover": None},
-        ])
+        monkeypatch.setattr(
+            ns,
+            "search_netease_many",
+            lambda kw, limit=20: [
+                {"song_id": "1", "title": f"{kw}-歌", "artist": "歌手", "album": None, "cover": None},
+            ],
+        )
         src = NeteaseSource()
         recs = src.get_recommendations(["R&B"], ["浪漫"], limit=3)
         assert recs
@@ -45,10 +52,19 @@ class TestNeteaseSourceShape:
     def test_search_maps_metadata(self, monkeypatch):
         from app.sources import netease_source as ns
 
-        monkeypatch.setattr(ns, "search_netease_many", lambda q, limit=20: [
-            {"song_id": "42", "title": "Blinding Lights", "artist": "The Weeknd",
-             "album": "After Hours", "cover": "http://c.jpg"},
-        ])
+        monkeypatch.setattr(
+            ns,
+            "search_netease_many",
+            lambda q, limit=20: [
+                {
+                    "song_id": "42",
+                    "title": "Blinding Lights",
+                    "artist": "The Weeknd",
+                    "album": "After Hours",
+                    "cover": "http://c.jpg",
+                },
+            ],
+        )
         tracks = NeteaseSource().search("the weeknd", limit=5)
         assert tracks[0].title == "Blinding Lights"
         assert tracks[0].external_id == "42"
@@ -59,10 +75,14 @@ class TestNeteaseAlbumTracks:
     def test_search_album_prefers_exact_artist_match(self, monkeypatch):
         from app.sources import netease as ns
 
-        monkeypatch.setattr(ns, "_fetch_netease_albums", lambda query, limit=8: [
-            {"id": 1, "name": "Other Album", "artist": {"name": "Other"}, "size": 2, "picUrl": "x"},
-            {"id": 18893, "name": "依然范特西", "artist": {"name": "周杰伦"}, "size": 10, "picUrl": "cover"},
-        ])
+        monkeypatch.setattr(
+            ns,
+            "_fetch_netease_albums",
+            lambda query, limit=8: [
+                {"id": 1, "name": "Other Album", "artist": {"name": "Other"}, "size": 2, "picUrl": "x"},
+                {"id": 18893, "name": "依然范特西", "artist": {"name": "周杰伦"}, "size": 10, "picUrl": "cover"},
+            ],
+        )
 
         album = ns.search_netease_album("周杰伦", "依然范特西")
 
@@ -92,6 +112,7 @@ class TestNeteaseAlbumTracks:
 
             def read(self):
                 import json
+
                 return json.dumps(payload).encode()
 
         monkeypatch.setattr(ns.urllib.request, "urlopen", lambda *a, **k: FakeResponse())
@@ -105,12 +126,16 @@ class TestNeteaseAlbumTracks:
         """歌手页代表专辑要拿到真实 album_id：本歌手专辑排前、同名去重、群星合集靠后。"""
         from app.sources import netease as ns
 
-        monkeypatch.setattr(ns, "_fetch_netease_albums", lambda query, limit=8: [
-            {"id": 7, "name": "群星合集", "artist": {"name": "群星"}, "size": 20, "picUrl": "misc"},
-            {"id": 18893, "name": "依然范特西", "artist": {"name": "周杰伦"}, "size": 10, "picUrl": "a"},
-            {"id": 18894, "name": "叶惠美", "artist": {"name": "周杰伦"}, "size": 11, "picUrl": "b"},
-            {"id": 18893, "name": "依然范特西", "artist": {"name": "周杰伦"}, "size": 10, "picUrl": "dup"},
-        ])
+        monkeypatch.setattr(
+            ns,
+            "_fetch_netease_albums",
+            lambda query, limit=8: [
+                {"id": 7, "name": "群星合集", "artist": {"name": "群星"}, "size": 20, "picUrl": "misc"},
+                {"id": 18893, "name": "依然范特西", "artist": {"name": "周杰伦"}, "size": 10, "picUrl": "a"},
+                {"id": 18894, "name": "叶惠美", "artist": {"name": "周杰伦"}, "size": 11, "picUrl": "b"},
+                {"id": 18893, "name": "依然范特西", "artist": {"name": "周杰伦"}, "size": 10, "picUrl": "dup"},
+            ],
+        )
 
         albums = ns.search_netease_artist_albums("周杰伦", limit=6)
 
@@ -150,9 +175,12 @@ class TestNeteaseAlbumTracks:
 
             def read(self):
                 import json
+
                 return json.dumps(payload).encode()
 
-        monkeypatch.setattr(ns.urllib.request, "urlopen", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), FakeResponse())[1])
+        monkeypatch.setattr(
+            ns.urllib.request, "urlopen", lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), FakeResponse())[1]
+        )
 
         first = ns.fetch_netease_album_tracks("18893", limit=100)
         second = ns.fetch_netease_album_tracks("18893", limit=100)
@@ -183,6 +211,7 @@ class TestNeteaseAlbumTracks:
 
             def read(self):
                 import json
+
                 return json.dumps(payload).encode()
 
         monkeypatch.setattr(ns.urllib.request, "urlopen", lambda *a, **k: FakeResponse())
@@ -208,11 +237,14 @@ class TestNeteaseAlbumTracks:
 
             def read(self):
                 import json
-                return json.dumps({
-                    "code": 200,
-                    "album": {"name": "A", "size": 1},
-                    "songs": [{"id": 1, "name": "X", "al": {}}],
-                }).encode()
+
+                return json.dumps(
+                    {
+                        "code": 200,
+                        "album": {"name": "A", "size": 1},
+                        "songs": [{"id": 1, "name": "X", "al": {}}],
+                    }
+                ).encode()
 
         def fake_urlopen(*a, **k):
             calls["n"] += 1
@@ -235,10 +267,15 @@ class TestGetAudioUrlDuckTyping:
         agent = AudioVisualAgent.__new__(AudioVisualAgent)
         # 打桩搜索 + 取流，验证调用链通到鸭子类型属性
         monkeypatch.setattr(agent, "_search_netease", lambda q: "999" if "Blinding" in q else None)
-        monkeypatch.setattr(agent, "_get_netease_audio_url",
-                            lambda sid, cookie="": f"https://audio/{sid}")
-        ns = SimpleNamespace(title="Blinding Lights", artist="The Weeknd",
-                             source="netease", external_id="", source_url="", cover_url=None)
+        monkeypatch.setattr(agent, "_get_netease_audio_url", lambda sid, cookie="": f"https://audio/{sid}")
+        ns = SimpleNamespace(
+            title="Blinding Lights",
+            artist="The Weeknd",
+            source="netease",
+            external_id="",
+            source_url="",
+            cover_url=None,
+        )
         url = agent.get_audio_url(ns, netease_cookie="MUSIC_U=x")
         assert url == "https://audio/999"
 
@@ -246,10 +283,15 @@ class TestGetAudioUrlDuckTyping:
         from app.agent import AudioVisualAgent
 
         agent = AudioVisualAgent.__new__(AudioVisualAgent)
-        monkeypatch.setattr(agent, "_get_netease_audio_url",
-                            lambda sid, cookie="": f"https://audio/{sid}")
-        ns = SimpleNamespace(title="x", artist="y", source="netease",
-                             external_id="", source_url="https://music.163.com/song?id=555", cover_url=None)
+        monkeypatch.setattr(agent, "_get_netease_audio_url", lambda sid, cookie="": f"https://audio/{sid}")
+        ns = SimpleNamespace(
+            title="x",
+            artist="y",
+            source="netease",
+            external_id="",
+            source_url="https://music.163.com/song?id=555",
+            cover_url=None,
+        )
         url = agent.get_audio_url(ns)
         assert url == "https://audio/555"
 
@@ -257,6 +299,5 @@ class TestGetAudioUrlDuckTyping:
         from app.agent import AudioVisualAgent
 
         agent = AudioVisualAgent.__new__(AudioVisualAgent)
-        ns = SimpleNamespace(title="", artist="", source="netease",
-                             external_id="", source_url="", cover_url=None)
+        ns = SimpleNamespace(title="", artist="", source="netease", external_id="", source_url="", cover_url=None)
         assert agent.get_audio_url(ns) is None

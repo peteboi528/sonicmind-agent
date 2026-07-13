@@ -3,6 +3,7 @@
 网络层 monkeypatch 掉（离线、确定），只验纯解析逻辑。plain 版（fetch_netease_lyrics）
 由 timed 版派生，一并覆盖。
 """
+
 from __future__ import annotations
 
 import json
@@ -61,7 +62,7 @@ def test_timestamps_parsed_and_sorted(monkeypatch):
     _patch_lyrics(
         monkeypatch,
         "[00:11.320]告诉你恋爱的秘方\n"
-        "[00:03.0]前奏后第一句\n"      # 乱序：应排到最前
+        "[00:03.0]前奏后第一句\n"  # 乱序：应排到最前
         "[00:20.500]第三句\n",
     )
     lines = fetch_netease_lyrics_timed("100")
@@ -81,18 +82,14 @@ def test_ms_padded_correctly(monkeypatch):
     #   .25 -> "250" -> 250ms -> 0.25s
     _patch_lyrics(
         monkeypatch,
-        "[00:05.5]一字\n"
-        "[00:06.50]两字\n"
-        "[00:07.05]前导零\n"
-        "[00:08.250]三位\n"
-        "[00:09.25]两位等效\n",
+        "[00:05.5]一字\n[00:06.50]两字\n[00:07.05]前导零\n[00:08.250]三位\n[00:09.25]两位等效\n",
     )
     times = {l["text"]: l["time"] for l in fetch_netease_lyrics_timed("101")}
     assert times["一字"] == 5.5
-    assert times["两字"] == 6.5      # .50 == .5
-    assert times["前导零"] == 7.05   # .05 == 50ms，区别于 .5
-    assert times["三位"] == 8.25     # .250 == 250ms
-    assert times["两位等效"] == 9.25 # .25 == .250
+    assert times["两字"] == 6.5  # .50 == .5
+    assert times["前导零"] == 7.05  # .05 == 50ms，区别于 .5
+    assert times["三位"] == 8.25  # .250 == 250ms
+    assert times["两位等效"] == 9.25  # .25 == .250
 
 
 def test_multiple_timestamps_expanded(monkeypatch):
@@ -110,9 +107,9 @@ def test_signature_lines_dropped(monkeypatch):
         "作词：张三\n"
         "作曲：李四\n"
         "编曲：王五\n"
-        "录音 : 艾志恒Asen\n"     # 半角冒号 + 空格也要丢
+        "录音 : 艾志恒Asen\n"  # 半角冒号 + 空格也要丢
         "母带：Provoke\n"
-        "发行管理：沈畅\n"        # 多字角色
+        "发行管理：沈畅\n"  # 多字角色
         "发行：Believe\n"
         "出品：某公司\n"
         "和声：某和声\n",
@@ -128,12 +125,7 @@ def test_lrc_metadata_tags_dropped(monkeypatch):
     # 真实 API 常带 [ti]/[ar]/[al]/[by]/[offset] 元数据标签，不能当歌词正文显示
     _patch_lyrics(
         monkeypatch,
-        "[ti:恋爱]\n"
-        "[ar:某艺人]\n"
-        "[al:某专辑]\n"
-        "[by:上传者]\n"
-        "[offset:500]\n"
-        "[00:11.320]告诉你恋爱的秘方\n",
+        "[ti:恋爱]\n[ar:某艺人]\n[al:某专辑]\n[by:上传者]\n[offset:500]\n[00:11.320]告诉你恋爱的秘方\n",
     )
     texts = [l["text"] for l in fetch_netease_lyrics_timed("104")]
     assert "告诉你恋爱的秘方" in texts
@@ -144,9 +136,7 @@ def test_lrc_metadata_tags_dropped(monkeypatch):
 def test_untimed_lines_sink_to_bottom(monkeypatch):
     _patch_lyrics(
         monkeypatch,
-        "[00:10.0]第一句\n"
-        "没有时间戳的间奏说明\n"
-        "[00:20.0]第二句\n",
+        "[00:10.0]第一句\n没有时间戳的间奏说明\n[00:20.0]第二句\n",
     )
     lines = fetch_netease_lyrics_timed("105")
     # 有时间戳的升序在前，无时间戳的沉到底
@@ -181,9 +171,7 @@ def test_real_world_front_matter_stripped(monkeypatch):
 def test_plain_lyrics_derived_from_timed(monkeypatch):
     _patch_lyrics(
         monkeypatch,
-        "[00:03.0]前奏句\n"
-        "作词：应被丢\n"
-        "[00:11.320]告诉你恋爱的秘方\n",
+        "[00:03.0]前奏句\n作词：应被丢\n[00:11.320]告诉你恋爱的秘方\n",
     )
     # plain 版 = timed 版去掉 time，且署名行同样被过滤
     assert fetch_netease_lyrics("106") == ["前奏句", "告诉你恋爱的秘方"]

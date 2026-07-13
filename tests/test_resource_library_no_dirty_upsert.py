@@ -2,6 +2,7 @@
 
 对应线上问题：教程/合集被当成 song 写入 library 后，后续多轮继续复用、污染扩散。
 """
+
 from __future__ import annotations
 
 from app.models import ExternalTrack
@@ -35,7 +36,8 @@ def test_only_clean_tracks_upserted_to_library():
     clean_a = _t("Ditto", "NewJeans")
     clean_b = _t("Firework", "Katy Perry")
     tracks = [
-        clean_a, clean_b,
+        clean_a,
+        clean_b,
         _t("编曲技巧:怎么做一首流行R&B风格的音乐？", "UP主", "bilibili"),
         _t("独立流行音乐真的好难做", "UP主", "bilibili"),
         _t("纯音乐合集", "UP主", "bilibili"),

@@ -74,6 +74,7 @@ def test_delete_taste_experiment(agent):
 
 # ---- 锚复活后的分桶与反馈回流 ----
 
+
 def _cand(personalize, semantic, behavior=0.0):
     """合成一个候选 tuple：(track, components, reason, score)。"""
     return (None, {"personalize": personalize, "semantic": semantic, "behavior": behavior}, "r", 0.0)
@@ -85,9 +86,12 @@ def test_bucketing_splits_by_familiarity_into_three_even_buckets(agent):
     回归旧 bug：旧行为锚死后阈值分桶把三档全塌向 bold。
     """
     candidates = [
-        _cand(0.9, 0.5), _cand(0.8, 0.4),
-        _cand(0.5, 0.3), _cand(0.4, 0.2),
-        _cand(0.2, 0.1), _cand(0.1, 0.0),
+        _cand(0.9, 0.5),
+        _cand(0.8, 0.4),
+        _cand(0.5, 0.3),
+        _cand(0.4, 0.2),
+        _cand(0.2, 0.1),
+        _cand(0.1, 0.0),
     ]
     buckets = bucket_taste_experiment_candidates(candidates, 2)
     assert len(buckets["safe"]) == 2
@@ -100,8 +104,12 @@ def test_bucketing_splits_by_familiarity_into_three_even_buckets(agent):
 
 def test_bucketing_refuses_fake_labels_when_scores_are_indistinguishable(agent):
     candidates = [
-        _cand(0.05, 0.05), _cand(0.04, 0.05), _cand(0.04, 0.04),
-        _cand(0.03, 0.04), _cand(0.03, 0.03), _cand(0.02, 0.03),
+        _cand(0.05, 0.05),
+        _cand(0.04, 0.05),
+        _cand(0.04, 0.04),
+        _cand(0.03, 0.04),
+        _cand(0.03, 0.03),
+        _cand(0.02, 0.03),
     ]
     buckets = bucket_taste_experiment_candidates(candidates, 2)
     assert buckets["safe"] == []
@@ -143,6 +151,7 @@ def test_taste_feedback_feeds_listening_history(agent):
 
 # ---- 探索页：库外优先候选 ----
 
+
 def test_collect_candidates_online_only_drops_local_and_listened(agent, monkeypatch):
     """online_only=True：跳过库内推荐路径，只走 web 搜索；剔除本地曲与已听过的曲目。
 
@@ -177,6 +186,5 @@ def test_collect_candidates_online_only_drops_local_and_listened(agent, monkeypa
     result = svc.collect_taste_candidates("explore-user", ["neo soul"], 9, online_only=True)
     titles = {getattr(t, "title", "") for t, *_ in result}
     assert "全新曲" in titles
-    assert "本地曲" not in titles      # source==local 被剔除
-    assert "听过的" not in titles      # 已在 listening_history 被剔除
-
+    assert "本地曲" not in titles  # source==local 被剔除
+    assert "听过的" not in titles  # 已在 listening_history 被剔除

@@ -3,6 +3,7 @@
 此前 local_ratio 是硬编码默认（chat 0.4 / 每日 0.3），用户说「不要 local」也不起作用，
 且 _balance_recommendation_sources 的 max(1, ...) 地板强制 ≥1 本地。这里锁定两处修复。
 """
+
 from __future__ import annotations
 
 import asyncio

@@ -7,6 +7,7 @@
 
 所有适配器实现 BotAdapter 协议（结构化子类型，与 app/sources/protocol.py 一致）。
 """
+
 from __future__ import annotations
 
 from app.adapters.protocol import BotAdapter, BotResponse, IncomingMessage, SongCard

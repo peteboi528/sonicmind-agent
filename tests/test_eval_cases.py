@@ -23,12 +23,30 @@ from tests.eval.judge import LLMJudge
 def agent():
     a = AudioVisualAgent(JsonStore(tempfile.mkdtemp()))
     seeds = [
-        Asset(asset_id="a_seed1", source_url="https://eval/1", title="夜的钢琴曲",
-              duration_seconds=240, artist="石进", genre=["古典"], mood=["治愈", "宁静"],
-              tempo_bpm=72, energy_level=0.3, status="analyzed"),
-        Asset(asset_id="a_seed2", source_url="https://eval/2", title="海阔天空",
-              duration_seconds=326, artist="Beyond", genre=["摇滚"], mood=["励志"],
-              tempo_bpm=85, energy_level=0.8, status="analyzed"),
+        Asset(
+            asset_id="a_seed1",
+            source_url="https://eval/1",
+            title="夜的钢琴曲",
+            duration_seconds=240,
+            artist="石进",
+            genre=["古典"],
+            mood=["治愈", "宁静"],
+            tempo_bpm=72,
+            energy_level=0.3,
+            status="analyzed",
+        ),
+        Asset(
+            asset_id="a_seed2",
+            source_url="https://eval/2",
+            title="海阔天空",
+            duration_seconds=326,
+            artist="Beyond",
+            genre=["摇滚"],
+            mood=["励志"],
+            tempo_bpm=85,
+            energy_level=0.8,
+            status="analyzed",
+        ),
     ]
     for s in seeds:
         a.store.write_model("assets", s.asset_id, s)
@@ -38,9 +56,12 @@ def agent():
 def _run_case(agent, case):
     for action in case.setup_actions:
         if action.get("type") == "listen":
-            agent.record_listen(case.user_id, action["asset_id"],
-                                duration=action.get("duration", 100),
-                                completed=action.get("completed", True))
+            agent.record_listen(
+                case.user_id,
+                action["asset_id"],
+                duration=action.get("duration", 100),
+                completed=action.get("completed", True),
+            )
         elif action.get("type") == "rate":
             agent.rate_asset(case.user_id, action["asset_id"], action["score"])
     history = [{"role": m["role"], "content": m["content"]} for m in case.history] or None
@@ -76,8 +97,9 @@ def test_judge_mention_logic_is_deterministic():
     """judge 的 must_mention/must_not_mention 硬判逻辑不依赖 LLM。"""
     from tests.eval.cases import EvalCase
 
-    case = EvalCase(case_id="t", description="", user_id="u", query="q",
-                    must_mention=["歌单"], must_not_mention=["编造"])
+    case = EvalCase(
+        case_id="t", description="", user_id="u", query="q", must_mention=["歌单"], must_not_mention=["编造"]
+    )
     judge = LLMJudge(llm=None)  # LLM 调用会被 evaluate 内部 try/except 吞掉
     # must_not_mention 命中 → mention_miss>0 → overall 被压到 1.5 以下
     score = judge.evaluate(case, "这里有编造的内容")

@@ -32,8 +32,7 @@ def _default_store_root() -> Path:
     """
     candidates = [PROJECT_ROOT / "data/store", PROJECT_ROOT / "frontend/data/store"]
     counts = {
-        path: len(list((path / "assets").glob("*.json"))) if (path / "assets").exists() else 0
-        for path in candidates
+        path: len(list((path / "assets").glob("*.json"))) if (path / "assets").exists() else 0 for path in candidates
     }
     populated = [p for p, n in counts.items() if n > 0]
     if len(populated) > 1:
@@ -84,15 +83,22 @@ class Settings:
         store_env = os.getenv("STORE_ROOT", "").strip()
         store_root = _absolute_path(store_env) if store_env else _default_store_root()
         self.store_candidates: dict[str, int] = {
-            str(path.resolve()): len(list((path / "assets").glob("*.json")))
-            if (path / "assets").exists() else 0
+            str(path.resolve()): len(list((path / "assets").glob("*.json"))) if (path / "assets").exists() else 0
             for path in (PROJECT_ROOT / "data/store", PROJECT_ROOT / "frontend/data/store")
         }
         data_root = store_root.parent
         self.store_root: str = str(store_root.resolve())
-        self.media_root: str = str(_absolute_path(os.getenv("MEDIA_ROOT", "").strip()).resolve()) if os.getenv("MEDIA_ROOT", "").strip() else str((data_root / "media").resolve())
+        self.media_root: str = (
+            str(_absolute_path(os.getenv("MEDIA_ROOT", "").strip()).resolve())
+            if os.getenv("MEDIA_ROOT", "").strip()
+            else str((data_root / "media").resolve())
+        )
         resource_env = os.getenv("RESOURCE_LIBRARY_PATH", "").strip()
-        self.resource_library_path: str = str(_absolute_path(resource_env).resolve()) if resource_env else str((data_root / "resource_library.sqlite").resolve())
+        self.resource_library_path: str = (
+            str(_absolute_path(resource_env).resolve())
+            if resource_env
+            else str((data_root / "resource_library.sqlite").resolve())
+        )
         self.agent_checkpoint_path: str = str((data_root / "agent_checkpoints.sqlite").resolve())
         self.agent_trace_path: str = str((data_root / "agent_traces.sqlite").resolve())
         self.agent_retention_days: int = int(os.getenv("AGENT_RETENTION_DAYS", "30"))
@@ -156,18 +162,14 @@ class Settings:
         # ——核对本身零 LLM、零延迟、默认始终跑（只出 trace 可观测）。仅当档案真正降级时，开此开关才会
         # 回 execute_tools 用清洗后的实体名重试一次 resolve（重跑知识链路 ~20-40s，故默认关，对比手感用）。
         self.enable_knowledge_refine: bool = os.getenv("ENABLE_KNOWLEDGE_REFINE", "false").lower() == "true"
-        self.empty_result_recovery_max_attempts: int = max(
-            0, int(os.getenv("EMPTY_RESULT_RECOVERY_MAX_ATTEMPTS", "2"))
-        )
+        self.empty_result_recovery_max_attempts: int = max(0, int(os.getenv("EMPTY_RESULT_RECOVERY_MAX_ATTEMPTS", "2")))
         # P4 全局单轮墙钟预算（通用路径 recommend/search/playlist）。超预算则 reflect 停止
         # refine/recovery 回环，由 finalize 的 shortfall 兜底诚实说明（治"超时卡死"）。
         # knowledge 路径走自己的 knowledge_turn_budget_seconds（36s），不在此列。
         self.turn_budget_seconds: float = float(os.getenv("TURN_BUDGET_SECONDS", "15"))
         # 为最终回答保留时间：普通工具/规划只能使用总预算减去这段余量，避免候选已拿到
         # 却因最后一次 LLM 生成被前序工具耗尽预算而无响应。
-        self.turn_finalize_reserve_seconds: float = max(
-            0.0, float(os.getenv("TURN_FINALIZE_RESERVE_SECONDS", "2"))
-        )
+        self.turn_finalize_reserve_seconds: float = max(0.0, float(os.getenv("TURN_FINALIZE_RESERVE_SECONDS", "2")))
         # P4v2：在真正耗尽 turn budget 之前，先按剩余预算做渐进降级：
         # soft = 关 search_variants / 禁用 LLM recovery；hard = recovery 直接切本地。
         self.turn_budget_soft_degrade_seconds: float = float(os.getenv("TURN_BUDGET_SOFT_DEGRADE_SECONDS", "6"))
@@ -189,15 +191,21 @@ class Settings:
         # 乐评正文抓取（Tavily Extract / Discogs API）预算：把 MB relations 里那批
         # 高价值来源（last.fm/Discogs/Genius/AllMusic…）的真实正文读回来填进 citation.excerpt，
         # 喂给合成 LLM 出专业中文乐评。受保护预算——不让 MB 把它饿死。
-        self.knowledge_review_extract_timeout_seconds: float = float(os.getenv("KNOWLEDGE_REVIEW_EXTRACT_TIMEOUT_SECONDS", "10"))
-        self.knowledge_review_extract_max_sources: int = max(1, int(os.getenv("KNOWLEDGE_REVIEW_EXTRACT_MAX_SOURCES", "4")))
+        self.knowledge_review_extract_timeout_seconds: float = float(
+            os.getenv("KNOWLEDGE_REVIEW_EXTRACT_TIMEOUT_SECONDS", "10")
+        )
+        self.knowledge_review_extract_max_sources: int = max(
+            1, int(os.getenv("KNOWLEDGE_REVIEW_EXTRACT_MAX_SOURCES", "4"))
+        )
         # dossier 工具外层超时：要装得下「抓 N 个正文 + 1 次合成 LLM（开思考模式）」，给难抓的专辑留余地。
         self.knowledge_dossier_timeout_seconds: float = float(os.getenv("KNOWLEDGE_DOSSIER_TIMEOUT_SECONDS", "24"))
         # 元数据波(MB/Spotify/Discogs/web) 内部预算封顶——它是 bonus 内容，不能让它吃光整轮预算饿死合成。
         # 慢网络下单源要 ~7s，故提到 15s；快网络仍随源返回即结束，不真等满。
         self.knowledge_metadata_timeout_seconds: float = float(os.getenv("KNOWLEDGE_METADATA_TIMEOUT_SECONDS", "15"))
         # 知识合成这一处开 LLM 思考模式（只此一处，不全局开以免拖慢规划/对话/反思）。
-        self.knowledge_synth_thinking_enabled: bool = os.getenv("KNOWLEDGE_SYNTH_THINKING_ENABLED", "true").lower() == "true"
+        self.knowledge_synth_thinking_enabled: bool = (
+            os.getenv("KNOWLEDGE_SYNTH_THINKING_ENABLED", "true").lower() == "true"
+        )
         # MusicBrainz 结构化知识层（免费、无 key）：实体消歧 + 权威元数据。
         # 评测/离线测试可关，保证确定性。
         self.enable_musicbrainz: bool = os.getenv("ENABLE_MUSICBRAINZ", "true").lower() == "true"
@@ -219,7 +227,9 @@ class Settings:
         # 再读不出文字则提示用户直接输入专辑名/歌手。
         # 端点：国内 https://dashscope.aliyuncs.com/compatible-mode/v1；
         #       国际 https://dashscope-intl.aliyuncs.com/compatible-mode/v1。
-        self.vision_llm_base_url: str = _env_str("VISION_LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+        self.vision_llm_base_url: str = _env_str(
+            "VISION_LLM_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
         self.vision_llm_api_key: str = os.getenv("VISION_LLM_API_KEY", "")
         self.vision_llm_model: str = _env_str("VISION_LLM_MODEL", "qwen-vl-max-latest")
         self.vision_llm_timeout_seconds: float = float(os.getenv("VISION_LLM_TIMEOUT_SECONDS", "20"))

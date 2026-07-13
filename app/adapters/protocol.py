@@ -7,6 +7,7 @@
 
 适配器是无状态的：对话历史由 Agent Memory 管理。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -47,9 +48,7 @@ class BotResponse:
 class BotAdapter(Protocol):
     """Bot 适配器协议（结构化子类型，无需继承）。"""
 
-    def parse_request(
-        self, body: bytes, headers: dict[str, str]
-    ) -> IncomingMessage | None:
+    def parse_request(self, body: bytes, headers: dict[str, str]) -> IncomingMessage | None:
         """解析平台原始请求。验证类请求（如微信 echo）返回 None（已内部处理）。"""
         ...
 

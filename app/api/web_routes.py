@@ -1,4 +1,5 @@
 """Web 前端路由：Vue 单页应用服务 + 播放代理。"""
+
 from __future__ import annotations
 
 import logging

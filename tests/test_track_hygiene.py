@@ -2,6 +2,7 @@
 
 对应线上脏数据：编曲教程、独立流行真的好难做、弹跳全集 等被当成歌曲塞进歌单。
 """
+
 from __future__ import annotations
 
 from app.models import ExternalTrack
@@ -10,7 +11,11 @@ from app.tools.handlers import is_valid_music_track
 
 def _t(title: str, artist: str = "Demo", source: str = "netease", kind: str = "track") -> ExternalTrack:
     return ExternalTrack(
-        external_id="x", title=title, artist=artist, source=source, candidate_kind=kind,
+        external_id="x",
+        title=title,
+        artist=artist,
+        source=source,
+        candidate_kind=kind,
     )
 
 
@@ -31,8 +36,13 @@ def test_dirty_titles_rejected():
 
 def test_clean_tracks_accepted():
     """真实歌曲不受影响。"""
-    clean = [("Ditto", "NewJeans"), ("ETA", "NewJeans"), ("Firework", "Katy Perry"),
-             ("Blinding Lights", "The Weeknd"), ("Nikes", "Frank Ocean")]
+    clean = [
+        ("Ditto", "NewJeans"),
+        ("ETA", "NewJeans"),
+        ("Firework", "Katy Perry"),
+        ("Blinding Lights", "The Weeknd"),
+        ("Nikes", "Frank Ocean"),
+    ]
     for title, artist in clean:
         assert is_valid_music_track(_t(title, artist)) is True, f"应保留: {title}"
 

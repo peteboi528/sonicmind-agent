@@ -13,10 +13,7 @@ def GENERATE_PLAYLIST_TEMPLATE(
     taste_summary: str = "",
     exclusion_rules: list[str] | None = None,
 ) -> str:
-    candidate_block = (
-        f"\n联网/外部/上游工具候选：\n{candidate_desc}\n"
-        if candidate_desc else ""
-    )
+    candidate_block = f"\n联网/外部/上游工具候选：\n{candidate_desc}\n" if candidate_desc else ""
     taste_block = ""
     if taste_summary:
         taste_block = f"\n用户品味档案：{taste_summary}\n"

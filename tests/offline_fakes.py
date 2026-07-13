@@ -4,6 +4,7 @@ The pytest suite and the eval runner both need the same contract: no real LLM,
 no real music/network APIs, no opportunistic embedding model downloads.  Keeping
 the stubs here avoids the eval path drifting away from the trusted pytest path.
 """
+
 from __future__ import annotations
 
 import os
@@ -170,7 +171,9 @@ def start_offline_patches() -> ExitStack:
     stack.enter_context(patch.object(AudioVisualAgent, "search_web_music_async", fake_search_web_music_async))
     stack.enter_context(patch.object(AudioVisualAgent, "search_videos_async", fake_search_videos_async))
     stack.enter_context(patch.object(AudioVisualAgent, "search_artist_info_async", fake_search_artist_info_async))
-    stack.enter_context(patch.object(AudioVisualAgent, "recommend_artist_albums_async", fake_recommend_artist_albums_async))
+    stack.enter_context(
+        patch.object(AudioVisualAgent, "recommend_artist_albums_async", fake_recommend_artist_albums_async)
+    )
     stack.enter_context(patch("app.search.netease_playlist.search_and_extract", fake_playlist_extract))
     stack.enter_context(patch("app.search.netease_playlist.search_netease_playlists", return_value=[]))
     stack.enter_context(patch("app.search.netease_playlist.get_playlist_tracks", return_value=[]))

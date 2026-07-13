@@ -33,23 +33,26 @@ class _ScriptedLLM:
     async def agenerate(self, prompt: str, system: str = "", **kwargs) -> str:
         # query_plan 调用：system 里含"意图规划器"。返回双意图 payload。
         if "意图规划器" in (system or "") or "intent" in (system or ""):
-            return json.dumps({
-                "intent": "recommend",
-                "entities": ["The Weeknd"],
-                "use_local": True,
-                "use_vector": False,
-                "use_web": True,
-                "search_query": "The Weeknd",
-                "search_variants": [],
-                "language": "",
-                "target_count": None,
-                "reasoning": "推荐+专辑解读双意图",
-                "secondary": {
-                    "intent": "album_deep_dive",
-                    "entities": ["Starboy"],
-                    "search_query": "The Weeknd Starboy",
+            return json.dumps(
+                {
+                    "intent": "recommend",
+                    "entities": ["The Weeknd"],
+                    "use_local": True,
+                    "use_vector": False,
+                    "use_web": True,
+                    "search_query": "The Weeknd",
+                    "search_variants": [],
+                    "language": "",
+                    "target_count": None,
+                    "reasoning": "推荐+专辑解读双意图",
+                    "secondary": {
+                        "intent": "album_deep_dive",
+                        "entities": ["Starboy"],
+                        "search_query": "The Weeknd Starboy",
+                    },
                 },
-            }, ensure_ascii=False)
+                ensure_ascii=False,
+            )
         return "为你整理了 The Weeknd 的候选。"
 
     async def agenerate_stream(self, prompt: str, **kwargs):
@@ -68,6 +71,7 @@ def test_full_graph_multi_intent_yields_both_segments(offline, monkeypatch):
 
     from app.agent import AudioVisualAgent
     from app.storage import JsonStore
+
     with tempfile.TemporaryDirectory() as td:
         agent = AudioVisualAgent(JsonStore(td + "/store"))
         # 脚本化 planner 的实体解析走 fast LLM；把 agent 内的也换掉，保证 query_plan 走脚本。

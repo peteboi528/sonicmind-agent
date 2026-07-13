@@ -82,7 +82,8 @@ class TasteExperimentService:
                 label="安全区",
                 description=(
                     "命中你的核心风格或艺人，用来验证稳定偏好。"
-                    if confidence_ok else "本轮证据不足，暂不强行标记安全区。"
+                    if confidence_ok
+                    else "本轮证据不足，暂不强行标记安全区。"
                 ),
                 tracks=[
                     taste_experiment_track(track, "safe", components, reason, score)
@@ -94,7 +95,8 @@ class TasteExperimentService:
                 label="轻微越界",
                 description=(
                     "和你的画像相邻，但至少在一个维度上有所变化。"
-                    if confidence_ok else "候选区分度不足，先放在待验证区收集真实反馈。"
+                    if confidence_ok
+                    else "候选区分度不足，先放在待验证区收集真实反馈。"
                 ),
                 tracks=[
                     taste_experiment_track(track, "stretch", components, reason, score)
@@ -106,7 +108,8 @@ class TasteExperimentService:
                 label="大胆探索",
                 description=(
                     "有可解释连接点，同时明显超出你的主画像。"
-                    if confidence_ok else "本轮证据不足，暂不强行标记大胆探索。"
+                    if confidence_ok
+                    else "本轮证据不足，暂不强行标记大胆探索。"
                 ),
                 tracks=[
                     taste_experiment_track(track, "bold", components, reason, score)
@@ -162,13 +165,13 @@ class TasteExperimentService:
                 continue
             raw_tracks.extend(tracks)
         raw_tracks = [
-            track for track in self._dedupe_tracks(raw_tracks)
-            if self._is_recommendation_quality_track(track)
+            track for track in self._dedupe_tracks(raw_tracks) if self._is_recommendation_quality_track(track)
         ]
         if online_only:
             known = self._known_track_keys(user_id)
             raw_tracks = [
-                track for track in raw_tracks
+                track
+                for track in raw_tracks
                 if (getattr(track, "source", "") or "local") != "local"
                 and self._candidate_dedup_key(track) not in known
             ]
@@ -176,10 +179,7 @@ class TasteExperimentService:
             return []
         unified_query = " ".join(seeds[:6])
         ranked = self._rerank_tracks(user_id, unified_query, raw_tracks, top_k=len(raw_tracks))
-        return [
-            (track, breakdown.components, breakdown.reason, breakdown.score)
-            for track, breakdown in ranked
-        ]
+        return [(track, breakdown.components, breakdown.reason, breakdown.score) for track, breakdown in ranked]
 
     @staticmethod
     def _candidate_dedup_key(track: Any) -> str:
@@ -234,9 +234,7 @@ class TasteExperimentService:
             candidates = collect_taste_candidates(user_id, seeds, per_bucket * 6)
             candidates = filter_taste_experiment_candidates(user_id, candidates, memory.exclusion_rules)
             other_keys = {
-                taste_experiment_track_key(item)
-                for seg in exp.segments if seg.name != bucket
-                for item in seg.tracks
+                taste_experiment_track_key(item) for seg in exp.segments if seg.name != bucket for item in seg.tracks
             }
             candidates = [c for c in candidates if candidate_key(c) not in other_keys]
             ranked = sorted(candidates, key=taste_familiarity, reverse=True)
@@ -289,9 +287,16 @@ class TasteExperimentService:
                 seeds.append(" ".join([genres[0], "相邻", "新风格"]))
             seeds += ["neo soul", "另类 R&B", "独立流行", "律动 R&B", "氛围 说唱"]
             return TasteExperimentService.dedupe_seeds(seeds)
-        return TasteExperimentService.dedupe_seeds([
-            "探索 新风格", "小众 世界音乐", "实验 电子", "融合 爵士", "独立 民谣", "另类 摇滚",
-        ])
+        return TasteExperimentService.dedupe_seeds(
+            [
+                "探索 新风格",
+                "小众 世界音乐",
+                "实验 电子",
+                "融合 爵士",
+                "独立 民谣",
+                "另类 摇滚",
+            ]
+        )
 
     @staticmethod
     def dedupe_seeds(seeds: list[str]) -> list[str]:
@@ -379,13 +384,13 @@ class TasteExperimentService:
                     summary = f"已收集 {feedback_total} 条反馈，{bucket_label(best_bucket)} 的正反馈最强。"
                     hypothesis_result = (
                         "大胆探索边界偏远，需要收窄。"
-                        if too_far >= 2 else
-                        f"假设部分成立：{bucket_label(best_bucket)} 当前最能解释你的反应。"
+                        if too_far >= 2
+                        else f"假设部分成立：{bucket_label(best_bucket)} 当前最能解释你的反应。"
                     )
                     next_strategy = (
                         "下一轮降低 bold 能量跨度，多做相邻风格实验。"
-                        if too_far >= 2 else
-                        "下一轮保留 safe 锚点，把 stretch 的比例提高一点。"
+                        if too_far >= 2
+                        else "下一轮保留 safe 锚点，把 stretch 的比例提高一点。"
                     )
                 report = TasteExperimentReport(
                     summary=summary,
@@ -476,4 +481,3 @@ class TasteExperimentService:
             expected_signal=expected,
             components=components or {},
         )
-

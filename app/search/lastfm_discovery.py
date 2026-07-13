@@ -9,6 +9,7 @@
 
 Last.fm 只负责发现歌名+歌手，网易云负责验证和播放链接。
 """
+
 from __future__ import annotations
 
 import logging
@@ -92,6 +93,6 @@ def discover_from_lastfm(
     logger.debug("Last.fm discovery found %d candidates, verifying against Netease...", len(candidates))
 
     # ── 网易云验证 ──
-    verified = batch_verify(candidates[:target_count * 2], max_verify=target_count * 2)
+    verified = batch_verify(candidates[: target_count * 2], max_verify=target_count * 2)
     logger.debug("Last.fm → Netease verified: %d/%d", len(verified), len(candidates))
     return verified

@@ -31,7 +31,11 @@ class ToolRuntime:
     async def execute(self, call: ToolCall, context: ToolContext) -> ToolResult:
         spec = get_tool_spec(call.name)
         if spec is None:
-            return ToolResult(tool=call.name, status=ToolStatus.UNSUPPORTED, error=ToolError(kind="unknown_tool", message=f"Unknown tool: {call.name}"))
+            return ToolResult(
+                tool=call.name,
+                status=ToolStatus.UNSUPPORTED,
+                error=ToolError(kind="unknown_tool", message=f"Unknown tool: {call.name}"),
+            )
         started = time.monotonic()
         started_at = datetime.now(UTC).isoformat()
         retries = 0
@@ -39,7 +43,17 @@ class ToolRuntime:
         try:
             arguments = spec.args_model.model_validate(call.arguments).model_dump(exclude_none=True)
         except ValidationError as exc:
-            return self._finish(spec, context, span_id, started, started_at, retries, ToolResult(tool=spec.name, status=ToolStatus.ERROR, error=ToolError(kind="validation_error", message=str(exc))))
+            return self._finish(
+                spec,
+                context,
+                span_id,
+                started,
+                started_at,
+                retries,
+                ToolResult(
+                    tool=spec.name, status=ToolStatus.ERROR, error=ToolError(kind="validation_error", message=str(exc))
+                ),
+            )
 
         if spec.risk == ToolRisk.EXTERNAL_WRITE and not self._confirmed(call, context):
             action_id = call.call_id
@@ -52,7 +66,11 @@ class ToolRuntime:
             return self._finish(spec, context, span_id, started, started_at, retries, result)
         handler = spec.async_handler or spec.handler
         if handler is None:
-            result = ToolResult(tool=spec.name, status=ToolStatus.UNSUPPORTED, error=ToolError(kind="missing_handler", message=f"No handler registered for {spec.name}"))
+            result = ToolResult(
+                tool=spec.name,
+                status=ToolStatus.UNSUPPORTED,
+                error=ToolError(kind="missing_handler", message=f"No handler registered for {spec.name}"),
+            )
             return self._finish(spec, context, span_id, started, started_at, retries, result)
 
         timeout_seconds, skipped = self._effective_timeout(spec, context)
@@ -77,7 +95,11 @@ class ToolRuntime:
                         value = await asyncio.wait_for(
                             asyncio.to_thread(handler, arguments, context), timeout=timeout_seconds
                         )
-                    result = value if isinstance(value, ToolResult) else ToolResult(tool=spec.name, status=ToolStatus.OK, data=value or {})
+                    result = (
+                        value
+                        if isinstance(value, ToolResult)
+                        else ToolResult(tool=spec.name, status=ToolStatus.OK, data=value or {})
+                    )
                     return self._finish(spec, context, span_id, started, started_at, retries, result)
                 except asyncio.CancelledError:
                     result = ToolResult(tool=spec.name, status=ToolStatus.CANCELLED, summary="工具调用已取消。")
@@ -107,10 +129,18 @@ class ToolRuntime:
                         retries += 1
                         await asyncio.sleep(min(0.2 * (2**attempt), 1.0))
                         continue
-                    result = ToolResult(tool=spec.name, status=ToolStatus.ERROR, error=ToolError(kind=type(exc).__name__, message=str(exc), retryable=True))
+                    result = ToolResult(
+                        tool=spec.name,
+                        status=ToolStatus.ERROR,
+                        error=ToolError(kind=type(exc).__name__, message=str(exc), retryable=True),
+                    )
                     return self._finish(spec, context, span_id, started, started_at, retries, result)
                 except Exception as exc:  # noqa: BLE001
-                    result = ToolResult(tool=spec.name, status=ToolStatus.ERROR, error=ToolError(kind=type(exc).__name__, message=str(exc)))
+                    result = ToolResult(
+                        tool=spec.name,
+                        status=ToolStatus.ERROR,
+                        error=ToolError(kind=type(exc).__name__, message=str(exc)),
+                    )
                     return self._finish(spec, context, span_id, started, started_at, retries, result)
         raise AssertionError("unreachable")
 
@@ -141,15 +171,29 @@ class ToolRuntime:
         )
         return max(0.05, timeout), skipped
 
-    def _finish(self, spec: ToolSpec, context: ToolContext, span_id: str, started: float, started_at: str, retries: int, result: ToolResult) -> ToolResult:
+    def _finish(
+        self,
+        spec: ToolSpec,
+        context: ToolContext,
+        span_id: str,
+        started: float,
+        started_at: str,
+        retries: int,
+        result: ToolResult,
+    ) -> ToolResult:
         duration_ms = (time.monotonic() - started) * 1000
         result.metrics.update({"duration_ms": round(duration_ms, 2), "retries": retries})
         if context.deadline_at:
             result.metrics["deadline_remaining_ms"] = round(max(0.0, context.deadline_at - time.monotonic()) * 1000, 2)
         if self.trace_store:
             self.trace_store.span(
-                span_id=span_id, run_id=context.run_id, name=spec.name, kind="tool",
-                status=result.status.value, started_at=started_at, duration_ms=duration_ms,
+                span_id=span_id,
+                run_id=context.run_id,
+                name=spec.name,
+                kind="tool",
+                status=result.status.value,
+                started_at=started_at,
+                duration_ms=duration_ms,
                 retries=retries,
                 attrs={
                     "risk": spec.risk.value,

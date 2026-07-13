@@ -1,4 +1,5 @@
 """graph 层单轮墙钟预算与渐进降级逻辑。"""
+
 from __future__ import annotations
 
 import logging
@@ -61,9 +62,11 @@ def _apply_turn_budget_degradation(state: AgentState) -> AgentState:
     updates: dict[str, Any] = {}
     if retrieval.search_variants:
         updates["search_variants"] = []
-    revised = plan.model_copy(update={
-        "retrieval_plan": retrieval.model_copy(update=updates) if updates else retrieval,
-    })
+    revised = plan.model_copy(
+        update={
+            "retrieval_plan": retrieval.model_copy(update=updates) if updates else retrieval,
+        }
+    )
     context["budget_degrade_level"] = level
 
     if level == "soft":
@@ -81,9 +84,14 @@ def _finalize_due_to_budget(state: AgentState) -> AgentState:
         **state,
         "_need_refine": False,
         "trace": [*state.get("trace", []), "[reflect] 单轮墙钟预算耗尽，停止补量，由 finalize 诚实说明 shortfall。"],
-        "events": [*state.get("events", []), StreamEvent(
-            type="eval", content="单轮时间预算耗尽，已停止补量。", payload={"budget_exceeded": True},
-        )],
+        "events": [
+            *state.get("events", []),
+            StreamEvent(
+                type="eval",
+                content="单轮时间预算耗尽，已停止补量。",
+                payload={"budget_exceeded": True},
+            ),
+        ],
     }
 
 
@@ -98,18 +106,18 @@ def _latency_budget_summary(
             return None
     started = context.get("started_at_monotonic")
     elapsed = round(max(0.0, time.monotonic() - float(started)), 3) if started else 0
-    timed_out = [
-        str(item.get("tool") or "")
-        for item in outcomes
-        if (item.get("error") or {}).get("kind") == "timeout"
-    ]
+    timed_out = [str(item.get("tool") or "") for item in outcomes if (item.get("error") or {}).get("kind") == "timeout"]
     skipped = []
     for item in outcomes:
         metrics = item.get("metrics") or {}
         if metrics.get("deadline_skipped"):
             skipped.append(str(item.get("tool") or ""))
-    partial = any((r.get("dossier") or {}).get("partial") for r in results if r.get("type") in {"music_dossier", "music_compare"})
-    partial = partial or any((r.get("sample_dossier") or {}).get("partial") for r in results if r.get("type") == "sample_dossier")
+    partial = any(
+        (r.get("dossier") or {}).get("partial") for r in results if r.get("type") in {"music_dossier", "music_compare"}
+    )
+    partial = partial or any(
+        (r.get("sample_dossier") or {}).get("partial") for r in results if r.get("type") == "sample_dossier"
+    )
     budget = context.get("latency_budget") or {}
     return {
         "budget_seconds": budget.get("budget_seconds", settings.knowledge_turn_budget_seconds),

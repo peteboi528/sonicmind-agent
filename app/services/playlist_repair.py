@@ -35,39 +35,47 @@ def analyze_playlist_repair(
 
     duplicates = _duplicate_titles(tracks)
     if duplicates:
-        issues.append({
-            "kind": "duplicate_tracks",
-            "severity": "high",
-            "summary": f"存在 {len(duplicates)} 组重复曲目。",
-            "items": duplicates,
-        })
+        issues.append(
+            {
+                "kind": "duplicate_tracks",
+                "severity": "high",
+                "summary": f"存在 {len(duplicates)} 组重复曲目。",
+                "items": duplicates,
+            }
+        )
 
     invalid = [track for track in tracks if not is_valid_music_track(track)]
     if invalid:
-        issues.append({
-            "kind": "invalid_tracks",
-            "severity": "high",
-            "summary": f"发现 {len(invalid)} 首像教程/合集/节目而非真实歌曲的条目。",
-            "items": [_track_brief(track) for track in invalid],
-        })
+        issues.append(
+            {
+                "kind": "invalid_tracks",
+                "severity": "high",
+                "summary": f"发现 {len(invalid)} 首像教程/合集/节目而非真实歌曲的条目。",
+                "items": [_track_brief(track) for track in invalid],
+            }
+        )
 
     style_jumps = _style_jumps(tracks)
     if style_jumps:
-        issues.append({
-            "kind": "style_jump",
-            "severity": "medium",
-            "summary": f"有 {len(style_jumps)} 处相邻歌曲风格跨度过大。",
-            "items": style_jumps,
-        })
+        issues.append(
+            {
+                "kind": "style_jump",
+                "severity": "medium",
+                "summary": f"有 {len(style_jumps)} 处相邻歌曲风格跨度过大。",
+                "items": style_jumps,
+            }
+        )
 
     energy_gaps = _energy_gaps(tracks)
     if energy_gaps:
-        issues.append({
-            "kind": "energy_gap",
-            "severity": "medium",
-            "summary": f"有 {len(energy_gaps)} 处能量断层，听感可能不连贯。",
-            "items": energy_gaps,
-        })
+        issues.append(
+            {
+                "kind": "energy_gap",
+                "severity": "medium",
+                "summary": f"有 {len(energy_gaps)} 处能量断层，听感可能不连贯。",
+                "items": energy_gaps,
+            }
+        )
 
     language_mix = _language_mix(tracks)
     if language_mix:
@@ -130,25 +138,37 @@ def _duplicate_titles(tracks: list[Any]) -> list[dict[str, Any]]:
     duplicates = []
     for (title, artist), items in buckets.items():
         if title and len(items) > 1:
-            duplicates.append({
-                "title": title,
-                "artist": artist,
-                "count": len(items),
-            })
+            duplicates.append(
+                {
+                    "title": title,
+                    "artist": artist,
+                    "count": len(items),
+                }
+            )
     return duplicates
 
 
 def _style_jumps(tracks: list[Any]) -> list[dict[str, Any]]:
     jumps: list[dict[str, Any]] = []
     for left, right in zip(tracks, tracks[1:], strict=False):
-        left_tags = {str(item).lower() for item in [*(getattr(left, "genre", []) or []), *(getattr(left, "mood", []) or [])] if str(item).strip()}
-        right_tags = {str(item).lower() for item in [*(getattr(right, "genre", []) or []), *(getattr(right, "mood", []) or [])] if str(item).strip()}
+        left_tags = {
+            str(item).lower()
+            for item in [*(getattr(left, "genre", []) or []), *(getattr(left, "mood", []) or [])]
+            if str(item).strip()
+        }
+        right_tags = {
+            str(item).lower()
+            for item in [*(getattr(right, "genre", []) or []), *(getattr(right, "mood", []) or [])]
+            if str(item).strip()
+        }
         if left_tags and right_tags and not left_tags.intersection(right_tags):
-            jumps.append({
-                "from": _track_brief(left),
-                "to": _track_brief(right),
-                "reason": "相邻歌曲没有共享的曲风或情绪标签。",
-            })
+            jumps.append(
+                {
+                    "from": _track_brief(left),
+                    "to": _track_brief(right),
+                    "reason": "相邻歌曲没有共享的曲风或情绪标签。",
+                }
+            )
     return jumps[:5]
 
 
@@ -169,11 +189,13 @@ def _energy_gaps(tracks: list[Any]) -> list[dict[str, Any]]:
     gaps: list[dict[str, Any]] = []
     for left, right in zip(tracks, tracks[1:], strict=False):
         if abs(_energy_bucket(left) - _energy_bucket(right)) >= 2:
-            gaps.append({
-                "from": _track_brief(left),
-                "to": _track_brief(right),
-                "reason": "能量级别从高到低或从低到高跳变过大。",
-            })
+            gaps.append(
+                {
+                    "from": _track_brief(left),
+                    "to": _track_brief(right),
+                    "reason": "能量级别从高到低或从低到高跳变过大。",
+                }
+            )
     return gaps[:5]
 
 

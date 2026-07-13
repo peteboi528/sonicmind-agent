@@ -81,9 +81,9 @@ class JourneyService:
         batches = run_parallel(tasks, timeout=15.0, default=[])
         seen: set[str] = set()
         local_fallback = [
-            track for track in self._list_assets()
-            if self._is_recommendation_quality_track(track)
-            and not self.library.is_disliked(user_id, track)
+            track
+            for track in self._list_assets()
+            if self._is_recommendation_quality_track(track) and not self.library.is_disliked(user_id, track)
         ]
         journey_tracks: list[Asset | ExternalTrack] = []
 
@@ -105,7 +105,8 @@ class JourneyService:
             candidates = [track for track, _ in ranked[:per_phase]]
             if len(candidates) < per_phase:
                 refill_pool = [
-                    track for track in self._dedupe_tracks([*(batch or []), *local_fallback])
+                    track
+                    for track in self._dedupe_tracks([*(batch or []), *local_fallback])
                     if self._track_key(track) not in seen
                     and self._is_recommendation_quality_track(track)
                     and not self.library.is_disliked(user_id, track)
@@ -120,13 +121,15 @@ class JourneyService:
                 seen.add(self._track_key(track))
             journey_tracks.extend(candidates)
             self.library.record_exposure(candidates)
-            out["phases"].append({
-                "name": phase["name"],
-                "goal": phase["goal"],
-                "transition": phase["transition"],
-                "energy": phase["energy"],
-                "tracks": [self._serialize_journey_track(track) for track in candidates],
-            })
+            out["phases"].append(
+                {
+                    "name": phase["name"],
+                    "goal": phase["goal"],
+                    "transition": phase["transition"],
+                    "energy": phase["energy"],
+                    "tracks": [self._serialize_journey_track(track) for track in candidates],
+                }
+            )
         record_journey_history(user_id, journey_tracks)
         return out
 

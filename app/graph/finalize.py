@@ -2,6 +2,7 @@
 
 nodes.py 仅作为门面 re-export 本模块的符号，业务逻辑收敛于此。
 """
+
 from __future__ import annotations
 
 import logging
@@ -50,8 +51,11 @@ def _taste_experiment_card(item: Any) -> dict[str, Any]:
         "expected_signal": item.expected_signal,
     }
 
+
 async def _finalize_tail_async(
-    agent: AudioVisualAgent, state: AgentState, answer_text: str,
+    agent: AudioVisualAgent,
+    state: AgentState,
+    answer_text: str,
 ) -> tuple[AgentAnswer, dict[str, Any], list[str]]:
     """answer_text 已知后的收尾：guard / 记忆自学习 / 目标推进 / 持久化 / 构建 AgentAnswer + final_payload。
 
@@ -75,9 +79,12 @@ async def _finalize_tail_async(
     else:
         # 从 nodes 模块读取，使外部对 nodes.guard_answer 的 monkeypatch 生效。
         from app.graph.nodes import guard_answer
+
         answer_text, removed = guard_answer(answer_text, known)
     memory_updated = await agent.memory.auto_learn_from_turn_async(
-        state["user_id"], state["query"], state.get("results", []),
+        state["user_id"],
+        state["query"],
+        state.get("results", []),
     )
     goal = None
     if state["plan"].intent != "chat":
@@ -138,10 +145,15 @@ async def _finalize_tail_async(
         if source_cards:
             final_payload["cards"] = source_cards
     final_payload["trace_summary"] = _trace_summary(
-        state["plan"], state.get("results", []), trace, aligned_cards,
-        state.get("tool_outcomes", []), state.get("context") or {},
+        state["plan"],
+        state.get("results", []),
+        trace,
+        aligned_cards,
+        state.get("tool_outcomes", []),
+        state.get("context") or {},
     )
     return answer, final_payload, trace
+
 
 async def finalize_stream_async(agent: AudioVisualAgent, state: AgentState):
     """Native async finalize used by the production SSE graph."""
@@ -152,9 +164,7 @@ async def finalize_stream_async(agent: AudioVisualAgent, state: AgentState):
         # 普通请求将 execution deadline 留给最终回答；一旦前序耗尽这段预算，
         # 直接走已有确定性组装，保证本轮仍有标准 final 事件。
         use_deterministic = bool(
-            deadline_at
-            and not _is_knowledge_intent(state["plan"].intent)
-            and time.monotonic() >= float(deadline_at)
+            deadline_at and not _is_knowledge_intent(state["plan"].intent) and time.monotonic() >= float(deadline_at)
         )
         if use_deterministic:
             state = {
@@ -167,7 +177,9 @@ async def finalize_stream_async(agent: AudioVisualAgent, state: AgentState):
                 yield StreamEvent(type="token", content=delta)
         else:
             async for delta in compose_answer_stream_async(
-                state["query"], state.get("results", []), state["plan"],
+                state["query"],
+                state.get("results", []),
+                state["plan"],
                 agent=agent,
                 memory_query=context.get("memory_query", ""),
                 history_text=context.get("history_text", ""),
@@ -186,6 +198,7 @@ async def finalize_stream_async(agent: AudioVisualAgent, state: AgentState):
         fallback = _finalize_fallback(state)
         final_event = next((ev for ev in fallback.get("events", []) if ev.type == "final"), None)
         yield final_event or StreamEvent(type="final", content="这轮处理出错了，请重试。", payload={})
+
 
 def _log_finalize_error_to_trace_store(state: AgentState, exc: Exception) -> None:
     """best-effort 把异常类型写本地 trace 存储（完整 traceback 已由 logger.exception 落服务端日志）。
@@ -210,7 +223,9 @@ def _finalize_fallback(state: AgentState) -> AgentState:
         *state.get("trace", []),
         "[final_error] finalize 失败，已输出保守兜底回答。",
     ]
-    answer_text = f"这轮我已经尽量处理了“{query}”，但最后整理答案时遇到错误。你可以先查看上方候选结果，我没有编造额外歌曲。"
+    answer_text = (
+        f"这轮我已经尽量处理了“{query}”，但最后整理答案时遇到错误。你可以先查看上方候选结果，我没有编造额外歌曲。"
+    )
     answer = AgentAnswer(
         answer=answer_text,
         evidences=[],
@@ -254,6 +269,7 @@ def _finalize_fallback(state: AgentState) -> AgentState:
         "events": [*state.get("events", []), StreamEvent(type="final", content=answer_text, payload=final_payload)],
     }
 
+
 def _aligned_cards(tracks: list[Any], events: list[StreamEvent]) -> list[dict[str, Any]]:
     """为 listed 曲目生成卡片，按 (title, source, id) 复用流式预览阶段已发出的
     卡片（保留 reason/score/components），找不到的再用 _song_card 兜底合成。"""
@@ -278,6 +294,7 @@ def _aligned_cards(tracks: list[Any], events: list[StreamEvent]) -> list[dict[st
         cards.append(existing.get(key) or _song_card(track))
     return cards
 
+
 def _completed_actions(results: list[dict[str, Any]]) -> list[str]:
     mapping = {
         "web_music_search": "web_music_search",
@@ -293,6 +310,7 @@ def _completed_actions(results: list[dict[str, Any]]) -> list[str]:
         "similar_artists": "similar_artists",
     }
     return [mapping.get(result.get("type", ""), result.get("type", "")) for result in results]
+
 
 def _trace_summary(
     plan: AgentPlan,
@@ -352,10 +370,14 @@ def _trace_summary(
                 if citation.get("source"):
                     sources.add(citation.get("source"))
     observed_tools = [str(item.get("tool") or "") for item in outcomes or [] if item.get("tool")]
-    planned = list(dict.fromkeys([
-        *observed_tools,
-        *(get_handler(name) or name for name in plan.tools_needed),
-    ]))
+    planned = list(
+        dict.fromkeys(
+            [
+                *observed_tools,
+                *(get_handler(name) or name for name in plan.tools_needed),
+            ]
+        )
+    )
     tool_statuses: dict[str, str] = {}
     for item in outcomes or []:
         tool = str(item.get("tool") or "")
@@ -373,7 +395,8 @@ def _trace_summary(
             "tool": str(item.get("tool") or ""),
             "message": str((item.get("error") or {}).get("message") or "unknown error"),
         }
-        for item in outcomes or [] if item.get("status") == ToolStatus.ERROR.value
+        for item in outcomes or []
+        if item.get("status") == ToolStatus.ERROR.value
     ]
     if not error_details:
         for line in trace:
@@ -413,17 +436,20 @@ def _trace_summary(
         "latency_budget": latency_budget,
     }
 
+
 def _music_dossier_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
     for result in reversed(results):
         if result.get("type") in {"music_dossier", "music_compare"} and result.get("dossier"):
             return result.get("dossier")
     return None
 
+
 def _sample_dossier_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
     for result in reversed(results):
         if result.get("type") == "sample_dossier" and result.get("sample_dossier"):
             return result.get("sample_dossier")
     return None
+
 
 def _taste_experiment_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
     for result in results:
@@ -435,17 +461,22 @@ def _taste_experiment_payload(results: list[dict[str, Any]]) -> dict[str, Any] |
                 return exp
     return None
 
+
 def _playlist_repair_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next((result for result in results if result.get("type") == "playlist_repair"), None)
+
 
 def _taste_shift_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next((result for result in results if result.get("type") == "taste_shift_detector"), None)
 
+
 def _fact_check_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next((result for result in results if result.get("type") == "music_fact_check"), None)
 
+
 def _recommend_explainer_payload(results: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next((result for result in results if result.get("type") == "recommend_explainer"), None)
+
 
 def _compose_deterministic_answer(results: list[dict[str, Any]], plan: AgentPlan) -> str:
     if plan.intent == "music_compare":
@@ -505,6 +536,7 @@ def _compose_deterministic_answer(results: list[dict[str, Any]], plan: AgentPlan
         return _compose_recommend_explainer_answer(results)
     return "这轮没有拿到可交付的结构化结果。"
 
+
 def _chunk_for_stream(text: str, *, max_chunk: int = 60) -> list[str]:
     """把已算好的整段答案切成渐进 yield 的小块，营造流式观感（不调用 LLM）。
 
@@ -528,6 +560,7 @@ def _chunk_for_stream(text: str, *, max_chunk: int = 60) -> list[str]:
             chunks.append(buf)
     return chunks
 
+
 async def _compose_multi_intent_stream(
     query: str,
     results: list[dict[str, Any]],
@@ -549,10 +582,16 @@ async def _compose_multi_intent_stream(
         if idx > 0:
             yield "\n\n"
         async for piece in compose_answer_stream_async(
-            query, results, view, agent=agent,
-            memory_query=memory_query, history_text=history_text, user_id=user_id,
+            query,
+            results,
+            view,
+            agent=agent,
+            memory_query=memory_query,
+            history_text=history_text,
+            user_id=user_id,
         ):
             yield piece
+
 
 async def compose_answer_stream_async(
     query: str,
@@ -565,6 +604,7 @@ async def compose_answer_stream_async(
 ):
     # 从 nodes 模块读取，使外部对 nodes.select_llm 的 monkeypatch 生效。
     from app.graph.nodes import select_llm
+
     llm = select_llm(agent, "default") if agent is not None else None
 
     async def stream_llm(prompt: str, fallback: str, temp: float = settings.dialog_temperature):
@@ -583,8 +623,13 @@ async def compose_answer_stream_async(
     intent = plan.intent
     if settings.enable_multi_intent and plan.is_multi_intent:
         async for piece in _compose_multi_intent_stream(
-            query, results, plan, agent=agent,
-            memory_query=memory_query, history_text=history_text, user_id=user_id,
+            query,
+            results,
+            plan,
+            agent=agent,
+            memory_query=memory_query,
+            history_text=history_text,
+            user_id=user_id,
         ):
             yield piece
         return
@@ -624,8 +669,16 @@ async def compose_answer_stream_async(
             yield "\n\n📎 参考来源：\n" + "\n".join(f"- {url}" for url in source_urls[:3])
         return
     if intent in {
-        "artist_albums", "similar_artists", "taste_experiment", "taste", "journey",
-        "concert_events", "playlist_repair", "taste_shift_detector", "music_fact_check", "recommend_explainer",
+        "artist_albums",
+        "similar_artists",
+        "taste_experiment",
+        "taste",
+        "journey",
+        "concert_events",
+        "playlist_repair",
+        "taste_shift_detector",
+        "music_fact_check",
+        "recommend_explainer",
     } or _is_knowledge_intent(intent):
         # 知识档案正文在 dossier 构建阶段已算好（直答/合成），这里不再调 LLM。
         # 但整段一次性 yield 会让前端"先空白、后整段刷出"；按段落切块渐进 yield，
@@ -655,6 +708,7 @@ async def compose_answer_stream_async(
     for idx, track in enumerate(tracks, start=1):
         yield f"{idx}. 《{getattr(track, 'title', '')}》 - {getattr(track, 'artist', '') or '未知'}（{getattr(track, 'source', 'local')}）\n"
 
+
 def _intro_prompt(
     query: str,
     tracks: list[Any],
@@ -668,10 +722,11 @@ def _intro_prompt(
     if shortfall:
         fallback += f"\n说明：你要求 {plan.target_count} 首，但当前候选只有 {len(tracks)} 首。"
     titles_preview = "、".join(getattr(t, "title", "") for t in tracks[:5])
-    artists_preview = "、".join(dict.fromkeys(
-        (getattr(t, "artist", "") or "").strip() for t in tracks[:8]
-        if (getattr(t, "artist", "") or "").strip()
-    ))
+    artists_preview = "、".join(
+        dict.fromkeys(
+            (getattr(t, "artist", "") or "").strip() for t in tracks[:8] if (getattr(t, "artist", "") or "").strip()
+        )
+    )
     mem_hint = f"用户偏好：{memory_query[:150]}" if memory_query else "暂无明确偏好记录"
     # 数量口径铁律：开场白如提数量，必须用「真实通过过滤的数量」len(tracks)，不得用目标 target_count。
     if plan.target_count and len(tracks) < plan.target_count:
@@ -686,6 +741,7 @@ def _intro_prompt(
     else:
         count_rule = ""
     from app.prompts.untrusted_boundary import wrap_untrusted
+
     prompt = (
         f"用户请求：{query}\n"
         f"我已找到 {len(tracks)} 首真实候选，前几首：{wrap_untrusted(titles_preview, '候选曲目')}\n"
@@ -699,6 +755,7 @@ def _intro_prompt(
         "不要列歌名，不要编造任何歌曲，不要用书名号。只输出这一句话。"
     )
     return prompt, fallback
+
 
 def _chat_prompt(query: str, agent: AudioVisualAgent | None, history_text: str = "", user_id: str = "") -> str:
     """构造 chat 回复的 prompt（注入用户画像作为事实锚，供流式/非流式共用）。"""
@@ -726,6 +783,7 @@ def _chat_prompt(query: str, agent: AudioVisualAgent | None, history_text: str =
         "不要编造排名、发行时间、销量等你不确定的具体数据。"
     )
 
+
 def _discussion_prompt(
     query: str,
     tracks: list[Any],
@@ -741,6 +799,7 @@ def _discussion_prompt(
         artist = getattr(t, "artist", "") or ""
         items.append(f"《{title}》{artist}")
     from app.prompts.untrusted_boundary import wrap_untrusted
+
     track_hint = f"已搜到的真实曲目（网易云验证过）：{wrap_untrusted('、'.join(items), '真实曲目')}\n"
     history_hint = ""
     if history_text:
@@ -754,13 +813,14 @@ def _discussion_prompt(
         "严格规则：\n"
         "1. 只讨论上面列出的真实曲目和你能确认的事实\n"
         "2. 不要编造专辑评价、歌曲细节、发行时间、排名、销量等你不确定的信息\n"
-        "3. 不确定的就说\"我不太确定\"，不要猜测\n"
+        '3. 不确定的就说"我不太确定"，不要猜测\n'
         "4. 不要推荐未在上面列出的歌曲——只讨论已验证的真实曲目\n"
         "5. 如果之前聊过相关话题，体现连贯性\n"
         "6. 100字以内\n"
         "7. 可以挑几首真实曲目推荐并说明理由"
     )
     return prompt, refuse
+
 
 def _video_intro_prompt(query: str, tracks: list[Any], history_text: str = "") -> tuple[str, str]:
     """构造视频推荐开场白的 prompt + 兜底文本（供流式/非流式共用）。"""
@@ -771,6 +831,7 @@ def _video_intro_prompt(query: str, tracks: list[Any], history_text: str = "") -
         recent_lines = history_text.strip().split("\n")[-4:]
         history_hint = "最近对话：\n" + "\n".join(recent_lines) + "\n"
     from app.prompts.untrusted_boundary import wrap_untrusted
+
     prompt = (
         f"{history_hint}"
         f"用户请求：{query}\n"
@@ -780,6 +841,7 @@ def _video_intro_prompt(query: str, tracks: list[Any], history_text: str = "") -
     )
     return prompt, fallback
 
+
 def _video_list_lines(tracks: list[Any]) -> list[str]:
     """视频清单（确定性拼接，流式/非流式共用）。"""
     return [
@@ -787,6 +849,7 @@ def _video_list_lines(tracks: list[Any]) -> list[str]:
         f"（{getattr(track, 'source', 'local')}）"
         for idx, track in enumerate(tracks[:10], start=1)
     ]
+
 
 def _compose_artist_albums_answer(
     results: list[dict[str, Any]],
@@ -815,6 +878,7 @@ def _compose_artist_albums_answer(
         lines.append(f"{idx}. 专辑《{name}》 - {a.get('artist') or artist or '未知'}{tail}")
     return f"{intro}\n" + "\n".join(lines)
 
+
 def _compose_similar_artists_answer(results: list[dict[str, Any]]) -> str:
     result = next((item for item in results if item.get("type") == "similar_artists"), None)
     artists = list((result or {}).get("artists") or [])
@@ -828,6 +892,7 @@ def _compose_similar_artists_answer(results: list[dict[str, Any]]) -> str:
         suffix = f"；曲库代表作：{tracks}" if tracks else ""
         lines.append(f"{index}. {artist.get('name', '')}（{reason}{suffix}）")
     return "\n".join(lines)
+
 
 def _compose_taste_experiment_answer(results: list[dict[str, Any]]) -> str:
     exp = next((r.get("experiment") for r in results if r.get("type") == "taste_experiment"), None)
@@ -847,6 +912,7 @@ def _compose_taste_experiment_answer(results: list[dict[str, Any]]) -> str:
         lines.append(result_summary)
     return "\n".join(lines)
 
+
 def _compose_concert_events_answer(results: list[dict[str, Any]]) -> str:
     result = next((item for item in results if item.get("type") == "concert_events"), None)
     payload = result or {}
@@ -858,13 +924,13 @@ def _compose_concert_events_answer(results: list[dict[str, Any]]) -> str:
         scope = f"{artist} 在 {city} 的" if city else f"{artist} 的"
         if weak_sources:
             leads = "；".join(
-                f"{item.get('title', '线索页')}（{item.get('source_name', 'web')}）"
-                for item in weak_sources[:3]
+                f"{item.get('title', '线索页')}（{item.get('source_name', 'web')}）" for item in weak_sources[:3]
             )
             return f"这轮还没找到 {scope}可核实巡演场次；目前只有弱线索页：{leads}。我不会凭这些页面硬编演出安排。"
         return f"这轮暂时没找到 {scope}可核实巡演信息；我不会凭印象编演出安排。"
     concrete = [
-        event for event in events
+        event
+        for event in events
         if event.get("kind") == "event" or any(event.get(k) for k in ("date_text", "city", "venue"))
     ]
     pages = [event for event in events if event not in concrete]
@@ -872,7 +938,9 @@ def _compose_concert_events_answer(results: list[dict[str, Any]]) -> str:
     if concrete:
         lines.append("可核实场次：")
     for idx, event in enumerate(concrete[:5], start=1):
-        tail = "｜".join(part for part in [event.get("date_text", ""), event.get("city", ""), event.get("venue", "")] if part)
+        tail = "｜".join(
+            part for part in [event.get("date_text", ""), event.get("city", ""), event.get("venue", "")] if part
+        )
         suffix = f"（{tail}）" if tail else ""
         source = event.get("source_url") or event.get("url") or ""
         label = event.get("source_name") or "web"
@@ -889,11 +957,11 @@ def _compose_concert_events_answer(results: list[dict[str, Any]]) -> str:
                 lines.append(f"   来源：{label} · {source}")
     if weak_sources:
         leads = "；".join(
-            f"{item.get('title', '线索页')}（{item.get('source_name', 'web')}）"
-            for item in weak_sources[:2]
+            f"{item.get('title', '线索页')}（{item.get('source_name', 'web')}）" for item in weak_sources[:2]
         )
         lines.append(f"补充线索：以下页面只作辅助参考，未纳入已确认场次：{leads}")
     return "\n".join(lines)
+
 
 def _compose_playlist_repair_answer(results: list[dict[str, Any]]) -> str:
     payload = _playlist_repair_payload(results) or {}
@@ -915,6 +983,7 @@ def _compose_playlist_repair_answer(results: list[dict[str, Any]]) -> str:
             lines.append(f"\n可补位候选：{titles}")
     return "\n".join(lines)
 
+
 def _compose_taste_shift_answer(results: list[dict[str, Any]]) -> str:
     payload = _taste_shift_payload(results) or {}
     if payload.get("message"):
@@ -931,6 +1000,7 @@ def _compose_taste_shift_answer(results: list[dict[str, Any]]) -> str:
     if emerging:
         lines.append("\n最近新冒头的风格：" + "、".join(emerging))
     return "\n".join(lines)
+
 
 def _compose_fact_check_answer(results: list[dict[str, Any]]) -> str:
     payload = _fact_check_payload(results) or {}
@@ -957,6 +1027,7 @@ def _compose_fact_check_answer(results: list[dict[str, Any]]) -> str:
             lines.append(f"- {label}：{url}" if url else f"- {label}")
     return "\n".join(lines)
 
+
 def _compose_recommend_explainer_answer(results: list[dict[str, Any]]) -> str:
     payload = _recommend_explainer_payload(results) or {}
     if payload.get("missing_context"):
@@ -971,6 +1042,7 @@ def _compose_recommend_explainer_answer(results: list[dict[str, Any]]) -> str:
             reasons = "；".join(item.get("reasons") or [])
             lines.append(f"- 《{item.get('title', '')}》 - {item.get('artist', '')}：{reasons}")
     return "\n".join(lines)
+
 
 def _artist_info_prompt(
     query: str,
@@ -992,6 +1064,7 @@ def _artist_info_prompt(
         if content:
             context_parts.append(f"[{i}] {title}\n{content}")
     from app.prompts.untrusted_boundary import strip_directive_phrases, wrap_untrusted
+
     search_context = wrap_untrusted(strip_directive_phrases("\n\n".join(context_parts)), "搜索资料")
     source_urls = [item["url"] for item in search_results if item.get("url")]
     history_hint = ""
@@ -1004,7 +1077,7 @@ def _artist_info_prompt(
         f"以下是搜索引擎返回的真实资料：\n{search_context}\n\n"
         "请用中文基于以上真实资料写一段介绍，像一个懂音乐的朋友在讲解（200-400字）。\n"
         "严格规则：\n"
-        "1. 只使用上面列出的真实信息，不确定的说\"我不太确定\"\n"
+        '1. 只使用上面列出的真实信息，不确定的说"我不太确定"\n'
         "2. 不要编造排名、销量、具体日期等未提及的数据\n"
         "3. 自然流畅，不要像百科词条那样枯燥\n"
         "4. 如果资料足够，可以涵盖：简介、成员、风格特点、代表作、影响力等\n"

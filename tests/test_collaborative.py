@@ -29,6 +29,7 @@ def _track(title, genre=None, mood=None, external_id=None):
 
 # ---- 共现矩阵 ----
 
+
 def test_cooccurrence_symmetric_and_no_self():
     histories = [["a", "b", "c"], ["a", "b"], ["c", "d"]]
     m = build_cooccurrence(histories)
@@ -46,6 +47,7 @@ def test_cooccurrence_dedupes_within_user():
 
 
 # ---- 候选打分 ----
+
 
 def test_collaborative_scores_normalized_and_ranked():
     histories = [["x", "hit"], ["x", "hit"], ["x", "weak"]]
@@ -74,6 +76,7 @@ def test_recent_listened_ids_recent_first_deduped():
 
 # ---- 4th anchor 权重重分配 ----
 
+
 def test_weights_redistribute_without_cf():
     # CF 不可用时，三锚权重和仍为 1，CF 权重为 0
     w_sem, w_per, w_beh, w_col, w_exp = _normalized_weights(True, True, collaborative_ok=False)
@@ -91,8 +94,11 @@ def test_cf_anchor_changes_ranking_when_enabled(monkeypatch):
     # 两首标签相同的候选，仅 CF 分不同 → CF 高者应排前
     tracks = [_track("low", ["pop"]), _track("high", ["pop"])]
     ranked = tri_anchor_rerank(
-        "x", tracks, profile,
-        collaborative_scores=[0.0, 1.0], collaborative_ok=True,
+        "x",
+        tracks,
+        profile,
+        collaborative_scores=[0.0, 1.0],
+        collaborative_ok=True,
     )
     assert ranked[0][0].title == "high"
     assert "collaborative" in ranked[0][1].components
@@ -103,8 +109,11 @@ def test_cf_ignored_when_length_mismatch():
     profile = PreferenceProfile.from_taste(None)
     tracks = [_track("a"), _track("b")]
     ranked = tri_anchor_rerank(
-        "x", tracks, profile,
-        collaborative_scores=[1.0], collaborative_ok=True,  # 长度不匹配
+        "x",
+        tracks,
+        profile,
+        collaborative_scores=[1.0],
+        collaborative_ok=True,  # 长度不匹配
     )
     assert len(ranked) == 2
     assert "collaborative" not in ranked[0][1].components

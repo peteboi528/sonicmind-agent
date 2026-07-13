@@ -1,4 +1,5 @@
 """AUTH_ENABLED 门禁：开启后缺少/错误 X-API-Key 返回 401，公开端点放行。"""
+
 from __future__ import annotations
 
 import uuid
@@ -76,9 +77,11 @@ def test_playback_user_id_bound_to_auth_user(monkeypatch):
     monkeypatch.setattr(main_module.settings, "user_api_keys", {"alice-key": bound_user})
 
     loaded = []
+
     def spy_load(user_id):
         loaded.append(user_id)
         return None
+
     monkeypatch.setattr(netease_auth, "load_cookie", spy_load)
 
     client = TestClient(main_module.app)

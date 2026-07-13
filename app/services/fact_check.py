@@ -61,12 +61,18 @@ def _extract_claims(text: str, entities: list[Any]) -> list[dict[str, Any]]:
     if "的" in text and entities:
         for entity in entities:
             if entity.artist and entity.name in text:
-                claims.append({"kind": "artist_relation", "text": f"{entity.name} 属于 {entity.artist}", "value": entity.artist})
+                claims.append(
+                    {"kind": "artist_relation", "text": f"{entity.name} 属于 {entity.artist}", "value": entity.artist}
+                )
     if not claims:
         for entity in entities[:2]:
-            claims.append({"kind": "entity_exists", "text": f"{entity.name} 是一个真实的{entity.type}", "value": entity.type})
+            claims.append(
+                {"kind": "entity_exists", "text": f"{entity.name} 是一个真实的{entity.type}", "value": entity.type}
+            )
             if entity.artist:
-                claims.append({"kind": "artist_relation", "text": f"{entity.name} 属于 {entity.artist}", "value": entity.artist})
+                claims.append(
+                    {"kind": "artist_relation", "text": f"{entity.name} 属于 {entity.artist}", "value": entity.artist}
+                )
     deduped: list[dict[str, Any]] = []
     seen = set()
     for claim in claims:
@@ -90,7 +96,11 @@ def _evaluate_claim(claim: dict[str, Any], evidence_text: str, entities: list[An
         rationale = "实体解析结果与陈述类型一致。" if status == "verified" else "实体类型没有被稳定解析到。"
     elif kind == "artist_relation":
         artist = str(claim.get("value") or "")
-        status = "verified" if artist and any(artist == getattr(entity, "artist", "") for entity in entities) else "uncertain"
+        status = (
+            "verified"
+            if artist and any(artist == getattr(entity, "artist", "") for entity in entities)
+            else "uncertain"
+        )
         rationale = "实体解析出的 artist 与陈述一致。" if status == "verified" else "当前资料不足以确认归属艺人。"
     else:
         status = "verified" if entities else "uncertain"

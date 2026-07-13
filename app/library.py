@@ -146,9 +146,16 @@ class ResourceLibrary:
             return
         rows = [
             (
-                track.title, track.artist, track.source, track.source_id,
-                "|".join(track.genre), "|".join(track.mood), track.playback_url,
-                1 if track.verified else 0, utc_now_iso(), track.exposure_count,
+                track.title,
+                track.artist,
+                track.source,
+                track.source_id,
+                "|".join(track.genre),
+                "|".join(track.mood),
+                track.playback_url,
+                1 if track.verified else 0,
+                utc_now_iso(),
+                track.exposure_count,
             )
             for track in tracks
         ]
@@ -242,7 +249,9 @@ class ResourceLibrary:
             ).fetchall()
         return [self._row_to_track(row) for row in rows]
 
-    def semantic_search(self, query: str, limit: int = 5, pool_size: int = 300, min_score: float = 0.55) -> list[ResourceTrack]:
+    def semantic_search(
+        self, query: str, limit: int = 5, pool_size: int = 300, min_score: float = 0.55
+    ) -> list[ResourceTrack]:
         """Dense fallback recall over verified resource-library tracks.
 
         性能关键：候选向量**预存**在 tracks.embedding 列。dirty 行（新写入或改了
@@ -312,13 +321,11 @@ class ResourceLibrary:
             return 0
         # 取全部 dirty 行的 id（不截断 batch），下面再分块算。batch 是单次 encode 的块大小。
         with self._connect() as conn:
-            ids = [r["id"] for r in conn.execute(
-                "SELECT id FROM tracks WHERE verified=1 AND embed_dirty=1"
-            ).fetchall()]
+            ids = [r["id"] for r in conn.execute("SELECT id FROM tracks WHERE verified=1 AND embed_dirty=1").fetchall()]
         total = 0
         # 分块算（每块 batch 行），单块 encode 调用 + 批量落库，控制峰值内存。
         for start in range(0, len(ids), batch):
-            chunk = ids[start:start + batch]
+            chunk = ids[start : start + batch]
             if not chunk:
                 continue
             with self._connect() as conn:
@@ -510,9 +517,11 @@ class ResourceLibrary:
 
 
 def _resource_track_text(track: ResourceTrack) -> str:
-    return " ".join([
-        track.title or "",
-        track.artist or "",
-        " ".join(track.genre or []),
-        " ".join(track.mood or []),
-    ]).strip()
+    return " ".join(
+        [
+            track.title or "",
+            track.artist or "",
+            " ".join(track.genre or []),
+            " ".join(track.mood or []),
+        ]
+    ).strip()

@@ -11,19 +11,25 @@ frontend/
 ├── index.html
 └── src/
     ├── main.js
-    ├── App.vue           # 侧边栏 + Tab 容器
+    ├── App.vue           # 侧边栏 + 8 个 Tab 容器（对话/今日/浏览/探索/画像/我的库/历史/歌单）
     ├── api.js            # 统一 fetch 封装 + SSE 解析
     ├── store.js          # reactive 全局状态（userId / 网易云 / 播放器）
-    ├── theme.css         # Spotify 深色 design tokens
+    ├── markdown.js       # 气泡 Markdown 渲染（先 HTML 转义再受控替换，防 XSS）
+    ├── mediaKeys.js      # 媒体键 / 全局快捷键
+    ├── theme.css         # 深色 design tokens
     └── components/
-        ├── Sidebar.vue            # 用户 / 扫码登录 / 导入歌单 / 训练偏好
-        ├── ChatTab.vue            # SSE 流式对话 + 歌曲卡片
-        ├── DiscoverTab.vue        # 搜索
+        ├── Sidebar.vue            # 用户 / 扫码登录 / 导入歌单
+        ├── ChatTab.vue            # SSE 流式对话 + 歌曲 / 知识卡片
         ├── DailyTab.vue           # 今日推荐
-        ├── LibraryTab.vue         # 我的库（评分/删除/入库）
-        ├── PlaylistTab.vue        # 歌单生成/自动分类/管理
-        ├── SongCard.vue           # 歌曲卡片（播放/MV/不喜欢）
-        ├── PlayerBar.vue          # 底部播放器
+        ├── DiscoverTab.vue        # 浏览页（搜索 / 分桶 / 热门，库外优先候选）
+        ├── TasteLabTab.vue        # 探索：safe / stretch / bold 品味实验
+        ├── ProfileTab.vue         # 用户品味画像仪表盘
+        ├── LibraryTab.vue         # 我的库（评分 / 能量徽章 / 删除 / 多选）
+        ├── HistoryTab.vue         # 收听与对话历史
+        ├── PlaylistTab.vue        # 歌单生成 / 自动分类 / 多选管理
+        ├── SongCard.vue           # 歌曲 / 推荐卡片（播放 / MV / 入库 / 不喜欢）
+        ├── EnergyBadge.vue        # tempo / energy 三档徽章（estimated 如实标注）
+        ├── PlayerBar.vue          # 底部播放器 + 歌词字幕同步
         ├── MvOverlay.vue          # MV 浮层
         └── NeteaseLogin.vue       # 扫码登录模态 + 2s 轮询
 ```

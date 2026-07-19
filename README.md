@@ -1,178 +1,275 @@
-# SonicMind —— 智能音乐推荐 Agent（原 MusicAgent）
+<div align="center">
 
-一个**可解释、记忆驱动、反幻觉**的音乐推荐 Agent。核心不是单次 LLM 对话，而是一个围绕用户品味持续工作、决策全程可追溯的智能体。
+# SonicMind
 
-```text
-用户输入 → Graph 编排（context → intent plan → tools → evaluate/reflect → finalize）
-   → Answer Guard（只保留可追溯歌名/专辑名）
-   → SSE（plan / candidates / album_card / eval / final）
-   → Vue 前端（聊天 / 探索工作台 / 播放器 / 曲库 / 歌单 / 偏好）
+**一个会"较真"的音乐推荐 Agent —— 它不会推荐一首不存在的歌。**
+
+[![CI](https://github.com/peteboi528/sonicmind-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/peteboi528/sonicmind-agent/actions/workflows/ci.yml)
+[![Nightly LLM Eval](https://github.com/peteboi528/sonicmind-agent/actions/workflows/nightly-llm-eval.yml/badge.svg)](https://github.com/peteboi528/sonicmind-agent/actions/workflows/nightly-llm-eval.yml)
+![Python](https://img.shields.io/badge/python-3.11+-blue)
+![Tests](https://img.shields.io/badge/tests-1009%20collected-brightgreen)
+![Version](https://img.shields.io/badge/version-0.3.0-blue)
+
+FastAPI · LangGraph · Vue 3 · DeepSeek/Qwen
+
+</div>
+
+---
+
+SonicMind 是一个围绕用户品味持续工作的音乐推荐 Agent。它不是把问题丢给 LLM 然后等一句话回复的聊天壳，而是一条完整的工程链路：识别意图、调用真实音乐数据源、维护记忆与行为反馈、给出**每一条都能追溯到真实来源**的推荐，并把整个决策过程通过 SSE 交给前端展示。
+
+和直接用 LLM 做推荐相比，它最在意一件事——**诚实**：歌名、专辑名必须能在工具返回的真实候选里核对到，否则在出答案前就被剔除。换句话说，它宁可说"没找到"，也不编一首交差。
+
+> 媒体分析当前以**元数据富化**为主，不声称已具备 Whisper / CLIP 级别的真实音视频理解。tempo / energy 从曲风与情绪标签估算并如实标注为 `estimated`；未识别的 genre / mood 标「未分类」，不随机伪造——这是同一个原则的延伸。
+
+## 目录
+
+- [它解决了什么问题](#它解决了什么问题)
+- [核心技术决策](#核心技术决策)
+- [系统架构](#系统架构)
+- [能做什么](#能做什么)
+- [快速开始](#快速开始)
+- [工程原则](#工程原则)
+- [质量保障](#质量保障)
+- [技术栈](#技术栈)
+- [项目结构](#项目结构)
+- [文档](#文档)
+
+## 它解决了什么问题
+
+把"推荐音乐"这件事直接交给 LLM，会撞上三个绕不过去的毛病。SonicMind 的每一步设计，几乎都是在堵其中一个：
+
+| 毛病 | 表现 | SonicMind 的应对 |
+|---|---|---|
+| **编造** | 一本正经地推荐一首根本不存在的歌，或张冠李戴 | 工具先返回真实候选，答案里的歌名必须命中候选白名单，否则剔除 |
+| **不可追溯** | "为什么推这首？"答不上来 | 每条推荐附节点级 `agent_trace` + 稳定 `trace_summary`，意图/工具/来源全程留痕 |
+| **千篇一律** | 推荐永远困在已知喜好里，或全是热歌 | Thompson Sampling 探索冷门 + Taste Lab 用实验验证品味边界 |
+
+不是"让 LLM 小心一点"，而是**从架构上把幻觉和偷懒关在答案门外**。
+
+## 核心技术决策
+
+下面是几个最值得展开讲的工程决策。每一条都来自真实踩过的坑，不是纸上谈兵。
+
+### 1. 反幻觉：把"答案"和"来源"彻底解耦
+
+**问题**：LLM 会幻觉歌名——有时编一首不存在的，有时把 A 的歌安到 B 头上。光靠 prompt 约束不可靠。
+
+**方案**：把候选生成和答案生成分成两步。工具链先返回**真实候选**（网易云、Last.fm 等平台数据），生成回答时，每个书名号歌名 / 专辑名必须命中这个候选白名单；`guard_answer` 在出答案前把无法追溯的内容剔除。候选不足时，系统会如实说"没找到足够的歌"，而不是硬编。
+
+**效果**：每条推荐都能追溯到真实平台来源。这甚至可以被自动化 smoke 校验——"有没有走对工具、有没有发出卡片、有没有 final"都成了可断言的结构化检查。
+
+### 2. 推荐排序：三锚归一化 + 缺锚自动重分配
+
+**问题**：语义、口味、行为三类信号，在不同环境下可用性完全不同——没装 embedding 模型时语义锚消失，新用户没有行为数据时行为锚消失。简单加权会让分数失真。
+
+**方案**：`final = w·语义 + w·口味 + w·行为`，**某锚缺失时其权重按比例转移给其余锚**（而不是把分数拉平），再用 MMR（`λ·相关性 − (1−λ)·候选间标签重叠`）抑制连续推荐同质曲目。
+
+**权衡**：没有上图数据库。4 维 Jaccard（genre / mood / scenario / theme）对用户偏好的区分度已经够用，换来的是零额外基础设施——这个判断在个人项目尺度上是成立的。
+
+### 3. 探索与利用：Thompson Sampling 在线学习
+
+**问题**：纯利用会困在已知喜好，纯探索体验差；冷启动还缺数据。
+
+**方案**：每个候选维护一个 Beta(α, β) 后验。听完 → α+1，秒跳 → β+0.5，高分 → α+，负反馈 / 不喜欢 → β+3，曝光衰减 → β+0.3。采样时从后验里抽，尾部候选有概率被捞回——于是高潜力的冷门歌不会被埋没。
+
+**效果**：一套**无需离线训练**的轻量在线学习，边用边校准口味。
+
+### 4. 意图识别：LLM 与确定性规则分工
+
+**问题**：让 LLM 同时判意图、抽实体、打曲风 / 心情标签，又贵又容易幻觉，还很难加新意图。
+
+**方案**：让 LLM 只做它擅长的——判意图 + 抽实体名；`genre / mood / scenario` 标签交给确定性规则（`app/graph/tag_rules.py`）。所有意图的工具链、策略、关键词、优先级集中在 registry（`app/intents.py`），**新增意图只改一处**。LLM 误判时（比如把"介绍"判成讨论），关键词安全网还能把它纠正回来。
+
+**效果**：降本、降幻觉，还把"加新功能"的成本压到了最低。这条决策背后是 Reddit 上那句 *"boring architecture wins in production"*——能确定化的就别交给概率模型。
+
+### 5. 踩过的坑：推理模型的"空答案"
+
+**问题**：接入 DeepSeek-V4 后，对话一度变得僵硬、答案经常是空的。第一反应是去调 prompt——没用。
+
+**根因**：推理模型把**真正的答案吐在了 `reasoning_content` 字段，`content` 经常是空的**。这是模型用法问题，不是 prompt 问题。（这条教训后来被证实是对话僵硬的总根因。）
+
+**方案**：识别推理模型、默认关掉 thinking 模式（单次调用快约 35%、输出 token 少约 3 倍）、真正需要推理时再流式读取 `reasoning_content`。
+
+**教训**：debug 诡异输出时，先核对**"模型到底把答案放在了哪个字段"**，别一上来就怪 prompt。这个坑我后来写进了项目的记忆库，避免重蹈。
+
+### 6. 性能：先定位真正的瓶颈，再动手
+
+**问题**：随曲库变大，单次请求越来越慢。直觉以为是网络 / 外部接口限流。
+
+**根因**：不是网络，是 **per-request 重算**——`list_assets` 每次全量扫库、embedding 每次重算，开销随库增长线性放大。
+
+**方案**：`list_assets` / embedding 进程内缓存，SQLite 作为资源库的单一事实源（根治双写漂移）。同样的思路也治了推荐超时：根因是前序已搜过、`online_fallback` 却**二次联网**撞上限流吃光预算——加一个"已搜过就别重搜"的短路就解决了。
+
+**教训**：性能问题先量化和定位瓶颈，别凭直觉堆超时和重试——那只会把症状盖住。
+
+## 系统架构
+
+所有聊天请求走**单一的 Graph 编排**（`app/graph/`），生产环境只有这一套决策逻辑，没有并行的第二套：
+
+```
+用户输入
+  │
+  ▼
+┌─────────────────── Graph 编排 (app/graph/) ───────────────────┐
+│                                                                │
+│  load_context ─▶ plan_intent ─▶ execute_tools                  │
+│       │              │               │                         │
+│   GSSC 预算     LLM 判意图        调用对应工具链                │
+│   (按优先级      + 规则打标签     search / recommend /          │
+│    分 token)                     knowledge / video / ...       │
+│       │              │               │                         │
+│       │              │      ◀─ 候选不足？→ web_fallback 联网补搜 │
+│       │              ▼               │                         │
+│       │         evaluate ─▶ reflect ─▶ finalize                │
+│                                                                │
+└──────────────────────────────┬─────────────────────────────────┘
+                               ▼
+                   ┌─────────── Answer Guard ───────────┐
+                   │ 答案里每个《歌名》/《专辑名》必须    │
+                   │ 命中工具返回的真实候选白名单，        │
+                   │ 否则在出答案前剔除                   │
+                   └───────────────────┬────────────────┘
+                                       ▼
+          SSE: plan / candidates / album_card / eval / final
+                                       ▼
+                          Vue 3 前端（对话 / 今日 / 浏览 /
+                          探索 / 画像 / 我的库 / 历史 / 歌单）
 ```
 
-> 「分段分析」当前为**确定性占位**（demo/离线演示用，保证 RAG 链路可跑通）；真实 Whisper 转写 / CLIP 视觉标签是后续扩展点（见 [docs/EXPLAINER.md](docs/EXPLAINER.md) §7）。未识别出的 genre/mood 标「未分类」、tempo/energy 留空，**不随机伪造**——与本项目反幻觉原则一致。
+**编排要点**
 
-## 四大特色
+- **load_context**：读取记忆、历史、资源库，GSSC 按优先级分配 token 预算，**绝不同步调 LLM 压缩**（会阻塞主流程）。
+- **plan_intent**：LLM 或 MockLLM 输出结构化 `AgentPlan`，关键词 registry 兜底 + 安全升级。
+- **execute_tools**：按 intent 调用对应工具链；一句双意图时两条链可并行（`ENABLE_MULTI_INTENT`）。
+- **evaluate / reflect**：候选不足或约束不满足时触发补救，知识线还有确定性核对 + 可选回环重试。
+- **finalize**：统一生成 grounded answer，跑 Answer Guard，写回记忆和对话状态。
 
-| 特色 | 说明 |
+**关键模块**
+
+| 模块 | 职责 |
 |---|---|
-| 🛡️ **反幻觉** | Answer Guard 在出答案前移除未核实歌名；候选不足时**诚实说明**而非编造。所有推荐可追溯到真实平台来源。 |
-| 🔌 **零依赖可跑** | 无 `LLM_API_KEY` 时用 `MockLLM`，无 langgraph 时图编排自动降级到等价同步执行，无 sentence-transformers 时语义检索回退 TF cosine。开箱即跑的稳定 demo。 |
-| 🎵 **多源搜索生态** | 网易云歌曲搜索 + B站/YouTube MV/现场视频 + Tavily 联网百科。不同场景自动路由最优数据源。 |
-| 🧪 **Taste Lab 品味实验** | 把推荐拆成 safe / stretch / bold 三档：先提出品味假设，再用播放、跳过、喜欢、不喜欢等反馈验证探索边界，最后生成实验报告。 |
-| 📈 **BaRT 行为奖励 + 在线学习** | 听完/秒跳/评分/负反馈实时喂给 Thompson Sampling，探索冷门同时在线学习用户口味。 |
-| 🧪 **质量闭环** | `pytest` + 长对话 smoke + eval/regress，把“Agent 没跑偏”变成可重复检查。 |
+| `app/graph/` | 主编排：planning / execution / recovery / finalize 分文件，nodes.py 是纯门面 |
+| `app/intents.py` | 意图 registry：工具链、策略、关键词、优先级集中声明 |
+| `app/answer.py` | 候选收集、Answer Guard、卡片 / 进度辅助 |
+| `app/recommend/` | 三锚精排、MMR、Thompson Sampling、tempo/energy 估算 |
+| `app/knowledge.py` | 音乐知识线：实体消歧、乐评正文抓取、专辑/艺人档案、对比、采样溯源 |
+| `app/context/gssc.py` | 确定性上下文预算分配 |
+| `app/security/` | 凭证 Fernet 加密、入库 URL 的 SSRF 阻断、非可信内容定界 |
+| `app/sources/` | 网易云 / B站 / YouTube / Last.fm / web search，真实源 + mock 兜底 |
 
-## 对话场景
+## 能做什么
 
-Agent 自动识别意图，路由到最合适的工具链：
+Agent 自动识别意图，路由到对应工具链。下面是代表性场景（完整意图元数据集中在 `app/intents.py`）：
 
-| 意图 | 触发示例 | 行为 |
+| 类别 | 触发示例 | 行为 |
 |------|---------|------|
-| 🎧 **recommend** | 「推荐几首歌」「来点chill的」「适合跑步的歌」 | 网易云 + LLM候选 + Last.fm 多路搜索 → 三锚精排 + MMR 重排 |
-| 🔍 **search** | 「找一首歌」「帮我搜Drake」 | 网易云歌曲搜索为主，本地库补充 |
-| 🎬 **video** | 「找The Weeknd的MV」「Adele现场演唱会」 | **直搜 B站 + YouTube**，不走网易云。B站优先（华语命中率高），YouTube 补位 |
-| 📖 **artist_info** | 「介绍NewJeans」「Drake是谁」「Coldplay出道经历」 | **Tavily 搜索引擎查百科**，LLM 基于真实搜索结果组织 200-400 字介绍 + 来源链接 |
-| 💬 **discuss** | 「The Weeknd怎么样」「Drake和Kendrick谁更牛」 | 搜真实曲目作为论据，LLM 基于事实讨论（反幻觉：不确定的说不知道） |
-| 📋 **playlist** | 「做20首chill歌单」 | 联网扩展 + LLM 精选，保留歌单名和描述 |
-| 📥 **import** | 「导入网易云歌单」 | 网易云「我的歌单」一键导入 |
-| 🎯 **taste** | 「分析我的品味」 | 只读记忆/行为画像，无需联网 |
-| 🧪 **taste_experiment** | 「推荐点不一样的」「做个品味实验」「我听腻了」 | 生成 safe / stretch / bold 三档实验，收集反馈后输出报告 |
-| 🏔️ **journey** | 「做个从热身到冲刺的音乐旅程」 | 多阶段情绪曲线编排 |
-| 💭 **chat** | 「你好」「谢谢」 | 自然寒暄 |
+| 推荐 | 「推荐几首歌」「来点 chill 的」「适合跑步的歌」 | 网易云 + LLM 候选 + Last.fm 多路搜索 → 三锚精排 + MMR 重排 |
+| 搜索 | 「找一首歌」「帮我搜 Drake」 | 网易云歌曲搜索为主，本地库补充 |
+| 音乐知识 | 「讲讲 *Blonde*」「介绍 The Weeknd 的生涯」「Drake vs Kendrick」「这首歌采样了谁」 | 实体消歧 → 元数据 + 乐评正文（Tavily / Discogs / Last.fm）→ DeepSeek 参数化直答 + web 兜底 → 档案卡片 |
+| 视频 | 「找 The Weeknd 的 MV」「Adele 现场」 | 直搜 B 站 + YouTube，不走网易云 |
+| 歌单 | 「做 20 首 chill 歌单」「修一下这个歌单」 | 联网扩展 + LLM 精选；`playlist_repair` 清洗脏数据 |
+| 品味实验 | 「推荐点不一样的」「做个品味实验」 | 生成 safe / stretch / bold 三档，收反馈出报告 |
+| 品味洞察 | 「分析我的品味」「我最近口味变了吗」 | 只读记忆 / 行为画像；`taste_shift_detector` 检测漂移 |
+| 导入 | 「导入网易云歌单」 | 一键导入，入库前过质量闸门拒脏数据 |
 
-### 多轮对话
-
-- **延续指令**：「多来几首」「换一批」「还有吗」→ 继承上一轮实体和意图，自动去重已展示歌曲
-- **话题切换**：「找他的MV」「介绍这个歌手」→ 自动检测新意图信号，不再延续
-- **指代消解**：「他的歌」「只要他的」→ 短句指代自动继承上一轮实体
-
-## 架构概览
-
-### 单一 Graph 编排
-
-聊天请求走统一的图编排（`app/graph/`），不再有多套并行的决策逻辑：
-
-```text
-load_context → plan_intent → execute_tools
-       └→ web_fallback? → evaluate → reflect? → finalize
-```
-
-- **意图识别分工**：LLM 只判意图 + 抽实体名，`genre/mood/scenario` 标签交给**确定性规则**（`app/graph/tag_rules.py`），降幻觉降成本。
-- **意图 Registry**（`app/intents.py`）：所有意图元数据集中声明——工具链、策略、关键词、优先级。新增意图只改一处。
-- **条件路由**：本地/检索候选不足时自动触发 `web_fallback` 联网补搜。
-- **单一编排**：生产对话只走异步 LangGraph；复合任务由同一 compiled graph 作为子图执行。
-- **安全网**：LLM 误判意图时（如把「介绍」判成 discuss），按关键词信号自动升级到正确意图。
-- **稳定摘要**：`final` SSE payload 附带 `trace_summary`，前端可展示意图、工具、来源、fallback 和最终卡片数。
-
-### 三锚归一化精排（`app/recommend/rerank.py`）
-
-```text
-final = w_语义·semantic + w_口味·personalize + w_行为·behavior
-```
-
-- **语义锚**：sentence-transformers dense 向量（可选），不可用时回退 TF 词项重叠。
-- **口味锚**：4 维 Jaccard（genre/mood/scenario/theme）对用户偏好，轻量版 Graph Affinity，无需图数据库。
-- **行为锚**：BaRT 收听奖励信号。
-- **缺锚自动重分配**：某锚不可用时其权重转移给其余锚，不把分数拉平。
-- **MMR 多样性重排**：`λ·相关性 − (1−λ)·候选间标签重叠`，避免连续推荐同质曲目。
-
-### GSSC 上下文管理（`app/context/gssc.py`）
-
-多源上下文按优先级（用户输入 > 记忆 > 历史）分配 token 预算，min_tokens 保底 + 剩余按优先级分配 + 按行截断兜底。**绝不同步调 LLM 压缩**（会阻塞主流程）。每轮产出 before/after/saved 追踪报告。
-
-### Thompson Sampling 探索 + 反馈环（`app/library.py`）
-
-- 每个候选维护 Beta(α, β) 后验，尾部候选采样捞回高潜力冷门歌。
-- **在线学习反馈环**：听完 → α+1，秒跳 → β+0.5，高分 → α+，负反馈/不喜欢 → β+3，曝光衰减 → β+0.3。
-
-### Taste Lab 品味实验（`app/agent.py`）
-
-Taste Lab 是项目的特色主线：Agent 不只回答“我猜你会喜欢什么”，而是生成一个可验证的小实验。
-
-```text
-品味画像/行为信号 → 候选池 → rerank components → safe / stretch / bold
-        → 播放/跳过/喜欢/不喜欢/太安全/太远
-        → bucket 统计 → 实验报告 → 下一轮推荐策略
-```
-
-- **safe**：高 personalize / behavior，验证稳定画像。
-- **stretch**：相邻风格或能量轻微越界，验证可扩展空间。
-- **bold**：明显探索但仍遵守 dislike/exclusion，验证边界。
-- **报告确定性优先**：完成率、跳过率、喜欢率、收藏率和评分先算清楚，LLM 只可作为自然语言增强，不负责编造结论。
-
-### Agent 透明度（UI / 报告）
-
-每条流式最终回复会携带：
-- **原始 `agent_trace`**：节点级调试轨迹。
-- **稳定 `trace_summary`**：意图、策略、工具、来源、fallback、guard、最终卡片数。
-- **候选卡片**：与答案文本实际列出的曲目对齐，避免“文本 5 首、卡片 12 张”的漂移。
+**多轮对话**：「多来几首」「换一批」继承上轮实体并去重；「找他的 MV」「介绍这个歌手」检测到新意图就不再延续；「他的歌」自动消解指代。
 
 ## 快速开始
 
 ```bash
 python3 -m pip install -e ".[dev]"
-python3 -m pytest                 # 全量测试（零依赖即可跑）
+python3 -m pytest                 # 全量测试，零依赖即可跑
 
 # 可选增强
 python3 -m pip install -e ".[embeddings]"   # 语义检索（sentence-transformers）
-# langgraph 已在主依赖，缺失时自动降级
-
-# 环境变量（可选，增强联网能力）
-# LLM_API_KEY=...           # LLM 服务密钥
-# TAVILY_API_KEY=...         # Tavily 搜索引擎（歌手百科查询，无 key 时 DuckDuckGo 兜底）
-# LASTFM_API_KEY=...         # Last.fm 音乐发现
-# AUTH_ENABLED=true          # 部署时开启 API key 鉴权
-# USER_API_KEYS=u1:key1      # per-user key，服务端覆盖客户端 user_id
-# ALLOWED_ORIGINS=https://your.domain
+python3 -m pip install -e ".[vision]"       # 封面识别（视觉模型 / 本地 OCR 兜底）
+# langgraph 已在主依赖，缺失时自动降级为等价同步执行
 
 uvicorn app.api.main:app --reload --port 8000
 ```
 
 - API 文档：`http://127.0.0.1:8000/docs`
-- Vue 3 前端：`http://127.0.0.1:8000/web`（源码 `frontend/`，构建产物 `app/web/dist/`）
+- 前端：`http://127.0.0.1:8000/web`（源码 `frontend/`，构建产物 `app/web/dist/`，部署无需 node）
 
-## 主要 API
+**无任何外部 key 时**，系统用 MockLLM / MockSource 跑通完整链路，作为一份稳定的离线 demo。主要环境变量（均可选，完整见 `.env.example`）：
 
-| 端点 | 用途 |
+```bash
+LLM_API_KEY=...              # 缺省走 MockLLM
+TAVILY_API_KEY=...           # 歌手百科 / 乐评正文；无 key 时 DuckDuckGo 兜底
+LASTFM_API_KEY=...           # 音乐发现与标签
+DISCOGS_TOKEN=...            # 乐评与发行信息
+ENABLE_MULTI_INTENT=false    # 一句双意图并行
+TURN_BUDGET_SECONDS=25       # 单轮墙钟预算，超时降级而非挂死
+AUTH_ENABLED=false           # 部署时开启 API key 鉴权
+RATE_LIMIT_ENABLED=false     # 令牌桶限流（按 user_id / IP keying）
+```
+
+## 工程原则
+
+几条贯穿全项目的设计取舍，体现的是"宁可朴素、不要侥幸"的判断：
+
+- **确定性优先**：能确定化的就别交给概率模型——标签走规则、报告先算数再让 LLM 润色、知识线有确定性核对。LLM 只做它真正擅长的部分。
+- **零依赖可跑**：langgraph / sentence-transformers / vision 缺失都有等价降级路径。完整链路在零配置下能跑，这条特性由 CI 持续守护。
+- **诚实的数据观**：tempo / energy 没有真实音频分析（取流路径被禁），就从曲风 / 情绪标签估算并标注 `estimated`；识别不出的标「未分类」。好看永远让位于准确。
+- **拦截性功能默认关**：鉴权、限流等会改变本地体验的能力默认关闭，部署时显式打开——和"零依赖可跑"保持一致。
+- **零风险边界**：不碰逆向与风控路径（网易云写接口 / 取流逆向、已关闭的 Spotify audio-features），音频特征维持标签估算。
+
+## 质量保障
+
+三层回归把"Agent 没跑偏"变成可重复检查：
+
+| 层 | 命令 | 作用 |
+|---|---|---|
+| 单元 + 集成 | `python3 -m pytest` | 1009 用例，零依赖可跑 |
+| 长对话 smoke | `python3 scripts/long_dialogue_smoke.py` | 无需真实 key 的结构化回归，输出 MD/JSON 报告 |
+| LLM-as-judge | `python3 -m tests.eval.run` | 真实 key 下的端到端评分（推荐 / 歌单 / 反幻觉 / 多样性 / 旅程） |
+
+CI 跑 ruff、pytest coverage 和 long dialogue smoke；真实源 eval 走 nightly，避免外部接口波动阻塞本地回归。另有 `scripts/realistic_memory_eval.py` 做三段跨会话、16 轮的真实记忆压力测试。
+
+## 技术栈
+
+| 层 | 选型 |
 |---|---|
-| `POST /chat` | 主对话入口（走 LangGraph 编排） |
-| `POST /agent/stream` | 流式：plan → 候选卡片 → 理由 → final |
-| `POST /recommend/daily` | 每日推荐（三锚精排） |
-| `POST /playlist/generate` | 歌单生成 |
-| `POST /search` | 搜索（本地 + 联网真实候选） |
-| `POST /listen` `POST /rate` | 收听/评分（喂 Thompson 反馈环） |
-| `POST /taste/experiment/generate` | 生成 Taste Lab 三档品味实验 |
-| `GET /taste/experiments/{user_id}` | 查看实验历史 |
-| `POST /taste/experiment/feedback` | 记录实验内单曲反馈 |
-| `POST /taste/experiment/report` | 生成/刷新实验报告 |
-| `POST /assets/ingest` `/analyze` `/enrich` | 入库 / 分析 / 联网补全 |
+| 后端 | FastAPI · Pydantic v2 · LangGraph · SQLite |
+| LLM | DeepSeek / Qwen（OpenAI 兼容协议）· 原生异步 + 流式 |
+| 检索 | sentence-transformers（可选，回退 TF cosine） |
+| 前端 | Vue 3 · Vite · 原生 SSE |
+| 数据源 | 网易云 · B站 / YouTube · Last.fm · Tavily / DuckDuckGo · Discogs |
+| 视觉 | DashScope Qwen-VL · rapidocr 兜底（封面识别） |
+| 安全 | Fernet 凭证加密 · 令牌桶限流 · SSRF / 注入边界 |
 
-## Demo 路线
+## 项目结构
 
-1. 导入一个网易云歌单（自动三层兜底分类 genre/mood）。
-2. 教 Agent 一个偏好：`我喜欢电子音乐和放松的氛围`。
-3. 推荐 / 生成歌单，展开**透明度面板**看三锚打分和决策过程。
-4. 对推荐点 👎，观察 Thompson 探索分下降、后续不再选中。
-5. 问一个虚构查询，验证反幻觉守卫诚实拒答。
-6. 试 `介绍NewJeans`，看 Tavily 搜索引擎实时查百科。
-7. 试 `帮我找The Weeknd的MV`，看 B站/YouTube 视频搜索。
-8. 试 `推荐点不一样的，做个品味实验`，打开“实验室”听三档候选并标记“太安全/太远”。
-9. 说 `多来几首`，验证跨轮去重（不再重复推荐）。
+```
+app/
+├── api/            # FastAPI 路由：main / web / auth / bot
+├── graph/          # LangGraph 编排：planning / execution / recovery / finalize
+├── recommend/      # 三锚精排、MMR、Thompson、特征估算
+├── knowledge.py    # 音乐知识线（专辑/艺人/乐评/对比/采样）
+├── sources/        # 网易云 / B站 / YouTube / Last.fm / web search
+├── security/       # secret_box / ingest_guard / untrusted_boundary
+├── context/        # GSSC 上下文预算
+├── llm/            # 异步客户端 + 流式 + 可观测
+└── intents.py      # 意图 registry（单一事实源）
+frontend/src/       # Vue 3 SPA：8 个 Tab + 播放器 + 歌词同步
+tests/              # pytest 单元/集成 + eval（LLM-as-judge）
+scripts/            # long_dialogue_smoke / realistic_memory_eval
+docs/               # 架构报告 / 原理讲解 / 部署 / 前端
+```
 
-## 测试与评估
+## 文档
 
-- `python3 -m pytest`：单元 + 集成测试（零依赖可跑）。
-- `python3 scripts/long_dialogue_smoke.py`：长对话结构化回归，输出 `artifacts/long_dialogue_smoke_report.md/json`。
-- `python3 scripts/realistic_memory_eval.py`：三段跨会话、16 轮的真实记忆压力测试；包含偏好纠正、临时约束、话题插入和会话边界，输出独立诊断报告。该评测发现产品缺口时会返回非零，不纳入默认 CI。
-- `python3 -m tests.eval.run`：LLM-as-judge 端到端评分（需真实 key），10 个 case 覆盖推荐/歌单/反幻觉/多样性/旅程/目标跟踪。详见 [tests/eval/README.md](tests/eval/README.md)。
+- [docs/EXPLAINER.md](docs/EXPLAINER.md) —— 原理讲解（系统定位、编排、记忆与推荐、反幻觉）
+- [docs/ARCHITECTURE_REPORT.md](docs/ARCHITECTURE_REPORT.md) —— 架构全景报告（子系统、API、部署）
+- [docs/FRONTEND.md](docs/FRONTEND.md) —— Vue 前端开发与构建
+- [docs/BOT_DEPLOYMENT.md](docs/BOT_DEPLOYMENT.md) —— 飞书 / 微信 Bot 部署
+- [tests/eval/README.md](tests/eval/README.md) —— LLM-as-judge 评估说明
 
-CI 会跑 ruff、pytest coverage 和 long dialogue smoke；真实源 eval 不进默认 CI，避免外部接口波动阻塞本地回归。
+---
 
-## 工程取舍
+<div align="center">
 
-- **所有增强依赖可选**：langgraph / sentence-transformers 缺失都有等价降级路径，零依赖 demo 能力贯穿始终。
-- **原生异步 LLM**：SSE 的规划、自省、恢复和最终 token 使用共享异步 HTTP 客户端；GSSC 继续负责确定性上下文预算。
-- **标签走规则不走 LLM**：降低幻觉和成本，LLM 只做它擅长的意图判断。
-- **关键词 fallback + LLM 双保险**：LLM 不可用时关键词信号兜底；LLM 误判时安全网自动纠正。
+*这是一个持续打磨中的个人项目。每一处设计背后都有具体的坑和权衡，欢迎在 issues 里讨论。*
 
-更多面试向架构讲解见 [docs/EXPLAINER.md](docs/EXPLAINER.md)。
+</div>

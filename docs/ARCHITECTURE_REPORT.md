@@ -1,6 +1,6 @@
 # SonicMind (MusicAgent) 架构全景报告
 
-> 更新日期：2026-06-17。本文记录当前实现，不把规划中的能力写成已完成能力。
+> 更新日期：2026-07-18。本文记录当前实现，不把规划中的能力写成已完成能力。
 
 ## 项目定位
 
@@ -45,7 +45,10 @@ HTTP /agent/stream
 | `app/recommend/` | 三锚/四锚精排、MMR、协同过滤辅助 | 可配置降级 |
 | `app/memory.py` | 偏好、行为、语义记忆、巩固画像、排除规则 | 已接入主链路 |
 | `app/sources/` | 网易云/B站/YouTube/Last.fm/web search | 真实源 + mock/fallback |
-| `frontend/src` | Vue 产品界面、播放器、发现页、曲库和设置 | 主前端 |
+| `app/knowledge.py` | 音乐知识线：实体消歧、元数据、乐评正文、专辑/艺人档案、对比、采样溯源 | parametric 直答 + web 兜底 |
+| `app/security/` | 凭证 Fernet 加密（secret_box）、入库 URL SSRF 阻断（ingest_guard）、非可信内容定界 | 默认可关 |
+| `app/rate_limit.py` | 令牌桶限流中间件，按 user_id / IP keying | 默认关闭 |
+| `frontend/src` | Vue 3 SPA：对话 / 今日 / 浏览 / 探索 / 画像 / 我的库 / 历史 / 歌单 8 个 Tab | 主前端 |
 | `scripts/long_dialogue_smoke.py` | 长对话结构化回归，输出 MD/JSON | CI smoke |
 
 ## 真实能力与降级边界
@@ -57,6 +60,8 @@ HTTP /agent/stream
 - 歌手信息搜索、代表专辑、热门歌曲。
 - 行为反馈、评分、不喜欢、排除规则进入推荐排序。
 - 长对话 continuation、去重、专辑卡 SSE、trace summary。
+- 音乐知识线：专辑 / 艺人深度解读、乐评综述、对比、采样溯源，结合用户曲库呈现。
+- 上传封面识别专辑（视觉模型 / OCR 兜底）；tempo / energy 从曲风与情绪标签估算并标注 `estimated`。
 
 降级/占位：
 
@@ -73,6 +78,10 @@ HTTP /agent/stream
 - `POST /search`、`POST /artist/info`、`POST /artist/album_tracks`。
 - `POST /album/save`、`GET /albums/saved/{user_id}`、`DELETE /album/saved/{user_id}/{album_id}`。
 - `POST /playlist/generate`、`GET /playlists/{user_id}`、`DELETE /playlist/{user_id}/{playlist_id}`。
+- `POST /discover/search` `/browse` `/trending`、`POST /lyrics`、`GET /profile/{user_id}`。
+- `POST /assets/ingest*` `/enrich` `/analyze`、`POST /assets/backfill_features`、`POST /api/identify-album`。
+- `POST /taste/experiment/*`：Taste Lab 生成 / 反馈 / 报告。
+- `GET /health`：LLM mode、auth、store_root、候选数、smoke 报告。
 
 部署配置：
 

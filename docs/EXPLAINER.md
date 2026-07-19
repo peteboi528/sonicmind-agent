@@ -16,7 +16,7 @@ SonicMind 面向“我现在想听什么”的连续音乐场景工作：
 
 真实能力和降级能力分层：
 
-- 真实源：网易云歌曲/专辑/歌单、B站/YouTube 视频、Tavily/DuckDuckGo 歌手信息、Last.fm 标签发现。
+- 真实源：网易云歌曲/专辑/歌单、B站/YouTube 视频、Tavily/DuckDuckGo 歌手信息、Last.fm 标签发现、Discogs 乐评与发行信息、上传封面识别专辑（视觉模型 / 本地 OCR 兜底）。
 - 降级源：MockLLM、MockSource、metadata tag enrichment，保证无 key 也能跑通。
 - 占位边界：当前不声称已完成 Whisper/CLIP 级别的真实音视频理解；未识别字段保持空值或未分类，不随机伪造。
 
@@ -26,7 +26,7 @@ SonicMind 面向“我现在想听什么”的连续音乐场景工作：
 
 - `load_context` 读取记忆、历史、资源库，并通过 GSSC 控制上下文预算。
 - `plan_intent` 让 LLM 或 MockLLM 输出结构化 `AgentPlan`，关键词 registry 做兜底和安全升级。
-- `execute_tools` 按 intent 调用搜索、推荐、歌单、专辑、视频、歌手信息、品味等工具。
+- `execute_tools` 按 intent 调用对应工具：搜索、推荐、歌单、视频，以及音乐知识线（实体消歧、元数据查询、乐评正文抓取、专辑/艺人深度解读、对比、采样溯源）。一句双意图时两条工具链可并行跑。
 - `evaluate` / `reflect` 在候选不足或约束不满足时触发补救。
 - `finalize` 统一生成 grounded answer、运行 Answer Guard、写回记忆和对话状态。
 
@@ -62,11 +62,16 @@ final = semantic + personalize + behavior (+ collaborative)
 
 ## 5. 前端产品形态
 
-当前主前端是 Vue 3 SPA：
+当前主前端是 Vue 3 SPA，侧边栏挂 8 个 Tab：
 
-- 对话页：SSE 流式、候选卡片、专辑卡、决策摘要、底部播放器避让。
-- 探索工作台：歌手搜索、歌手信息、代表专辑、完整专辑曲目、热门歌曲。
-- 曲库/歌单/偏好：本地资产、保存专辑、生成歌单、排除规则、网易云扫码导入。
+- **对话**：SSE 流式回复，歌曲卡片与知识档案卡片混排，决策摘要、底部播放器避让、歌词字幕同步。
+- **今日**：每日推荐（三锚精排）。
+- **浏览**：歌手搜索、分桶浏览、热门歌曲（库外优先候选）。
+- **探索**（Taste Lab）：safe / stretch / bold 三档品味实验，标记"太安全 / 太远"后生成报告。
+- **画像**：可解释的品味仪表盘，展示稳定偏好、行为信号与库分布。
+- **我的库**：本地资产、能量徽章（tempo / energy，estimated 如实标注）、评分、多选管理。
+- **历史**：收听与对话历史回看。
+- **歌单**：生成、自动分类、多选删除与建单。
 
 ## 6. 质量闭环
 
@@ -78,10 +83,10 @@ final = semantic + personalize + behavior (+ collaborative)
 
 CI 同时跑 pytest 和 long dialogue smoke，保证“无 key 可跑”这个项目特性持续成立。
 
-## 7. 接下来最值得做
+## 7. 当前状态与后续方向
 
-下一步不应先堆更多 intent，而是做三件事：
+项目已具备一条可回归的完整链路，后续不再先堆 intent，而是把已有的做扎实：
 
-1. 把真实源 golden cases 做成小型发布前检查，覆盖网易云搜索、专辑顺序、MV、歌手信息、导入歌单。
-2. 把 per-user auth、CORS、health 状态和部署文档打磨成可上线基本盘。
-3. 继续收束前端工作流，让“探索歌手 -> 播放专辑 -> 收藏/入库/反馈”成为一条顺滑路径。
+- **已具备**：per-user auth、CORS 白名单、`/health` 状态、飞书 / 微信 Bot 适配与部署文档、凭证加密与限流、LLM-as-judge eval 与长对话 smoke 三层回归。
+- **仍在打磨**：把真实源 golden cases 做成发布前小而稳的检查，覆盖网易云搜索、专辑顺序、MV、歌手信息、导入歌单；继续收束”探索歌手 → 播放专辑 → 收藏 / 入库 / 反馈”这条路径的顺滑度。
+- **明确的边界**：不碰逆向与风控路径（网易云写接口 / 取流逆向、已关闭的 Spotify audio-features），音频特征维持标签估算，媒体分析以元数据富化为主。

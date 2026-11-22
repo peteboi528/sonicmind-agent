@@ -50,6 +50,28 @@ def source_label(source: str) -> str:
     return "本地库"
 
 
+_SPANISH_COUNTS = {
+    "cero": 0,
+    "una": 1,
+    "un": 1,
+    "dos": 2,
+    "tres": 3,
+    "cuatro": 4,
+    "cinco": 5,
+    "seis": 6,
+    "siete": 7,
+    "ocho": 8,
+    "nueve": 9,
+    "diez": 10,
+}
+_COUNT_UNITS = r"(?:首|曲|个(?:歌|音乐)|(?:songs?|tracks?|canciones|canci[oó]n|pistas?)\b)"
+_ENGLISH_TRACK_COUNT = re.compile(
+    r"(?<![a-z0-9.\-])(\d+)\s+(?:(?!minutes?\b|hours?\b|years?\b|bpm\b)[a-z][a-z-]*\s+){1,3}"
+    r"(?:songs?|tracks?)\b",
+    re.IGNORECASE,
+)
+_BARE_TRACK_REQUEST = re.compile(r"\s*(?:给我|来|推荐)\s*(\d+)\s*[。.!！?？]?\s*")
+
 _CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
 
@@ -67,27 +89,37 @@ def _parse_cn_number(s: str) -> int | None:
     return None
 
 
-def infer_count(text: str) -> int | None:
+def infer_count(text: str, *, allow_approximate: bool = True) -> int | None:
     """从用户输入解析请求的数量。
 
     优先级：阿拉伯数字（"推荐5首"→5）> 中文数字（"二十首"/"十二首"/"两首"）
-    > 模糊量词（"十几首"→15、"一批"→12、"几首"→8）。均截断到 1~100。
+    > 模糊量词（"十几首"→15、"一批"→12、"几首"→8）。显式数字必须有曲目单位，最多 100 首。
 
     之前只认阿拉伯数字，"多来几首/来一批/二十首"等中文/模糊表达全部落空，
     target_count 为 None，推荐恒回到默认 top_k=5。
     """
     text = text or ""
-    # 1. 阿拉伯数字（含可选量词）
-    match = re.search(r"(\d{1,3})\s*(?:首|个|tracks?|songs?|曲)?", text, re.IGNORECASE)
+    # 曲数必须有单位，保留 0 供入口判断，并跳过年代、BPM、歌手名里的数字。
+    match = (
+        re.search(rf"(?<![\d.])(\d+)\s*{_COUNT_UNITS}", text, re.IGNORECASE)
+        or _ENGLISH_TRACK_COUNT.search(text)
+        or _BARE_TRACK_REQUEST.fullmatch(text)
+    )
     if match:
-        return max(1, min(int(match.group(1)), 100))
+        digits = match.group(1).lstrip("0０")
+        return min(int(digits or "0"), 100) if len(digits) <= 3 else 100
     # 2. 中文数字 + 量词（只用"首/曲/首歌"；"个"过宽会把"一个清晨""三个阶段"
     #    这类泛指误解析成歌曲数量，污染 journey 等场景）
     match = re.search(r"([零一二三四五六七八九十两]{1,3})\s*(?:多|来)?\s*(?:首|曲|首歌)", text)
     if match:
         n = _parse_cn_number(match.group(1))
-        if n:
-            return max(1, min(n, 100))
+        if n is not None:
+            return n
+    spanish = re.search(rf"\b({'|'.join(_SPANISH_COUNTS)})\s+(?:canciones|canci[oó]n|pistas?)\b", text, re.IGNORECASE)
+    if spanish:
+        return _SPANISH_COUNTS[spanish.group(1).lower()]
+    if not allow_approximate:
+        return None
     # 3. 模糊量词 → 合理默认（均多于默认 top_k=5，体现“多来点”）
     if re.search(r"十[一二三四五六七八九]?几|二十几|三十几|几十", text):
         return 15

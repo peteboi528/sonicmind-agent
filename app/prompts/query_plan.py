@@ -14,7 +14,7 @@ v3 升级（对齐 SoulTuner 的 UNIFIED_PLANNER 精度）：
 
 from app.intents import intent_prompt_block
 
-QUERY_PLAN_VERSION = "v6-2026-06-23"
+QUERY_PLAN_VERSION = "v7-2026-11-22"
 
 QUERY_PLAN_SYSTEM = f"""\
 你是音乐推荐 Agent 的意图规划器。阅读用户输入（含可选的对话历史和长期音乐偏好），输出一个 JSON 规划对象。
@@ -46,8 +46,8 @@ QUERY_PLAN_SYSTEM = f"""\
 - 只写检索词，不要整句，不要"推荐""帮我"这类功能词。情绪/场景用具体曲风/场景词（深夜→"深夜 lo-fi 氛围"）。
 - chat/taste 等不需要检索的意图，search_query 留空字符串。
 
-## language：语言偏好
-用户明确表达语言倾向时填（"不要中文"→"en"，"要中文的"→"zh"，"日语歌"→"ja"，"韩语"→"ko"），没表达就留空字符串。
+## language：歌曲语种
+仅在用户明确限制歌曲语种时填。回复语言要求不得作为曲目检索词或语种筛选条件。示例（"不要中文"→"en"，"要中文的"→"zh"，"日语歌"→"ja"，"韩语"→"ko"），没表达就留空字符串。
 
 ## search_variants：召回变体
 可选数组，用于补充 search_query 的同义词、跨语言词、常见拼写修正，不超过 4 个。

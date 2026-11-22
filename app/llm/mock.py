@@ -6,7 +6,8 @@ import re
 import uuid
 from typing import Any
 
-from app.intents import get_intent, is_continuation, match_intent_by_keywords
+from app.answer import infer_count
+from app.intents import get_intent, is_continuation, is_playlist_definition, match_intent_by_keywords
 from app.llm.protocol import LLMResponse, ToolCall
 from app.llm.structured import extract_json_dict
 from app.llm.tools import (
@@ -24,6 +25,7 @@ from app.llm.tools import (
     TOOL_TASTE,
     TOOL_WEB_MUSIC_SEARCH,
 )
+from app.reply_language import split_reply_request
 
 REASON_TEMPLATES = [
     "因为你喜欢{genre}风格，这首歌的{mood}氛围很适合{time}听。",
@@ -242,16 +244,18 @@ class MockLLM:
         """模拟结构化意图规划：根据关键词判意图，复刻真实 LLM 的 JSON 输出。"""
         import json as _json
 
-        current_query = _extract_current_query(prompt)
+        current_query, _ = split_reply_request(_extract_current_query(prompt))
         intent = _mock_intent_for_query(current_query)
         spec = get_intent(intent)
         target = _infer_count(current_query)
         use_web = spec.online_default
         use_local = intent not in {"chat", "taste", "video", "artist_info", "import"}
         use_vector = intent in {"recommend", "playlist", "journey", "taste_experiment"}
-        query_for_rewrite = prompt if _needs_history_for_mock_rewrite(current_query) else current_query
+        scene_context, _ = split_reply_request(
+            prompt if _needs_history_for_mock_rewrite(current_query) else current_query
+        )
         entities = _mock_entities(current_query, intent)
-        search_query, language = self._mock_search_query(query_for_rewrite, intent, entities)
+        search_query, language = self._mock_search_query(current_query, intent, entities, scene_context=scene_context)
         search_variants = _mock_search_variants(current_query, search_query, intent, entities)
         return _json.dumps(
             {
@@ -326,7 +330,13 @@ class MockLLM:
         return '{"intent":"chat","entities":[],"use_local":false,"use_vector":false,"use_web":false,"search_query":"","search_variants":[],"language":"","target_count":null,"reasoning":"repair fallback"}'
 
     @staticmethod
-    def _mock_search_query(prompt: str, intent: str, entities: list[str] | None = None) -> tuple[str, str]:
+    def _mock_search_query(
+        prompt: str,
+        intent: str,
+        entities: list[str] | None = None,
+        *,
+        scene_context: str = "",
+    ) -> tuple[str, str]:
         """Mock 版查询改写：粗粒度把否定转正向 + 抓场景词，复刻真实 LLM 的 search_query。
 
         不追求精度（mock 仅供 demo/测试），但要体现"否定不原样发搜索、保留场景"的形状：
@@ -336,7 +346,7 @@ class MockLLM:
         """
         if intent in {"taste", "chat", "import"}:
             return "", ""
-        lowered = prompt.lower()
+        lowered = (scene_context or prompt).lower()
         language = ""
         positives: list[str] = []
         entities = [e for e in (entities or []) if e]
@@ -388,10 +398,7 @@ def _extract_or_default(text: str, default: str) -> str:
 
 
 def _infer_count(text: str) -> int | None:
-    match = re.search(r"(\d{1,3})\s*(?:首|个|tracks?|songs?)?", text, re.IGNORECASE)
-    if not match:
-        return None
-    return max(1, min(int(match.group(1)), 100))
+    return infer_count(text)
 
 
 def _mock_search_variants(query: str, search_query: str, intent: str, entities: list[str] | None = None) -> list[str]:
@@ -461,6 +468,8 @@ def _extract_current_query(prompt: str) -> str:
 def _mock_intent_for_query(query: str) -> str:
     lowered = query.lower()
     stripped = lowered.strip()
+    if is_playlist_definition(query):
+        return "chat"
     if any(k in query for k in ["你好", "嗨", "在吗"]) or re.fullmatch(r"(hi|hello|hey)[!！。.\s]*", stripped):
         return "chat"
     if any(k in lowered for k in ["网易云歌单", "导入歌单", "playlist?id", "导入"]):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from types import SimpleNamespace
 
 from app.graph import nodes
@@ -55,7 +56,14 @@ def test_playlist_repair_detects_duplicates_and_jumps():
     assert "style_jump" in kinds or "energy_gap" in kinds
 
 
-def test_taste_shift_detector_finds_emerging_genre():
+class July2026Clock(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 7, 1, tzinfo=tz)
+
+
+def test_taste_shift_detector_finds_emerging_genre(monkeypatch):
+    monkeypatch.setattr("app.services.profile_shift.datetime", July2026Clock)
     assets = [
         Asset(
             asset_id="old-1",
@@ -250,8 +258,10 @@ def test_concert_events_filters_stale_and_weak_sources():
     assert "Drake concert | Melbourne的日期及行程" in weak_titles
 
 
-def test_concert_events_prioritize_concrete_event_over_tour_page():
+def test_concert_events_prioritize_concrete_event_over_tour_page(monkeypatch):
     from app.tools.actions import _concert_events
+
+    monkeypatch.setattr("app.tools.actions.datetime", July2026Clock)
 
     class Agent:
         def search_artist_info(self, _query):

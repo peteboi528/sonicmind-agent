@@ -9,7 +9,9 @@ search 按查询关键词（流派/情绪/场景）命中打分返回，并混�
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from typing import Any
+from unittest.mock import patch
 
 # 流派 → 典型情绪/场景词（同时作为 search 命中与噪声生成的依据）
 _GENRE_PROFILES: dict[str, dict[str, list[str]]] = {
@@ -172,13 +174,13 @@ def _score_track(track: Any, wanted: set[str]) -> int:
     return sum(1 for w in wanted if w.lower() in text)
 
 
-def install_large_messy() -> None:
+def install_large_messy(stack: ExitStack) -> None:
     """在 install_fakes 基础上，把 search_web_music 换成大而杂库版本。"""
     from app.agent import AudioVisualAgent
     from app.models import ExternalTrack
     from scripts.long_dialogue_smoke import install_fakes
 
-    install_fakes()  # 基础 patch：视频/专辑/导入/播放，避免炸真实网络
+    install_fakes(stack)  # 基础 patch：视频/专辑/导入/播放，避免炸真实网络
     pool = _build_messy_pool()
 
     def fake_search_web_music(
@@ -203,4 +205,4 @@ def install_large_messy() -> None:
             top[-1] = noise_pool[0]
         return top[offset : offset + top_k] if offset else top[:top_k]
 
-    AudioVisualAgent.search_web_music = fake_search_web_music
+    stack.enter_context(patch.object(AudioVisualAgent, "search_web_music", fake_search_web_music))

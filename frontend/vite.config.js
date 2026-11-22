@@ -12,6 +12,7 @@ export default defineConfig({
   },
   server: {
     proxy: {
+      "/health": "http://localhost:8000",
       "/agent": "http://localhost:8000",
       "/chat": "http://localhost:8000",
       "/search": "http://localhost:8000",

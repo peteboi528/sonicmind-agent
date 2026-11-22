@@ -440,3 +440,32 @@ class TestEndToEndThroughGraph:
         asyncio.run(agent.chat_async("user-y", "你好"))
         # chat 意图应清空旧延续状态
         assert agent.memory.get_dialogue_state("user-y").entities == []
+
+    def test_named_threads_keep_continuations_separate(self, tmp_path):
+        from app.agent import AudioVisualAgent
+
+        agent = AudioVisualAgent(JsonStore(tmp_path / "store"))
+        user_id = "listener"
+
+        async def exercise_threads():
+            await agent.chat_async(user_id, "找 The Weeknd 的歌。", thread_id="evening")
+            fresh = await agent.chat_async(user_id, "再来几首。", thread_id="work")
+            resumed = await agent.chat_async(user_id, "再来几首。", thread_id="evening")
+            await agent.chat_async(user_id, "你好", thread_id="work")
+            return fresh, resumed
+
+        fresh, resumed = asyncio.run(exercise_threads())
+
+        assert not any("继承 The Weeknd" in line for line in fresh.agent_trace)
+        assert any("继承 The Weeknd" in line for line in resumed.agent_trace)
+        evening = agent.memory.get_dialogue_state(user_id, thread_id="evening")
+        assert evening.entities == ["The Weeknd"]
+        assert evening.turn_count == 2
+        assert agent.memory.get_dialogue_state(user_id, thread_id="work").turn_count == 0
+
+    def test_named_thread_does_not_import_legacy_default_state(self, tmp_path):
+        memory = MemoryManager(JsonStore(tmp_path / "store"))
+        memory.save_dialogue_state("u1", intent="search", query="q", entities=["A"])
+
+        assert memory.get_dialogue_state("u1", thread_id="u1:default").entities == ["A"]
+        assert memory.get_dialogue_state("u1", thread_id="new-thread").entities == []

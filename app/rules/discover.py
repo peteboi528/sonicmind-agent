@@ -1046,6 +1046,17 @@ def _query_matches_track(query: str, track: ExternalTrack) -> bool:
     entity_hit = any(_match_token(entity, part, fuzzy=True) for entity in entity_tokens for part in searchable_parts)
     if entity_hit:
         return True
+    if track.genre or track.mood:
+        from app.graph.tag_rules import extract_tags
+
+        # 有明确场景或风格时可以查已有标签；纯歌手/曲名仍走原有文本匹配。
+        tags = extract_tags(query)
+        genres = {value.casefold() for value in tags["genre"]}
+        moods = {value.casefold() for value in [*tags["mood"], *tags["scenario"]]}
+        track_genres = {value.casefold() for value in track.genre}
+        track_moods = {value.casefold() for value in track.mood}
+        if genres & track_genres or (not genres and moods & track_moods):
+            return True
     if not general_tokens:
         return False
 

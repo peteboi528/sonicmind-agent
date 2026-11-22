@@ -238,6 +238,7 @@ class Settings:
         # 视觉识别置信阈值：低于此值视为不可信，回退 OCR / 提示输入。
         self.vision_confidence_threshold: float = float(os.getenv("VISION_CONFIDENCE_THRESHOLD", "0.5"))
         # 上传封面体积上限（字节）；超出 413 拒绝。送视觉前先用 Pillow 降到长边 ≤ 下值（省 token、避尺寸限制）。
+        self.agent_image_enabled = os.getenv("AGENT_IMAGE_ENABLED", "true").lower() == "true"
         self.album_cover_max_bytes: int = int(os.getenv("ALBUM_COVER_MAX_BYTES", str(10 * 1024 * 1024)))
         self.vision_image_max_side: int = int(os.getenv("VISION_IMAGE_MAX_SIDE", "1024"))
         # OCR 兜底引擎开关（需装 rapidocr-onnxruntime；未装自动降级，不报错）。

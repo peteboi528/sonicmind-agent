@@ -465,10 +465,13 @@ _MOOD_RULES: dict[str, list[str]] = {
     ],
 }
 
+FOCUS_REQUEST_TERMS = ("写报告", "写作时", "写文档", "集中できる", "集中したい", "作業用", "勉強中")
+
+
 # scenario 关键词 → 标准 scenario 名
 _SCENARIO_RULES: dict[str, list[str]] = {
     "运动": ["运动", "跑步", "健身", "workout", "running", "gym", "举铁", "有氧"],
-    "学习": ["学习", "工作", "专注", "focus", "study", "coding", "写代码", "效率", "考研"],
+    "学习": ["学习", "工作", "专注", "focus", "study", "coding", "写代码", "效率", "考研", *FOCUS_REQUEST_TERMS],
     "睡眠": ["睡眠", "助眠", "睡前", "入睡", "sleep", "晚安", "白噪音"],
     "开车": ["开车", "驾驶", "公路", "driving", "兜风", "road trip", "自驾"],
     "通勤": ["通勤", "地铁", "路上", "commute", "公交", "上班"],

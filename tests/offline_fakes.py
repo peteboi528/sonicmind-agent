@@ -7,10 +7,13 @@ the stubs here avoids the eval path drifting away from the trusted pytest path.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import random
+import socket
 import tempfile
-from contextlib import ExitStack
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from typing import Any
 from unittest.mock import patch
 
@@ -200,3 +203,47 @@ def start_offline_patches() -> ExitStack:
             pass
     embeddings._reset_for_test()
     return stack
+
+
+@contextmanager
+def block_external_network() -> Iterator[list[str]]:
+    """Keep localhost available and report egress even when a tool handles the exception."""
+    attempts: list[str] = []
+    getaddrinfo = socket.getaddrinfo
+    connect = socket.socket.connect
+    connect_ex = socket.socket.connect_ex
+
+    def check_host(host: str | bytes | None) -> None:
+        if host is None:
+            return
+        name = host.decode("ascii", errors="replace") if isinstance(host, bytes) else host
+        if name.lower() == "localhost":
+            return
+        try:
+            if ipaddress.ip_address(name).is_loopback:
+                return
+        except ValueError:
+            pass
+        attempts.append(name)
+        raise OSError(f"Offline evaluation blocked network access to {name}")
+
+    def guarded_lookup(host, *args, **kwargs):
+        check_host(host)
+        return getaddrinfo(host, *args, **kwargs)
+
+    def guarded_connect(sock, address):
+        if sock.family in {socket.AF_INET, socket.AF_INET6}:
+            check_host(address[0])
+        return connect(sock, address)
+
+    def guarded_connect_ex(sock, address):
+        if sock.family in {socket.AF_INET, socket.AF_INET6}:
+            check_host(address[0])
+        return connect_ex(sock, address)
+
+    with (
+        patch("socket.getaddrinfo", guarded_lookup),
+        patch.object(socket.socket, "connect", guarded_connect),
+        patch.object(socket.socket, "connect_ex", guarded_connect_ex),
+    ):
+        yield attempts

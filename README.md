@@ -2,12 +2,11 @@
 
 # SonicMind
 
-**一个会"较真"的音乐推荐 Agent —— 它不会推荐一首不存在的歌。**
+**把一句听歌需求变成一份自己挑过、下次还能打开的场景歌单。**
 
 [![CI](https://github.com/peteboi528/sonicmind-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/peteboi528/sonicmind-agent/actions/workflows/ci.yml)
 [![Nightly LLM Eval](https://github.com/peteboi528/sonicmind-agent/actions/workflows/nightly-llm-eval.yml/badge.svg)](https://github.com/peteboi528/sonicmind-agent/actions/workflows/nightly-llm-eval.yml)
 ![Python](https://img.shields.io/badge/python-3.11+-blue)
-![Tests](https://img.shields.io/badge/tests-1009%20collected-brightgreen)
 ![Version](https://img.shields.io/badge/version-0.3.0-blue)
 
 FastAPI · LangGraph · Vue 3 · DeepSeek/Qwen
@@ -16,11 +15,16 @@ FastAPI · LangGraph · Vue 3 · DeepSeek/Qwen
 
 ---
 
-SonicMind 是一个围绕用户品味持续工作的音乐推荐 Agent。它不是把问题丢给 LLM 然后等一句话回复的聊天壳，而是一条完整的工程链路：识别意图、调用真实音乐数据源、维护记忆与行为反馈、给出**每一条都能追溯到真实来源**的推荐，并把整个决策过程通过 SSE 交给前端展示。
+打开 SonicMind，首页就是「场景歌单」。例如下班坐地铁，想听几首放松的 R&B，可以这样做。
 
-和直接用 LLM 做推荐相比，它最在意一件事——**诚实**：歌名、专辑名必须能在工具返回的真实候选里核对到，否则在出答案前就被剔除。换句话说，它宁可说"没找到"，也不编一首交差。
+1. 输入「晚高峰通勤，想听 8 首放松的 R&B」，点「预览歌单」。
+2. 查看实际找到的歌曲和歌手，取消不想听的曲目，把草稿命名为「回家路上」。
+3. 想再挑一轮，可以只勾选要保留的歌，填上「少一点人声，偏爵士」等调整要求，再点「保留已选，其余换歌」。也可以整份换一批。已看过的曲目会从后续候选中排除。
+4. 满意后点「保存选中的曲目」。在「我的歌单」里重新打开并按列表顺序播放。播放可用性取决于曲源和授权。
 
-> 媒体分析当前以**元数据富化**为主，不声称已具备 Whisper / CLIP 级别的真实音视频理解。tempo / energy 从曲风与情绪标签估算并如实标注为 `estimated`；未识别的 genre / mood 标「未分类」，不随机伪造——这是同一个原则的延伸。
+每个用户保留最近生成的一份草稿。预览不会出现在已保存歌单中。确认时，服务端按生成时的候选快照保存选曲，无需再次请求模型或音乐平台。模型生成失败时可以回退到已有候选，页面按实际曲数展示结果。
+
+「对话」支持追问歌手、专辑和推荐理由。「我的库」和偏好反馈为个性化推荐提供信息。当前的节奏和能量估计来自元数据标签。
 
 ## 目录
 
@@ -37,15 +41,11 @@ SonicMind 是一个围绕用户品味持续工作的音乐推荐 Agent。它不�
 
 ## 它解决了什么问题
 
-把"推荐音乐"这件事直接交给 LLM，会撞上三个绕不过去的毛病。SonicMind 的每一步设计，几乎都是在堵其中一个：
-
-| 毛病 | 表现 | SonicMind 的应对 |
-|---|---|---|
-| **编造** | 一本正经地推荐一首根本不存在的歌，或张冠李戴 | 工具先返回真实候选，答案里的歌名必须命中候选白名单，否则剔除 |
-| **不可追溯** | "为什么推这首？"答不上来 | 每条推荐附节点级 `agent_trace` + 稳定 `trace_summary`，意图/工具/来源全程留痕 |
-| **千篇一律** | 推荐永远困在已知喜好里，或全是热歌 | Thompson Sampling 探索冷门 + Taste Lab 用实验验证品味边界 |
-
-不是"让 LLM 小心一点"，而是**从架构上把幻觉和偷懒关在答案门外**。
+| 使用时的问题 | 系统如何处理 |
+|---|---|
+| 知道听歌场景，但不知道从哪首找起 | 根据场景从音乐平台和曲库召回候选，生成可编辑的歌单草稿 |
+| 只喜欢推荐中的几首 | 用户勾选并命名，同一草稿重复确认相同选择只保存一份 |
+| 想知道推荐从哪来 | 推荐对话展示来源和工具调用轨迹，答案生成后检查带引号的疑似曲名 |
 
 ## 核心技术决策
 
@@ -55,9 +55,7 @@ SonicMind 是一个围绕用户品味持续工作的音乐推荐 Agent。它不�
 
 **问题**：LLM 会幻觉歌名——有时编一首不存在的，有时把 A 的歌安到 B 头上。光靠 prompt 约束不可靠。
 
-**方案**：把候选生成和答案生成分成两步。工具链先返回**真实候选**（网易云、Last.fm 等平台数据），生成回答时，每个书名号歌名 / 专辑名必须命中这个候选白名单；`guard_answer` 在出答案前把无法追溯的内容剔除。候选不足时，系统会如实说"没找到足够的歌"，而不是硬编。
-
-**效果**：每条推荐都能追溯到真实平台来源。这甚至可以被自动化 smoke 校验——"有没有走对工具、有没有发出卡片、有没有 final"都成了可断言的结构化检查。
+候选由音乐工具返回。推荐对话输出后，`guard_answer` 会对带书名号和部分引号的疑似曲名做匹配，移除未命中的名称。这个检查允许标题部分匹配，覆盖范围取决于文案格式。场景歌单确认使用另一种约束，客户端只提交草稿 ID 和所选位置，服务端从快照中取出对应曲目。
 
 ### 2. 推荐排序：三锚归一化 + 缺锚自动重分配
 
@@ -200,10 +198,17 @@ TAVILY_API_KEY=...           # 歌手百科 / 乐评正文；无 key 时 DuckDuc
 LASTFM_API_KEY=...           # 音乐发现与标签
 DISCOGS_TOKEN=...            # 乐评与发行信息
 ENABLE_MULTI_INTENT=false    # 一句双意图并行
-TURN_BUDGET_SECONDS=25       # 单轮墙钟预算，超时降级而非挂死
+TURN_BUDGET_SECONDS=15       # 普通任务与截图推荐的单轮预算（秒）
+KNOWLEDGE_TURN_BUDGET_SECONDS=50  # 艺人与专辑解读的单轮预算（秒）
 AUTH_ENABLED=false           # 部署时开启 API key 鉴权
 RATE_LIMIT_ENABLED=false     # 令牌桶限流（按 user_id / IP keying）
 ```
+
+### 截图推荐演示
+
+打开 `/web/` 的「对话」页，添加一张带有曲名和艺人署名的播放页截图。发送「推荐三首这个歌手的歌，别和截图重复」，再发「我指的是合作歌手，收藏过的也去掉」。收藏过滤读取 SonicMind 已保存的歌单和专辑。决策摘要显示工具候选数、实际卡片数、超时阶段和来源。
+
+图片功能默认开启。可用 `AGENT_IMAGE_ENABLED=false` 关闭。配置 `VISION_LLM_API_KEY` 可使用视觉模型。Mac 本地也可安装 `pip install -e '.[vision]'`，对有清晰曲名和艺人署名的截图使用 OCR。确定性回归使用已采集的真实曲目元数据，运行 `python -m pytest -q tests/test_image_recommendation.py`。
 
 ## 工程原则
 
@@ -217,15 +222,16 @@ RATE_LIMIT_ENABLED=false     # 令牌桶限流（按 user_id / IP keying）
 
 ## 质量保障
 
-三层回归把"Agent 没跑偏"变成可重复检查：
-
-| 层 | 命令 | 作用 |
+| 检查 | 命令 | 覆盖范围 |
 |---|---|---|
-| 单元 + 集成 | `python3 -m pytest` | 1009 用例，零依赖可跑 |
-| 长对话 smoke | `python3 scripts/long_dialogue_smoke.py` | 无需真实 key 的结构化回归，输出 MD/JSON 报告 |
-| LLM-as-judge | `python3 -m tests.eval.run` | 真实 key 下的端到端评分（推荐 / 歌单 / 反幻觉 / 多样性 / 旅程） |
+| 单元与集成测试 | `python3 -m pytest` | 意图路由、工具结果、推荐排序、会话状态与 API |
+| 长对话 smoke | `python3 scripts/long_dialogue_smoke.py` | 离线验证多轮交互、SSE 与 API，输出 Markdown 和 JSON |
+| 跨会话回归 | `python3 scripts/realistic_memory_eval.py` | 固定数据的 16 轮任务，验证长期偏好、临时约束、偏好纠正和新会话隔离。外部联网尝试会使评测失败 |
+| LLM-as-judge | `python3 -m tests.eval.run` | 使用真实模型评估回答质量。使用 `--offline` 可将候选固定为音乐源夹具 |
 
-CI 跑 ruff、pytest coverage 和 long dialogue smoke；真实源 eval 走 nightly，避免外部接口波动阻塞本地回归。另有 `scripts/realistic_memory_eval.py` 做三段跨会话、16 轮的真实记忆压力测试。
+长对话 smoke 和跨会话回归随 CI 运行，报告可以从该次工作流下载。Nightly 使用已配置的真实 LLM 与固定音乐候选做质量评估，真实音乐源可独立验证。
+
+推荐延续状态（上轮实体、标签、已展示曲目）随聊天线程保存，长期偏好在同一用户的各线程共享。未指定线程 ID 的旧客户端继续使用原有默认会话。
 
 ## 技术栈
 

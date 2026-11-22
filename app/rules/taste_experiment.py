@@ -218,3 +218,116 @@ def taste_experiment_bucket_stats(experiment: TasteExperiment) -> dict[str, dict
 
 def bucket_label(bucket: str) -> str:
     return {"safe": "安全区", "stretch": "轻微越界", "bold": "大胆探索"}.get(bucket, bucket)
+
+
+# Search terms also serve as evidence when a catalog result carries them in its metadata.
+_EXPLORATION_TERMS = (
+    ("爵士", "jazz", "ジャズ"),
+    ("钢琴", "piano", "ピアノ"),
+    ("纯音乐", "instrumental", "インスト", "无歌词", "无人声", "不要人声"),
+    ("民谣", "folk", "acoustic"),
+    ("独立流行", "indie pop"),
+    ("独立摇滚", "indie rock"),
+    ("摇滚", "rock"),
+    ("电子", "electronic", "electronica"),
+    ("氛围音乐", "ambient", "电子氛围"),
+    ("新灵魂", "neo soul", "neo-soul"),
+    ("R&B", "r&b", "rnb", "rhythm and blues"),
+    ("说唱", "rap", "hip hop", "hip-hop"),
+    ("日语", "japanese", "日本語", "日系"),
+    ("韩语", "korean", "한국어"),
+    ("华语", "中文", "mandarin", "chinese"),
+    ("英语", "英文", "english"),
+)
+_LANGUAGE_PATTERNS = {
+    "日语": r"[\u3040-\u30ff]",
+    "韩语": r"[\uac00-\ud7af]",
+}
+
+
+def _mentions_term(text: str, term: str) -> bool:
+    if term.isascii():
+        return bool(re.search(rf"(?<![a-z0-9]){re.escape(term.casefold())}(?![a-z0-9])", text))
+    return term in text
+
+
+def exploration_direction(prompt: str) -> list[tuple[str, ...]]:
+    text = re.sub(r"(?:不要|别推|不想听|不听|no\s+|without\s+)[^，。,.；;]+", "", prompt.casefold())
+    groups = [group for group in _EXPLORATION_TERMS if any(_mentions_term(text, term) for term in group)]
+    if any(cue in prompt for cue in ("不要人声", "无人声", "无歌词")):
+        instrumental = _EXPLORATION_TERMS[2]
+        if instrumental not in groups:
+            groups.append(instrumental)
+    return groups
+
+
+def exploration_matches(track: Any, direction: list[tuple[str, ...]], anchored: bool = False) -> bool:
+    labels = {group[0] for group in direction}
+    if anchored and {"爵士", "钢琴"} <= labels:
+        # An instrumental request using 日语 means the Japanese jazz scene, not vocal language.
+        labels -= {"爵士", "钢琴", "日语", "纯音乐"}
+    elif anchored:
+        labels -= {"独立流行", "新灵魂", "电子", "氛围音乐"}
+    text = " ".join(
+        str(value or "") for value in (track.title, track.artist, track.album, *track.genre, *track.mood)
+    ).casefold()
+    return all(
+        (group[0] in _LANGUAGE_PATTERNS and re.search(_LANGUAGE_PATTERNS[group[0]], text))
+        or any(_mentions_term(text, term) for term in group)
+        for group in direction
+        if group[0] in labels
+    )
+
+
+def exploration_track_keys(track: Any) -> set[str]:
+    key = getattr(track, "external_id", "") or getattr(track, "source_id", "") or getattr(track, "asset_id", "")
+    title = re.sub(r"[\W_]+", "", (getattr(track, "title", "") or "").casefold())
+    artist = re.sub(r"[\W_]+", "", (getattr(track, "artist", "") or "").casefold())
+    keys = {f"id:{key}"} if key else set()
+    if title and artist:
+        keys.add(f"song:{title}:{artist}")
+    return keys
+
+
+def is_default_exploration(prompt: str) -> bool:
+    return prompt.strip() in {"", "带我听点库里没有的新东西", "按我的口味探索"}
+
+
+# Artist anchors supply genre evidence for catalog entries whose titles carry no style tags.
+_JAZZ_PIANISTS = (
+    ("福居良", "Ryo Fukui"),
+    ("上原ひろみ", "Hiromi Uehara", "Hiromi"),
+    ("山本剛トリオ", "Tsuyoshi Yamamoto Trio", "山本剛", "Tsuyoshi Yamamoto"),
+    ("辛島文雄", "Fumio Karashima"),
+)
+_STYLE_ARTISTS = {
+    "indie": (("Alvvays",), ("Men I Trust",), ("Camera Obscura",), ("Belle and Sebastian",)),
+    "soul": (("Erykah Badu",), ("D'Angelo", "D’Angelo"), ("Jill Scott",), ("Maxwell",)),
+    "ambient": (("Tycho",), ("Boards of Canada",), ("Brian Eno",), ("Helios",)),
+}
+
+
+def exploration_artist_anchors(direction: list[tuple[str, ...]]) -> tuple[tuple[str, ...], ...]:
+    labels = {group[0] for group in direction}
+    if {"爵士", "钢琴"} <= labels:
+        if "日语" in labels:
+            return _JAZZ_PIANISTS
+        return (
+            ("Bill Evans", "Bill Evans Trio"),
+            ("Oscar Peterson", "Oscar Peterson Trio"),
+            ("Ahmad Jamal", "Ahmad Jamal Trio"),
+            *_JAZZ_PIANISTS[:1],
+        )
+    if "独立流行" in labels:
+        return _STYLE_ARTISTS["indie"]
+    if "新灵魂" in labels:
+        return _STYLE_ARTISTS["soul"]
+    if {"电子", "氛围音乐"} <= labels:
+        return _STYLE_ARTISTS["ambient"]
+    return ()
+
+
+def exploration_artist_match(track: Any, anchors: tuple[tuple[str, ...], ...]) -> tuple[str, ...]:
+    artist = (getattr(track, "artist", "") or "").casefold().strip()
+    artists = {artist, *(part.strip() for part in re.split(r"[、,/]|\s+feat\.?\s+", artist))}
+    return next((aliases for aliases in anchors if artists & {name.casefold() for name in aliases}), ())

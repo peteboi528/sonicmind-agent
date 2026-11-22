@@ -141,3 +141,65 @@ def test_runtime_deadline_caps_tool_timeout():
     assert elapsed < 0.12
     assert result.status == ToolStatus.ERROR
     assert result.error and result.error.kind == "timeout"
+
+
+def test_timed_out_sync_worker_holds_capacity_until_it_exits(monkeypatch):
+    from threading import Event
+
+    spec = TOOL_REGISTRY["recommend"]
+    started = Event()
+    finished = Event()
+    calls = 0
+
+    def handler(_arguments, _context):
+        nonlocal calls
+        calls += 1
+        started.set()
+        finished.wait(1.0)
+        return ToolResult(tool="recommend", status=ToolStatus.OK)
+
+    monkeypatch.setattr(spec, "async_handler", None)
+    monkeypatch.setattr(spec, "handler", handler)
+    monkeypatch.setattr(spec, "max_concurrency", 1)
+    monkeypatch.setattr(spec, "timeout_seconds", 0.08)
+    call = ToolCall(name="recommend", arguments={"query": "test", "top_k": 5})
+
+    async def execute():
+        runtime = ToolRuntime()
+        try:
+            first = await runtime.execute(call, _context())
+            assert started.is_set()
+            assert first.metrics["timeout_phase"] == "execution"
+            assert first.metrics["worker_still_running"]
+            queued = await runtime.execute(call, _context())
+            assert queued.metrics["timeout_phase"] == "queue"
+            assert not queued.metrics["worker_still_running"]
+            assert calls == 1
+        finally:
+            finished.set()
+        recovered = await runtime.execute(call, _context())
+        assert recovered.status == ToolStatus.OK
+        assert calls == 2
+
+    asyncio.run(execute())
+
+
+def test_queue_and_retries_share_the_same_deadline(monkeypatch):
+    spec = TOOL_REGISTRY["recommend"]
+    deadlines = []
+
+    async def handler(_arguments, context):
+        deadlines.append(context.deadline_at)
+        if len(deadlines) == 1:
+            raise ConnectionResetError("first attempt")
+        await asyncio.sleep(1.0)
+
+    monkeypatch.setattr(spec, "async_handler", handler)
+    monkeypatch.setattr(spec, "timeout_seconds", 0.28)
+    monkeypatch.setattr(spec, "max_retries", 1)
+    call = ToolCall(name="recommend", arguments={"query": "test", "top_k": 5})
+    result = asyncio.run(ToolRuntime().execute(call, _context()))
+    assert len(deadlines) == 2
+    assert deadlines[0] == deadlines[1]
+    assert result.metrics["timeout_phase"] == "execution"
+    assert result.metrics["duration_ms"] < 400

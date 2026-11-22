@@ -6,6 +6,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from app.concurrency import run_parallel
 from app.models import (
     Asset,
     ExternalTrack,
@@ -18,6 +19,15 @@ from app.models import (
     TrackRef,
     UserMemory,
     utc_now_iso,
+)
+from app.rules.content import filter_content_exclusions
+from app.rules.taste_experiment import (
+    exploration_artist_anchors,
+    exploration_artist_match,
+    exploration_direction,
+    exploration_matches,
+    exploration_track_keys,
+    is_default_exploration,
 )
 
 logger = logging.getLogger(__name__)
@@ -34,6 +44,7 @@ class TasteExperimentService:
         search_web_music: Any,
         rerank_tracks: Any,
         dedupe_tracks: Any,
+        list_assets: Any,
         is_recommendation_quality_track: Any,
     ) -> None:
         self.store = store
@@ -43,6 +54,7 @@ class TasteExperimentService:
         self._search_web_music = search_web_music
         self._rerank_tracks = rerank_tracks
         self._dedupe_tracks = dedupe_tracks
+        self._list_assets = list_assets
         self._is_recommendation_quality_track = is_recommendation_quality_track
 
     def generate_taste_experiment(
@@ -67,7 +79,21 @@ class TasteExperimentService:
         memory = self.memory.get_memory(user_id)
         hypothesis = taste_experiment_hypothesis(memory)
         seeds = taste_experiment_search_seeds(memory, prompt)
-        candidates = collect_taste_candidates(user_id, seeds, total, online_only=online_only)
+        if online_only:
+            recent = [
+                item
+                for experiment in self.list_taste_experiments(user_id)[-3:]
+                if experiment.prompt.strip().casefold() == prompt.strip().casefold()
+                for item in [
+                    *experiment.previous_tracks,
+                    *(item.track for segment in experiment.segments for item in segment.tracks),
+                ]
+            ]
+            candidates = collect_taste_candidates(
+                user_id, seeds, total, online_only=True, prompt=prompt, excluded_tracks=recent
+            )
+        else:
+            candidates = collect_taste_candidates(user_id, seeds, total)
         prompt_rules = taste_prompt_exclusions(prompt)
         candidates = filter_taste_experiment_candidates(
             user_id,
@@ -75,6 +101,8 @@ class TasteExperimentService:
             [*memory.exclusion_rules, *prompt_rules],
         )
         buckets = bucket_taste_experiment_candidates(candidates, per_bucket)
+        if online_only and (exploration_artist_anchors(exploration_direction(prompt)) or not memory.listening_history):
+            buckets = {"safe": [], "stretch": candidates[:total], "bold": []}
         confidence_ok = bool(buckets["safe"] and buckets["bold"])
         segments = [
             TasteExperimentSegment(
@@ -94,9 +122,7 @@ class TasteExperimentService:
                 name="stretch",
                 label="轻微越界",
                 description=(
-                    "和你的画像相邻，但至少在一个维度上有所变化。"
-                    if confidence_ok
-                    else "候选区分度不足，先放在待验证区收集真实反馈。"
+                    "和你的画像相邻，但至少在一个维度上有所变化。" if confidence_ok else "先试听这批符合方向的候选。"
                 ),
                 tracks=[
                     taste_experiment_track(track, "stretch", components, reason, score)
@@ -119,13 +145,16 @@ class TasteExperimentService:
         ]
         actual_total = sum(len(segment.tracks) for segment in segments)
         if not confidence_ok and actual_total:
-            shortfall = "本轮候选的熟悉度差异不足，已停止强行分档；请先试听待验证候选。"
+            shortfall = f"找到 {actual_total} 首，先集中试听。"
         else:
-            shortfall = "" if actual_total >= total else f"候选不足，本次先生成 {actual_total}/{total} 首。"
+            shortfall = "" if actual_total >= total else f"符合条件的新歌只有 {actual_total}/{total} 首。"
+        if online_only and not actual_total:
+            shortfall = "这一轮没有找到符合条件且未推荐过的曲目，可以缩短描述或换个方向。"
         experiment = TasteExperiment(
             experiment_id=new_taste_experiment_id(user_id, prompt),
             user_id=user_id,
             prompt=prompt,
+            online_only=online_only,
             hypothesis=hypothesis,
             segments=segments,
             result_summary=shortfall,
@@ -140,6 +169,8 @@ class TasteExperimentService:
         total: int,
         *,
         online_only: bool = False,
+        prompt: str = "",
+        excluded_tracks: list[TrackRef] | None = None,
     ) -> list[tuple[Any, dict[str, float], str, float]]:
         """收集候选曲目。
 
@@ -155,53 +186,76 @@ class TasteExperimentService:
                     raw_tracks.append(item.asset)
             except Exception:
                 logger.debug("taste_experiment recommend failed for %s", seeds[0], exc_info=True)
-        # 库外优先时多拉几路、每路多取几首，给去重/库内过滤留足冗余。
-        per_seed = 8 if online_only else 6
-        for search_goal in seeds[:16]:
-            try:
-                tracks = self._search_web_music(search_goal, top_k=per_seed, relevance_query=search_goal)
-            except Exception:
-                logger.debug("taste_experiment seed search failed for %s", search_goal, exc_info=True)
-                continue
-            raw_tracks.extend(tracks)
+        direction = exploration_direction(prompt) if online_only else []
+        anchors = exploration_artist_anchors(direction)
+        goal = prompt.strip() if online_only and prompt else " ".join(seeds[:6])
+        if online_only:
+            if prompt and not is_default_exploration(prompt):
+                clean_prompt = re.split(r"[，。,.；;]\s*(?:不要|别|不想听|no\s|without\s)", prompt, maxsplit=1)[0]
+                clean_prompt = re.sub(r"^(?:推荐|给我|找|想听|听听|来点)\s*", "", clean_prompt).strip()
+                terms = [group[0] for group in direction if group[0] not in {"日语", "韩语", "华语", "英语"}]
+                seeds = self.dedupe_seeds(
+                    [
+                        *(name for aliases in anchors for name in aliases[:1]),
+                        clean_prompt,
+                        " ".join(group[0] for group in direction),
+                        " ".join(terms),
+                        " ".join(group[1] for group in direction),
+                    ]
+                )
+            else:
+                seeds = seeds[:6] + ["neo soul", "indie pop", "爵士钢琴", "电子氛围"]
+            tasks = [
+                (seed, lambda seed=seed: self._search_web_music(seed, top_k=max(18, total * 2), catalog_only=True))
+                for seed in self.dedupe_seeds(seeds)[:10]
+            ]
+            for batch in run_parallel(tasks, timeout=8.0, default=[]):
+                raw_tracks.extend(batch or [])
+        else:
+            for search_goal in seeds[:16]:
+                try:
+                    raw_tracks.extend(self._search_web_music(search_goal, top_k=6, relevance_query=search_goal))
+                except Exception:
+                    logger.debug("taste_experiment seed search failed for %s", search_goal, exc_info=True)
         raw_tracks = [
             track for track in self._dedupe_tracks(raw_tracks) if self._is_recommendation_quality_track(track)
         ]
         if online_only:
-            known = self._known_track_keys(user_id)
+            known = {
+                f"id:{event.asset_id}" for event in self.memory.get_memory(user_id).listening_history if event.asset_id
+            }
+            for track in [*self._list_assets(), *(excluded_tracks or [])]:
+                known.update(exploration_track_keys(track))
             raw_tracks = [
                 track
                 for track in raw_tracks
-                if (getattr(track, "source", "") or "local") != "local"
-                and self._candidate_dedup_key(track) not in known
+                if track.source == "netease"
+                and str(track.external_id or "").isascii()
+                and str(track.external_id or "").isdigit()
+                and not exploration_track_keys(track) & known
+                and exploration_matches(track, direction, anchored=bool(exploration_artist_match(track, anchors)))
             ]
+            raw_tracks = filter_content_exclusions(raw_tracks, self.taste_prompt_exclusions(prompt))
         if not raw_tracks:
             return []
-        unified_query = " ".join(seeds[:6])
-        ranked = self._rerank_tracks(user_id, unified_query, raw_tracks, top_k=len(raw_tracks))
+        ranked = self._rerank_tracks(user_id, goal, raw_tracks, top_k=len(raw_tracks))
+        if anchors:
+            # Representative artists first. Keep each artist from taking over the first screen.
+            counts: dict[str, int] = {}
+            preferred = []
+            others = []
+            for track, breakdown in ranked:
+                aliases = exploration_artist_match(track, anchors)
+                if not aliases:
+                    others.append((track, breakdown))
+                    continue
+                key = aliases[0]
+                if counts.get(key, 0) >= 3:
+                    continue
+                counts[key] = counts.get(key, 0) + 1
+                preferred.append((track, breakdown))
+            ranked = preferred + others if len(preferred) < total else preferred
         return [(track, breakdown.components, breakdown.reason, breakdown.score) for track, breakdown in ranked]
-
-    @staticmethod
-    def _candidate_dedup_key(track: Any) -> str:
-        """与 listening_history 的 asset_id（=source_id）同命名空间，能跨在线/本地比对。"""
-        ext = getattr(track, "external_id", "") or getattr(track, "source_id", "") or getattr(track, "asset_id", "")
-        if ext:
-            return str(ext)
-        title = (getattr(track, "title", "") or "").strip().lower()
-        artist = (getattr(track, "artist", "") or "").strip().lower()
-        return f"t:{title}:{artist}"
-
-    def _known_track_keys(self, user_id: str) -> set[str]:
-        """已听过的曲目 key，探索页据此剔除——避免把听过的曲当成"新发现"。"""
-        known: set[str] = set()
-        try:
-            memory = self.memory.get_memory(user_id)
-            for event in getattr(memory, "listening_history", []) or []:
-                if event.asset_id:
-                    known.add(str(event.asset_id))
-        except Exception:
-            logger.debug("taste_experiment online_only: listening_history failed", exc_info=True)
-        return known
 
     def regenerate_taste_experiment_bucket(
         self,
@@ -209,6 +263,7 @@ class TasteExperimentService:
         experiment_id: str,
         bucket: str,
         *,
+        online_only: bool | None = None,
         taste_experiment_seeds_for_bucket: Any,
         collect_taste_candidates: Any,
         filter_taste_experiment_candidates: Any,
@@ -230,15 +285,30 @@ class TasteExperimentService:
             existing = sum(len(s.tracks) for s in exp.segments)
             per_bucket = len(segment.tracks) if segment and segment.tracks else max(1, (existing // 3) or 1)
 
+            use_online = exp.online_only if online_only is None else online_only
             seeds = taste_experiment_seeds_for_bucket(memory, exp.prompt, bucket)
-            candidates = collect_taste_candidates(user_id, seeds, per_bucket * 6)
-            candidates = filter_taste_experiment_candidates(user_id, candidates, memory.exclusion_rules)
-            other_keys = {
-                taste_experiment_track_key(item) for seg in exp.segments if seg.name != bucket for item in seg.tracks
-            }
-            candidates = [c for c in candidates if candidate_key(c) not in other_keys]
+            if use_online:
+                recent = [*exp.previous_tracks, *(item.track for seg in exp.segments for item in seg.tracks)]
+                candidates = collect_taste_candidates(
+                    user_id, seeds, per_bucket, online_only=True, prompt=exp.prompt, excluded_tracks=recent
+                )
+            else:
+                candidates = collect_taste_candidates(user_id, seeds, per_bucket * 6)
+            candidates = filter_taste_experiment_candidates(
+                user_id, candidates, [*memory.exclusion_rules, *self.taste_prompt_exclusions(exp.prompt)]
+            )
+            existing_keys = {taste_experiment_track_key(item) for seg in exp.segments for item in seg.tracks}
+            candidates = [c for c in candidates if candidate_key(c) not in existing_keys]
             ranked = sorted(candidates, key=taste_familiarity, reverse=True)
-            band = slice_for_bucket(ranked, bucket, per_bucket)
+            if use_online:
+                if bucket == "stretch" and not any(seg.tracks for seg in exp.segments if seg.name != bucket):
+                    band = candidates[:per_bucket]
+                else:
+                    offset = {"safe": 0, "stretch": 1, "bold": 2}[bucket]
+                    start = min(offset * per_bucket, max(0, len(ranked) - per_bucket))
+                    band = ranked[start : start + per_bucket]
+            else:
+                band = slice_for_bucket(ranked, bucket, per_bucket)
             new_tracks = [
                 taste_experiment_track(track, bucket, components, reason, score)
                 for track, components, reason, score in band
@@ -251,8 +321,23 @@ class TasteExperimentService:
                     continue
                 seen.add(key)
                 deduped.append(item)
-            if segment is not None:
+            if segment is not None and deduped:
+                if use_online:
+                    exp.previous_tracks = [*exp.previous_tracks, *(item.track for item in segment.tracks)][-90:]
                 segment.tracks = deduped
+                exp.report = None
+                exp.status = (
+                    "ready"
+                    if sum(
+                        bool(item.feedback and item.feedback.last_signal) for seg in exp.segments for item in seg.tracks
+                    )
+                    >= 6
+                    else "collecting"
+                )
+                exp.result_summary = f"本档换了 {len(deduped)} 首新歌。"
+            elif use_online:
+                exp.result_summary = "这一档暂时没有更多符合条件的新歌，已保留当前曲目。"
+            exp.online_only = use_online
             exp.updated_at = utc_now_iso()
             self.store.write_models("taste_experiments", user_id, experiments[-20:])
             return exp
@@ -263,9 +348,9 @@ class TasteExperimentService:
         rules: list[str] = []
         if any(token in text for token in ("别太吵", "不要太吵", "不吵", "低能量")):
             rules.extend(["激昂", "金属", "hard rock", "heavy metal"])
-        if "type beat" in text or "不要beat" in text or "不要 beat" in text:
+        if any(cue in text for cue in ("不要 type beat", "别推 type beat", "no type beat", "不要beat", "不要 beat")):
             rules.append("type beat")
-        for match in re.finditer(r"(?:不要|别推|不想听)\s*([^，。,.；;]{1,16})", text):
+        for match in re.finditer(r"(?:不要|别推|不想听|\bno\s+|\bwithout\s+)\s*([^，。,.；;]{1,24})", text):
             value = match.group(1).strip()
             if value:
                 rules.append(value)
@@ -464,6 +549,7 @@ class TasteExperimentService:
             artist=getattr(track, "artist", "") or "",
             source=source,
             source_id=source_id,
+            cover_url=getattr(track, "cover_url", "") or "",
             genre=getattr(track, "genre", []) or [],
             mood=getattr(track, "mood", []) or [],
             score=score,

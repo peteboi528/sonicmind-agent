@@ -166,7 +166,7 @@ def _valid_external_track(track: ExternalTrack, query: str) -> bool:
         return False
     lowered_title = title.lower()
     lowered_query = query.lower().strip()
-    if lowered_title == lowered_query:
+    if lowered_title == lowered_query and not (track.source == "netease" and track.external_id.isdecimal()):
         return False
     if lowered_title in {"网易云音乐", "bilibili", "youtube", "搜索结果"}:
         return False
@@ -190,13 +190,17 @@ def _online_candidate_reason(track: ExternalTrack, memory_query: str) -> str:
     return f"online_candidate：来自{source_label}，不是本地 mock 结果。"
 
 
+def _track_title_key(title: str, artist: str | None) -> tuple[str, str]:
+    return title.strip().casefold(), (artist or "").strip().casefold()
+
+
 def _dedupe_tracks(tracks: list[Asset | ExternalTrack]) -> list[Asset | ExternalTrack]:
     seen: set[str] = set()
-    seen_titles: set[str] = set()
+    seen_titles: set[tuple[str, str]] = set()
     unique: list[Asset | ExternalTrack] = []
     for track in tracks:
         key = _track_key(track)
-        title_key = f"{track.title.strip().lower()}|{(track.artist or '').strip().lower()}"
+        title_key = _track_title_key(track.title, track.artist)
         if key in seen or title_key in seen_titles:
             continue
         seen.add(key)

@@ -4,7 +4,9 @@ import { api } from "../api.js";
 import { store } from "../store.js";
 import SongCard from "./SongCard.vue";
 
-const prompt = ref("带我听点库里没有的新东西");
+const defaultPrompt = "带我听点库里没有的新东西";
+const prompt = ref("");
+const directions = ["爵士钢琴", "独立流行", "Neo-soul", "电子氛围"];
 const loading = ref(false);
 const historyLoading = ref(false);
 const experiments = ref([]);
@@ -12,6 +14,10 @@ const current = ref(null);
 const toast = ref("");
 const reportLoading = ref(false);
 const regenLoading = ref("");
+const feedbackLoading = ref(false);
+const deleting = ref(false);
+const busy = computed(() => loading.value || !!regenLoading.value || feedbackLoading.value || reportLoading.value || deleting.value);
+const visibleSegments = computed(() => (current.value?.segments || []).filter(segment => segment.tracks?.length));
 
 const bucketTone = {
   safe: "safe",
@@ -25,13 +31,6 @@ function bucketLabel(name) {
 }
 const STATUS_LABEL = { collecting: "收集中", ready: "就绪", reported: "已出报告" };
 const statusLabel = (s) => STATUS_LABEL[s] || s || "";
-// 反馈信号 → 中文（用于按钮高亮/提示）
-const SIGNAL_LABEL = {
-  completed: "听完", liked: "喜欢", skipped: "跳过",
-  disliked: "不喜欢", saved: "收藏", rated: "评分",
-  too_safe: "太稳", too_far: "太远",
-};
-const signalLabel = (s) => SIGNAL_LABEL[s] || s || "";
 const pct = (x) => `${Math.round((Number(x) || 0) * 100)}%`;
 
 // 每首歌的三锚打分明细：让用户看懂 safe/stretch/bold 是怎么算出来的
@@ -70,6 +69,7 @@ function itemToCard(item) {
     source_id: track.source_id || track.external_id || "",
     genre: track.genre || [],
     mood: track.mood || [],
+    cover_url: track.cover_url || "",
     score: track.score,
     components: item.components || track.components || {},
     reason: item.reason || "",
@@ -90,12 +90,13 @@ async function loadExperiments() {
 }
 
 async function generate() {
-  const text = prompt.value.trim() || "带我听点库里没有的新东西";
+  if (busy.value) return;
+  const text = prompt.value.trim() || defaultPrompt;
   loading.value = true;
   try {
     current.value = await api.generateTasteExperiment(store.userId, text, 12, true);
     await loadExperiments();
-    showToast("已为你找来一批库外新歌");
+    if (activeTracks.value) showToast(`找到 ${activeTracks.value} 首库外新歌`);
   } catch {
     showToast("探索失败，请稍后再试");
   } finally {
@@ -111,7 +112,8 @@ function playSegment(segment) {
 }
 
 async function sendFeedback(item, signal) {
-  if (!current.value) return;
+  if (!current.value || busy.value) return;
+  feedbackLoading.value = true;
   try {
     current.value = await api.tasteExperimentFeedback(
       store.userId,
@@ -124,11 +126,13 @@ async function sendFeedback(item, signal) {
     showToast("反馈已记录");
   } catch {
     showToast("反馈记录失败");
+  } finally {
+    feedbackLoading.value = false;
   }
 }
 
 async function buildReport() {
-  if (!current.value) return;
+  if (!current.value || busy.value) return;
   reportLoading.value = true;
   try {
     const report = await api.tasteExperimentReport(store.userId, current.value.experiment_id);
@@ -143,17 +147,17 @@ async function buildReport() {
 }
 
 function selectExperiment(exp) {
+  if (busy.value) return;
   current.value = exp;
 }
 
 async function regenerateBucket(name) {
-  if (!current.value || regenLoading.value) return;
+  if (!current.value || busy.value) return;
   regenLoading.value = name;
   try {
-    current.value = await api.regenerateTasteBucket(store.userId, current.value.experiment_id, name);
+    current.value = await api.regenerateTasteBucket(store.userId, current.value.experiment_id, name, true);
     const idx = experiments.value.findIndex(exp => exp.experiment_id === current.value.experiment_id);
     if (idx >= 0) experiments.value[idx] = current.value;
-    showToast(`已重做「${bucketLabel(name)}」档`);
   } catch {
     showToast("重做失败，请稍后再试");
   } finally {
@@ -161,10 +165,9 @@ async function regenerateBucket(name) {
   }
 }
 
-const deleting = ref(false);
 async function deleteExperiment(exp, ev) {
   if (ev) ev.stopPropagation();   // 历史条上的 × 不能触发选中
-  if (deleting.value || !exp) return;
+  if (busy.value || !exp) return;
   deleting.value = true;
   try {
     await api.deleteTasteExperiment(store.userId, exp.experiment_id);
@@ -187,93 +190,62 @@ onMounted(loadExperiments);
   <div class="taste-lab">
     <div class="lab-head">
       <div>
-        <p class="eyebrow">Explore</p>
-        <h1>探索</h1>
-        <p class="subtitle">从你曲库之外拉来新歌、新歌手，按安全区 / 轻微越界 / 大胆探索三档铺开，帮你找到下一个喜欢。</p>
-      </div>
-      <div class="lab-stats">
-        <span>{{ experiments.length }} 次探索</span>
-        <strong>{{ activeTracks }} 首库外候选</strong>
+        <h1>探索新歌</h1>
+        <p class="subtitle">选个想听的方向，从曲库外找歌。</p>
       </div>
     </div>
 
-    <section class="how-to">
-      <details>
-        <summary>
-          <span class="ht-icon">🧭</span>
-          探索页怎么用？
-          <span class="ht-hint">（点开看说明）</span>
-        </summary>
-        <div class="ht-body">
-          <ol>
-            <li><b>全是库外新发现</b>：这里只拉你曲库里<b>没有的</b>新歌新歌手，听过的也会自动跳过——专门用来扩边界，不重复推你已有的。</li>
-            <li><b>三档由近到远</b>：<em class="c-safe">安全区</em>＝贴近你口味的库外歌；<em class="c-stretch">轻微越界</em>＝相邻的新风格；<em class="c-bold">大胆探索</em>＝明显越界，但已避开你不喜欢的。</li>
-            <li><b>听一首、点一下</b>：每首歌告诉系统你的真实反应——<b>听完 / 喜欢 / 跳过</b>。喜欢的可以直接收藏入库。觉得这档放错了就点 <b>太稳</b>（无聊）或 <b>太远</b>（太怪）。</li>
-          </ol>
-          <p class="ht-legend">
-            每首歌下方的
-            <span class="legend-chip">语义</span><b>＝跟你的描述有多相关</b>、
-            <span class="legend-chip">口味</span><b>＝跟你历史画像有多像</b>、
-            <span class="legend-chip">行为</span><b>＝按你听完/秒跳的反馈</b>。
-            三档就是按这三个分的综合高低排出来的。
-          </p>
-        </div>
-      </details>
-    </section>
+    <div class="directions" aria-label="推荐方向">
+      <button v-for="direction in directions" :key="direction" class="direction-btn"
+        :aria-pressed="prompt === direction" :disabled="busy" @click="prompt = direction">{{ direction }}</button>
+    </div>
 
     <section class="control-row">
       <div class="generator">
-        <input v-model="prompt" type="text" placeholder="例如：带我听点库里没有的新东西，别太吵" @keydown.enter="generate" />
-        <button class="primary-btn" :disabled="loading" @click="generate">
+        <input v-model="prompt" type="text" aria-label="想听的音乐" placeholder="例如：爵士钢琴、独立流行，不想听摇滚" @keydown.enter="generate" />
+        <button class="primary-btn" :disabled="busy" @click="generate">
           <svg v-if="!loading" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           <span>{{ loading ? "探索中" : "开始探索" }}</span>
         </button>
       </div>
-      <button class="ghost-btn" :disabled="!current || reportLoading" @click="buildReport">
+      <button class="ghost-btn" v-if="current?.status === 'ready' || current?.report" :disabled="busy" @click="buildReport">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5V4a2 2 0 0 1 2-2h10l4 4v13.5A2.5 2.5 0 0 1 17.5 22h-11A2.5 2.5 0 0 1 4 19.5z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h6"/></svg>
         <span>{{ reportLoading ? "统计中" : "生成报告" }}</span>
       </button>
     </section>
 
-    <div v-if="toast" class="toast">{{ toast }}</div>
+    <div v-if="toast" class="toast" role="status">{{ toast }}</div>
 
     <section v-if="current" class="exp-toolbar">
-      <span class="status-badge" :class="current.status">{{ statusLabel(current.status) }}</span>
+      <strong>{{ activeTracks }} 首</strong>
       <span class="exp-prompt" :title="current.prompt">{{ current.prompt || "库外探索" }}</span>
-      <button class="del-btn" :disabled="deleting" @click="deleteExperiment(current)">
+      <button v-if="activeTracks" class="ghost-btn" :disabled="busy" @click="store.playAll(visibleSegments.flatMap(segment => segment.tracks.map(itemToCard)))">播放全部</button>
+      <button v-if="activeTracks" class="ghost-btn" :disabled="busy" @click="prompt = current.prompt; generate()">换一批</button>
+      <button class="del-btn" :disabled="busy" @click="deleteExperiment(current)">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
         <span>{{ deleting ? "删除中" : "删除本轮" }}</span>
       </button>
     </section>
 
-    <section v-if="current" class="experiment-meta">
-      <div>
-        <span class="meta-label">本轮假设</span>
-        <p>{{ current.hypothesis }}</p>
-      </div>
-      <div v-if="current.result_summary" class="result-summary">
-        <span class="meta-label">结果</span>
-        <p>{{ current.result_summary }}</p>
-      </div>
-    </section>
+    <p v-if="current?.result_summary" class="result-note" role="status">{{ current.result_summary }}</p>
 
-    <section v-if="current" class="bucket-grid">
+    <section v-if="visibleSegments.length" class="bucket-grid">
       <div
-        v-for="segment in current.segments"
+        v-for="segment in visibleSegments"
         :key="segment.name"
         class="bucket"
         :class="bucketTone[segment.name]"
       >
         <div class="bucket-head">
           <div>
-            <h2>{{ segment.label }}</h2>
-            <p>{{ segment.description }}</p>
+            <h2>{{ visibleSegments.length === 1 ? "本轮推荐" : segment.label }}</h2>
+            <p v-if="visibleSegments.length > 1">{{ segment.description }}</p>
           </div>
           <div class="bucket-actions">
             <button class="icon-btn" title="播放这一档" @click="playSegment(segment)">
               <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
             </button>
-            <button class="icon-btn" :title="`重做${segment.label}档`" :disabled="!!regenLoading" @click="regenerateBucket(segment.name)">
+            <button class="icon-btn" aria-label="换这一组" title="换这一组" :disabled="busy" @click="regenerateBucket(segment.name)">
               <svg v-if="regenLoading === segment.name" class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
               <svg v-else width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
             </button>
@@ -283,22 +255,23 @@ onMounted(loadExperiments);
         <div class="track-list">
           <div v-for="item in segment.tracks" :key="trackKey(item)" class="experiment-track">
             <SongCard :card="itemToCard(item)" :show-reason="false" @toast="showToast" />
-            <div class="anchor-breakdown">
-              <span class="ab-title">三锚打分</span>
+            <details class="track-details">
+              <summary>推荐依据</summary>
+              <div class="anchor-breakdown">
               <span v-for="a in anchorScores(item)" :key="a.key" class="anchor-chip" :title="`${a.label}：${a.help}`">
                 <em>{{ a.label }}</em>
                 <i class="bar"><b :style="{ width: pct(a.value) }"></b></i>
                 <var>{{ a.value.toFixed(2) }}</var>
               </span>
-            </div>
+              </div>
+            </details>
             <div class="feedback-row">
-              <span class="fb-label">你的反应</span>
-              <button class="fb-btn" :class="{ active: item.feedback?.last_signal === 'completed' }" @click="sendFeedback(item, 'completed')">听完</button>
-              <button class="fb-btn" :class="{ active: item.feedback?.last_signal === 'liked' }" @click="sendFeedback(item, 'liked')">喜欢</button>
-              <button class="fb-btn" :class="{ active: item.feedback?.last_signal === 'skipped' }" @click="sendFeedback(item, 'skipped')">跳过</button>
+              <button class="fb-btn" :disabled="busy" :class="{ active: item.feedback?.last_signal === 'completed' }" @click="sendFeedback(item, 'completed')">听完</button>
+              <button class="fb-btn" :disabled="busy" :class="{ active: item.feedback?.last_signal === 'liked' }" @click="sendFeedback(item, 'liked')">喜欢</button>
+              <button class="fb-btn" :disabled="busy" :class="{ active: item.feedback?.last_signal === 'skipped' }" @click="sendFeedback(item, 'skipped')">跳过</button>
               <span class="fb-sep" title="觉得这档放错了？"></span>
-              <button class="fb-btn fb-warn" :class="{ active: item.feedback?.last_signal === 'too_safe' }" title="放在这档太无聊/太安全" @click="sendFeedback(item, 'too_safe')">太稳</button>
-              <button class="fb-btn fb-warn" :class="{ active: item.feedback?.last_signal === 'too_far' }" title="偏离太远、太怪" @click="sendFeedback(item, 'too_far')">太远</button>
+              <button class="fb-btn fb-warn" :disabled="busy" :class="{ active: item.feedback?.last_signal === 'too_safe' }" title="放在这档太无聊/太安全" @click="sendFeedback(item, 'too_safe')">太稳</button>
+              <button class="fb-btn fb-warn" :disabled="busy" :class="{ active: item.feedback?.last_signal === 'too_far' }" title="偏离太远、太怪" @click="sendFeedback(item, 'too_far')">太远</button>
             </div>
           </div>
         </div>
@@ -329,17 +302,17 @@ onMounted(loadExperiments);
         class="history-item"
         :class="{ active: current?.experiment_id === exp.experiment_id }"
       >
-        <button class="history-select" @click="selectExperiment(exp)">
+        <button class="history-select" :disabled="busy" @click="selectExperiment(exp)">
           <span>{{ statusLabel(exp.status) }}</span>
           <strong>{{ exp.prompt || "库外探索" }}</strong>
         </button>
-        <button class="history-del" title="删除这次探索" @click="deleteExperiment(exp, $event)">✕</button>
+        <button class="history-del" :disabled="busy" title="删除这次探索" @click="deleteExperiment(exp, $event)">✕</button>
       </div>
       <span v-if="historyLoading" class="history-loading">加载中</span>
     </aside>
 
     <div v-if="!current && !historyLoading" class="empty-state">
-      <p>还没有探索记录。点「开始探索」，我去你曲库之外找一批新歌新歌手回来。</p>
+      <p>选一个方向或直接开始，试听后可以收藏喜欢的歌。</p>
     </div>
   </div>
 </template>
@@ -983,7 +956,7 @@ h1 {
     grid-template-columns: 1fr;
   }
 
-  .ghost-btn,
+  .control-row > .ghost-btn,
   .primary-btn {
     width: 100%;
   }
@@ -991,5 +964,19 @@ h1 {
   .report-grid {
     grid-template-columns: 1fr;
   }
+
+  .taste-lab :deep(.song-card) { flex-wrap: wrap; gap: 8px; padding: 10px; }
+  .taste-lab :deep(.song-card .actions) { width: 100%; justify-content: flex-end; }
+  .exp-toolbar .ghost-btn { min-height: 34px; padding-inline: 10px; }
 }
+
+.directions { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; }
+.direction-btn { cursor: pointer; padding: 7px 13px; border: 1px solid var(--border); border-radius: 999px; background: transparent; color: var(--text); font: inherit; font-size: .86rem; }
+.direction-btn:hover, .direction-btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+.direction-btn:disabled { opacity: .55; cursor: default; }
+.result-note { margin: 8px 0 16px; color: var(--text-sub); font-size: .88rem; }
+.track-details { padding: 3px 9px; color: var(--text-sub); font-size: .75rem; }
+.track-details summary { cursor: pointer; width: fit-content; }
+.exp-toolbar { flex-wrap: wrap; }
+.bucket-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); }
 </style>

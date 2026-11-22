@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
@@ -32,6 +33,7 @@ from app.prompts.memory import (
 )
 from app.recommend.engine import compute_taste_profile
 from app.retrieval import embeddings
+from app.services.image_music import ImageMusicSession
 from app.storage import JsonStore
 
 logger = logging.getLogger(__name__)
@@ -213,6 +215,11 @@ class MemoryManager:
         "暂时",
         "临时",
         "刚才那批",
+        "刚才那一批",
+        "上一轮",
+        "这一轮",
+        "重复",
+        "重样",
     )
 
     @staticmethod
@@ -233,7 +240,7 @@ class MemoryManager:
                 # 否定词不在句首附近（前面还有 >8 字的实质内容）→ 句内修饰，非主意图。
                 if m.start() > 8:
                     continue
-                text = m.group(1).strip().rstrip("的了着过")
+                text = re.split(r"[，。！？,!?;；]", m.group(1), maxsplit=1)[0].strip().rstrip("的了着过")
                 # 纠正类后缀（X了/改掉/取消）交给纠正处理，不当排除抓。
                 if text.endswith(("改掉", "取消", "删掉", "去掉")):
                     continue
@@ -252,12 +259,15 @@ class MemoryManager:
     @staticmethod
     def _detect_preference_correction(query: str) -> str | None:
         """检测纠正指令，返回被撤回的偏好关键词（如"不喜欢 city pop 了"→"city pop"）。"""
+        restored = _restored_preference(query)
         for pat in MemoryManager._CORRECTION_PATTERNS:
             m = pat.search(query)
             if m:
                 text = MemoryManager._normalize_correction_target(m.group(1))
                 # 过滤掉抓到代词/空壳的情况。
                 if text and 2 <= len(text) <= 30 and text not in {"这个", "那个", "它", "他", "她"}:
+                    if restored and restored.casefold() == text.casefold():
+                        continue
                     return text
         return None
 
@@ -538,25 +548,20 @@ class MemoryManager:
                 if self._clear_contradicting_exclusions(memory, pref):
                     changed = True
 
-            # 从检索结果中提取歌手/歌名作为兴趣信号（即使没有明确说"喜欢"）
-            entities_from_results = _extract_entities_from_results(results)
-            for entity in entities_from_results:
-                if self._upsert_entry(memory, entity, "from_search_result"):
-                    changed = True
+            # 只有用户点名的艺人才能成为弱兴趣信号，避免把推荐结果当作偏好。
+            for entity in _extract_entities_from_results(results):
+                if not correction and entity.casefold() in query.casefold():
+                    if self._upsert_entry(memory, entity, "from_search_result"):
+                        changed = True
 
             # 负面偏好提取：用户说"不要抖音热歌""别推孟菲斯说唱"等。
             # 纠正语句（"不喜欢X了，太老气，换回现代的"）已由上面的 correction 分支
             # 精准处理；这里不能再跑粗粒度负则，否则会把整句尾巴(太老气/换回现代)
             # 误抓成长期排除，污染画像。
-            negative = None if correction else self._extract_negative_preference(query)
+            negative = None if correction or _restored_preference(query) else self._extract_negative_preference(query)
             if negative and negative not in memory.exclusion_rules:
                 memory.exclusion_rules.append(negative)
                 changed = True
-
-            inferred = infer_preferences_from_results(query, results)
-            for item in inferred:
-                if self._upsert_entry(memory, item, "inferred_from_result"):
-                    changed = True
 
             # P1-G：把本轮 query 作为情景记忆 embed 入库（跨会语义召回的素材）。
             if self._record_episode(memory, query):
@@ -699,8 +704,22 @@ class MemoryManager:
         return goal
 
     # ── DialogueState：轻量多轮延续状态 ───────────────────────────────
-    def get_dialogue_state(self, user_id: str) -> DialogueState:
-        state = self.store.read_model("dialogue", user_id, DialogueState)
+    def get_image_dialogue(self, user_id: str, thread_id: str) -> ImageMusicSession | None:
+        collection, key = _dialogue_location(user_id, thread_id)
+        return self.store.read_model(f"image_{collection}", key, ImageMusicSession)
+
+    def save_image_dialogue(self, user_id: str, thread_id: str, session: ImageMusicSession | None) -> None:
+        collection, key = _dialogue_location(user_id, thread_id)
+        collection = f"image_{collection}"
+        with self.store.lock(collection, key):
+            if session is None:
+                self.store.delete_key(collection, key)
+            else:
+                self.store.write_model(collection, key, session)
+
+    def get_dialogue_state(self, user_id: str, *, thread_id: str | None = None) -> DialogueState:
+        collection, key = _dialogue_location(user_id, thread_id)
+        state = self.store.read_model(collection, key, DialogueState)
         return state or DialogueState(user_id=user_id)
 
     def save_dialogue_state(
@@ -714,8 +733,10 @@ class MemoryManager:
         scenario_tags: list[str] | None = None,
         shown_tracks: list[dict[str, str]] | None = None,
         shown_artists: list[dict[str, str]] | None = None,
+        *,
+        thread_id: str | None = None,
     ) -> DialogueState:
-        prev = self.get_dialogue_state(user_id)
+        collection, key = _dialogue_location(user_id, thread_id)
         state = DialogueState(
             user_id=user_id,
             last_intent=intent,
@@ -724,16 +745,22 @@ class MemoryManager:
             genre_tags=list(genre_tags or []),
             mood_tags=list(mood_tags or []),
             scenario_tags=list(scenario_tags or []),
-            turn_count=prev.turn_count + 1,
+            turn_count=1,
             shown_tracks=list(shown_tracks) if shown_tracks else [],
             shown_artists=list(shown_artists) if shown_artists else [],
             updated_at=utc_now_iso(),
         )
-        self.store.write_model("dialogue", user_id, state)
+        with self.store.lock(collection, key):
+            previous = self.store.read_model(collection, key, DialogueState)
+            if previous is not None:
+                state.turn_count = previous.turn_count + 1
+            self.store.write_model(collection, key, state)
         return state
 
-    def clear_dialogue_state(self, user_id: str) -> None:
-        self.store.delete_key("dialogue", user_id)
+    def clear_dialogue_state(self, user_id: str, *, thread_id: str | None = None) -> None:
+        collection, key = _dialogue_location(user_id, thread_id)
+        with self.store.lock(collection, key):
+            self.store.delete_key(collection, key)
 
     def ensure_goal(self, user_id: str, query: str) -> AgentGoal | None:
         goal = self.get_active_goal(user_id)
@@ -826,6 +853,14 @@ class MemoryManager:
         if memory.preferences and not memory.structured_preferences:
             for pref in memory.preferences:
                 memory.structured_preferences.append(MemoryEntry(text=pref, frequency=1, source="migrated"))
+
+
+def _dialogue_location(user_id: str, thread_id: str | None) -> tuple[str, str]:
+    if not thread_id or thread_id == f"{user_id}:default":
+        return "dialogue", user_id
+    user_key = hashlib.sha256(user_id.encode()).hexdigest()
+    thread_key = hashlib.sha256(thread_id.encode()).hexdigest()
+    return f"dialogue_threads/{user_key}", thread_key
 
 
 def score_entries(entries: list[MemoryEntry]) -> list[tuple[MemoryEntry, float]]:
@@ -963,8 +998,30 @@ def compute_behavior_scores(
     return scores
 
 
+def _restored_preference(text: str) -> str | None:
+    matches = list(
+        re.finditer(r"(?:又|重新|再次)(?:开始)?(?:喜欢|爱听)\s*([^，。！？,!?；;]{0,30})(?=$|[，。！？,!?；;])", text)
+    )
+    if not matches:
+        return None
+    # 仅恢复最后一条明确表达的偏好，避免把后续的再次否定翻转为喜欢。
+    if re.search(r"不(?:再)?(?:喜欢|想听|爱听)", text[matches[-1].end() :]):
+        return None
+    target = MemoryManager._normalize_correction_target(matches[-1].group(1))
+    if target:
+        return target
+    # “以前不喜欢 X，现在又喜欢了”省略了同一个对象。
+    previous = list(
+        re.finditer(r"不(?:再)?(?:喜欢|想听|爱听)\s*([^，。！？,!?；;]{2,30})", text[: matches[-1].start()])
+    )
+    return MemoryManager._normalize_correction_target(previous[-1].group(1)) or None if previous else None
+
+
 def extract_preference(event: str) -> str | None:
     normalized = event.strip()
+    restored = _restored_preference(normalized)
+    if restored:
+        return restored
     if re.search(r"谁还听", normalized):
         return None
     known = _extract_known_music_preference(normalized)

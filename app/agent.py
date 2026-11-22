@@ -3,6 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from collections.abc import Callable
+from contextlib import aclosing
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +26,7 @@ from app.models import (
     FeedbackRequest,
     MemoryUpdateRequest,
     Playlist,
+    PlaylistRevisionResult,
     RagEvidence,
     RecommendedTrack,
     ResourceTrack,
@@ -36,6 +40,7 @@ from app.models import (
     TasteExperimentReport,
     TasteExperimentTrack,
     TasteProfile,
+    TrackRef,
     UserMemory,
 )
 from app.prompts import (
@@ -44,6 +49,7 @@ from app.prompts import (
 from app.recommend.daily import DailyRecommender
 from app.recommend.engine import RecommendEngine
 from app.recommend.source_balance import balance_recommendation_sources
+from app.reply_language import reply_text, split_reply_request
 from app.rules.discover import (
     _QUERY_NOISE,
     _artist_alias_keys,
@@ -282,6 +288,7 @@ class AudioVisualAgent:
             search_web_music=self.search_web_music,
             rerank_tracks=self._rerank_tracks,
             dedupe_tracks=_dedupe_tracks,
+            list_assets=self.list_assets,
             is_recommendation_quality_track=_is_recommendation_quality_track,
         )
         self.journeys = JourneyService(
@@ -497,6 +504,8 @@ class AudioVisualAgent:
         include_video_sources: bool = False,
         offset: int = 0,
         variants: list[str] | None = None,
+        *,
+        catalog_only: bool = False,
     ) -> list[ExternalTrack]:
         """Agent tool wrapper for explicit online search.
 
@@ -522,6 +531,7 @@ class AudioVisualAgent:
             include_video_sources=include_video_sources,
             offset=offset,
             variants=variants,
+            catalog_only=catalog_only,
         )
 
     async def search_web_music_async(
@@ -650,6 +660,8 @@ class AudioVisualAgent:
         thread_id: str | None = None,
         run_id: str | None = None,
     ) -> AgentAnswer:
+        if _infer_playlist_count(message) == 0:
+            return AgentAnswer(answer=reply_text("zero", split_reply_request(message)[1] or "zh"), evidences=[])
         asset_id = self._resolve_asset_context(user_id, message)
         if self.graph is not None:
             try:
@@ -696,10 +708,19 @@ class AudioVisualAgent:
         history: list[dict[str, Any]] | None = None,
         thread_id: str | None = None,
         run_id: str | None = None,
+        *,
+        image: tuple[bytes, str] | None = None,
+        turn_started_at: float | None = None,
     ):
+        from app.models import StreamEvent
+
+        if image is None and _infer_playlist_count(message) == 0:
+            answer = AgentAnswer(answer=reply_text("zero", split_reply_request(message)[1] or "zh"), evidences=[])
+            yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))
+            return
         asset_id = self._resolve_asset_context(user_id, message)
         if self.graph is not None:
-            async for event in self.graph.astream(
+            stream = self.graph.astream(
                 user_id=user_id,
                 asset_id=asset_id,
                 query=message,
@@ -707,11 +728,13 @@ class AudioVisualAgent:
                 top_k=5,
                 thread_id=thread_id,
                 run_id=run_id,
-            ):
-                yield event
+                image=image,
+                turn_started_at=turn_started_at,
+            )
+            async with aclosing(stream):
+                async for event in stream:
+                    yield event
             return
-        from app.models import StreamEvent
-
         answer = _graph_unavailable_answer()
         yield StreamEvent(type="final", content=answer.answer, payload=answer.model_dump(mode="json"))
 
@@ -820,21 +843,58 @@ class AudioVisualAgent:
         instruction: str,
         seed_tracks: list[Asset | ExternalTrack] | None = None,
         target_count: int | None = None,
+        *,
+        preview: bool = False,
     ) -> Playlist:
-        return self._playlist_service().generate_playlist(
+        count = target_count if target_count is not None else _infer_playlist_count(instruction)
+        count = max(0, min(count if count is not None else 12, 100))
+        service = self._playlist_service()
+        if count:
+            playlist = self._build_playlist(user_id, instruction, count, seed_tracks=seed_tracks)
+        else:
+            playlist = Playlist(playlist_id="", user_id=user_id, name=instruction, generated_by="empty")
+            return service.save_draft(playlist, instruction, count) if preview else playlist
+        if preview:
+            return service.save_draft(playlist, instruction, count)
+        service.save_playlist(user_id, playlist)
+        return playlist
+
+    def _build_playlist(
+        self,
+        user_id: str,
+        instruction: str,
+        target_count: int,
+        eligible: Callable[[Asset | ExternalTrack], bool] | None = None,
+        recall_hint: str = "",
+        *,
+        seed_tracks: list[Asset | ExternalTrack] | None = None,
+    ) -> Playlist:
+        candidates_builder = self._playlist_candidates
+        if eligible is not None:
+            candidates_builder = partial(candidates_builder, eligible=eligible, recall_hint=recall_hint)
+        return self._playlist_service().build_playlist(
             user_id,
             instruction=instruction,
             seed_tracks=seed_tracks,
             target_count=target_count,
-            infer_playlist_count=_infer_playlist_count,
-            playlist_candidates_builder=self._playlist_candidates,
+            eligible=eligible,
+            playlist_candidates_builder=candidates_builder,
             extract_search_query=_extract_search_query,
-            track_key=_track_key,
             dedupe_tracks=_dedupe_tracks,
             is_quality_track=_is_recommendation_quality_track,
             is_playlist_context_compatible=_is_playlist_context_compatible,
             query_requests_variant_content=_query_requests_variant_content,
         )
+
+    def revise_playlist_draft(
+        self, user_id: str, draft_id: str, kept_indices: list[int], adjustment: str
+    ) -> PlaylistRevisionResult:
+        return self._playlist_service().revise_draft(
+            user_id, draft_id, kept_indices, adjustment, generate=partial(self._build_playlist, user_id)
+        )
+
+    def confirm_playlist_draft(self, user_id: str, draft_id: str, indices: list[int], name: str) -> Playlist:
+        return self._playlist_service().confirm_draft(user_id, draft_id, indices, name)
 
     def auto_playlists(self, user_id: str) -> list[Playlist]:
         return self._playlist_service().auto_playlists(
@@ -885,12 +945,17 @@ class AudioVisualAgent:
         library: list[Asset],
         seed_tracks: list[Asset | ExternalTrack],
         target_count: int,
+        *,
+        eligible: Callable[[Asset | ExternalTrack], bool] | None = None,
+        recall_hint: str = "",
     ) -> list[Asset | ExternalTrack]:
         return self._playlist_service().playlist_candidates(
             instruction,
             library,
             seed_tracks,
             target_count,
+            eligible=eligible,
+            recall_hint=recall_hint,
             playlist_search_terms=_playlist_search_terms,
             extract_search_query=_extract_search_query,
             query_requests_variant_content=_query_requests_variant_content,
@@ -987,19 +1052,26 @@ class AudioVisualAgent:
         total: int,
         *,
         online_only: bool = False,
+        prompt: str = "",
+        excluded_tracks: list[TrackRef] | None = None,
     ) -> list[tuple[Any, dict[str, float], str, float]]:
         return self._taste_experiment_service().collect_taste_candidates(
             user_id,
             seeds,
             total,
             online_only=online_only,
+            prompt=prompt,
+            excluded_tracks=excluded_tracks,
         )
 
-    def regenerate_taste_experiment_bucket(self, user_id: str, experiment_id: str, bucket: str) -> TasteExperiment:
+    def regenerate_taste_experiment_bucket(
+        self, user_id: str, experiment_id: str, bucket: str, *, online_only: bool | None = None
+    ) -> TasteExperiment:
         return self._taste_experiment_service().regenerate_taste_experiment_bucket(
             user_id,
             experiment_id,
             bucket,
+            online_only=online_only,
             taste_experiment_seeds_for_bucket=TasteExperimentService.taste_experiment_seeds_for_bucket,
             collect_taste_candidates=self._collect_taste_candidates,
             filter_taste_experiment_candidates=self._filter_taste_experiment_candidates,
@@ -1194,6 +1266,9 @@ class AudioVisualAgent:
             allow_variants=allow_variants,
         )
 
+        if excluded_tracks:
+            verified = _filter_excluded_tracks(verified, excluded_tracks)
+
         # 候选池兜底：网易云限流时所有在线路由同时空，但 SQLite 已攒了大量已验证真歌。
         # 与其返回空，不如从候选池语义/词法召回补位——这些是历史搜到、验证过的真实曲目，
         # 可播放、不是幻觉。限流是间歇的，今天搜不到的昨天可能已入池。
@@ -1225,6 +1300,9 @@ class AudioVisualAgent:
         if pool_hit_count:
             trace_lines.append(f"route=resource_pool, recalled={pool_hit_count}")
 
+        # 补位来源同样遵守上一轮的排除条件，进入排序前最后核对一次。
+        if excluded_tracks:
+            verified = _filter_excluded_tracks(verified, excluded_tracks)
         if verified:
             verified = rec_service.prioritize_fresh_candidates(
                 verified,
@@ -1373,6 +1451,7 @@ class AudioVisualAgent:
                 search_web_music=self.search_web_music,
                 rerank_tracks=self._rerank_tracks,
                 dedupe_tracks=_dedupe_tracks,
+                list_assets=self.list_assets,
                 is_recommendation_quality_track=_is_recommendation_quality_track,
             )
             self.taste_experiments = service

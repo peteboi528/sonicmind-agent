@@ -35,3 +35,16 @@ jobs:
 
       - name: Long dialogue smoke
         run: python scripts/long_dialogue_smoke.py
+
+      - name: Cross-session memory regression
+        run: python scripts/realistic_memory_eval.py
+
+      - name: Upload Agent regression reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-regression-py${{ matrix.python-version }}
+          path: |
+            artifacts/long_dialogue_smoke_report.*
+            artifacts/realistic_memory_eval_report.*
+          if-no-files-found: ignore

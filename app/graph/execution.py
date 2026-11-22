@@ -5,6 +5,7 @@ nodes.py 仅作为门面 re-export 本模块的符号，业务逻辑收敛于此
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from app.answer import collect_tracks as _collect_tracks
@@ -43,6 +44,7 @@ async def web_fallback_async(agent: AudioVisualAgent, state: AgentState) -> Agen
         state.get("thread_id") or f"{user_id}:default",
         state.get("run_id") or "",
         bool(state.get("_interrupt_enabled")),
+        state.get("context") or {},
     )
     results.extend(local_results)
     if runtime_result is not None:
@@ -124,6 +126,12 @@ def _record_runtime_result(
                 payload={"action_id": call.call_id, "tool": handler, "arguments": arguments},
             )
         )
+    if handler == "resolve_music_entity" and runtime_result.data.get("library_preview"):
+        events.append(StreamEvent(
+            type="library_preview",
+            content="已找到曲库中的艺人作品",
+            payload={"matches": runtime_result.data["library_preview"]},
+        ))
     if handler == "artist_albums":
         for album in runtime_result.data.get("albums", []):
             events.append(StreamEvent(type="album_card", content=album.get("name", ""), payload={"album": album}))
@@ -205,7 +213,9 @@ def _record_runtime_result(
     return runtime_result
 
 
-async def execute_tools_async(agent: AudioVisualAgent, state: AgentState) -> AgentState:
+async def execute_tools_async(
+    agent: AudioVisualAgent, state: AgentState, *, emit_progress: Callable[[StreamEvent], None] | None = None,
+) -> AgentState:
     """Native async stage executor used by the streaming LangGraph."""
     import asyncio
 
@@ -244,6 +254,10 @@ async def execute_tools_async(agent: AudioVisualAgent, state: AgentState) -> Age
             interrupt_enabled,
             state_context,
         )
+        if emit_progress:
+            for event in local_events:
+                if event.type in {"tool_result", "library_preview"}:
+                    emit_progress(event)
         return call, result, local_results, local_trace, local_events
 
     for stage in plan.stages or [ToolStage(calls=[], parallel=True)]:

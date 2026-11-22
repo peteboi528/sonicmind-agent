@@ -22,17 +22,21 @@ from app.graph.continuation import (
     _strip_negative_query,
     _without_negative_constraints,
 )
-from app.graph.tag_rules import extract_tags
+from app.graph.tag_rules import FOCUS_REQUEST_TERMS, extract_tags
 from app.intents import (
+    artist_work_reference,
     extract_content_negations,
     get_intent,
+    is_album_reference,
     is_allowed_multi_intent_pair,
+    is_playlist_definition,
     match_intent_by_keywords,
 )
 from app.llm.observability import capture_llm_stats, empty_runtime_metrics
 from app.llm.structured import extract_json_dict
 from app.models import AgentPlan, QueryPlanPayload, RetrievalPlan, StreamEvent, ToolStage
 from app.prompts import QUERY_PLAN_SYSTEM, QUERY_PLAN_VERSION
+from app.reply_language import split_reply_request
 from app.tools.contracts import ToolCall
 from app.tools.registry import get_handler
 
@@ -47,7 +51,9 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     memory = agent.memory.get_memory(state["user_id"])
     goal = agent.memory.get_active_goal(state["user_id"])
     memory_query = agent.memory.weighted_query(memory, include_artists=False)
-    dialogue = agent.memory.get_dialogue_state(state["user_id"])
+    dialogue = agent.memory.get_dialogue_state(
+        state["user_id"], thread_id=state.get("dialogue_thread_id") or state.get("thread_id")
+    )
 
     recall_lines: list[str] = []
     profile = (memory.consolidated_profile or "").strip()
@@ -72,13 +78,13 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
     ]
     budgeted, report = ContextBudgetManager(total_budget=2000).allocate(sources)
 
-    turn_deadline_at = time.monotonic() + settings.turn_budget_seconds
-    # ``deadline_at`` 是 ToolRuntime 消费的硬 deadline。普通路径预留最终组装时间；
-    # 知识意图会在规划完成后以自己的更长预算覆盖它。
-    execution_deadline_at = max(
-        time.monotonic() + 0.05,
-        turn_deadline_at - min(settings.turn_finalize_reserve_seconds, settings.turn_budget_seconds),
+    started_at = state.get("turn_started_at", time.monotonic())
+    knowledge = _is_knowledge_intent(match_intent_by_keywords(state["query"]) or "")
+    budget = state.get("turn_budget_limit") or (
+        settings.knowledge_turn_budget_seconds if knowledge else settings.turn_budget_seconds
     )
+    turn_deadline_at = started_at + budget
+    execution_deadline_at = turn_deadline_at - min(settings.turn_finalize_reserve_seconds, budget)
     context = {
         "memory_query": budgeted.get("memory", enriched_memory),
         "history_text": budgeted.get("history", ""),
@@ -89,7 +95,7 @@ def load_context(agent: AudioVisualAgent, state: AgentState) -> AgentState:
         "prompt_versions": {},
         "runtime_metrics": empty_runtime_metrics(),
         "semantic_recall_pending": True,
-        "started_at_monotonic": time.monotonic(),
+        "started_at_monotonic": started_at,
         "turn_deadline_at": turn_deadline_at,
         "deadline_at": execution_deadline_at,
     }
@@ -164,10 +170,14 @@ def _finish_plan_intent(
     prompt_versions: dict[str, str],
     runtime_metrics: dict[str, float | int],
 ) -> AgentState:
-    query = state["query"]
+    query, reply_language = split_reply_request(state["query"])
     context = state.get("context") or {}
     plan = plan or build_agent_plan(query)
+    if is_playlist_definition(query):
+        plan = AgentPlan(intent="chat", strategy="no_search", online_required=False)
     plan = _sanitize_retrieval_entities(plan)
+    if reply_language:
+        plan = plan.model_copy(update={"response_language": reply_language})
     # 明确的旅程信号由确定性意图兜底，不能被 LLM 偶发误判成普通学习推荐。
     if match_intent_by_keywords(query) == "journey" and plan.intent != "journey":
         plan = build_agent_plan(query)
@@ -194,7 +204,54 @@ def _finish_plan_intent(
                 "reasoning_summary": spec.summary,
             }
         )
-    plan, inherited = _apply_dialogue_continuation(plan, query, context.get("dialogue_state"))
+    dialogue = context.get("dialogue_state") or {}
+    named_work = artist_work_reference(query)
+    previous_entities = dialogue.get("entities") or []
+    album_entities = [named_work[1], named_work[0]] if named_work else []
+    if not album_entities and is_album_reference(query) and dialogue.get("last_intent") == "album_deep_dive":
+        album_entities = previous_entities[:2]
+    if plan.intent == "album_deep_dive" and album_entities:
+        plan = plan.model_copy(
+            update={"retrieval_plan": plan.retrieval_plan.model_copy(update={"entities": album_entities})}
+        )
+    plan, inherited = _apply_dialogue_continuation(plan, query, dialogue)
+    focus_query = str(dialogue.get("last_query") or "") if inherited else query
+    if (
+        plan.intent == "recommend"
+        and not plan.retrieval_plan.entities
+        and any(term in focus_query for term in FOCUS_REQUEST_TERMS)
+    ):
+        retrieval = plan.retrieval_plan
+        scene_query = " ".join(["专注", *(retrieval.genre_filter or ["器乐"])])
+        plan = plan.model_copy(
+            update={
+                "retrieval_plan": retrieval.model_copy(
+                    update={
+                        "search_query": scene_query,
+                        "search_variants": _cap_search_variants(
+                            ["专注 爵士 器乐", "ambient piano focus", *retrieval.search_variants], scene_query
+                        ),
+                        "scenario_filter": ["学习"],
+                    }
+                )
+            }
+        )
+    if plan.intent == "recommend" and "静かな曲" in query:
+        retrieval = plan.retrieval_plan
+        plan = plan.model_copy(
+            update={
+                "retrieval_plan": retrieval.model_copy(
+                    update={
+                        "search_query": "安静 放松",
+                        "search_variants": _cap_search_variants(
+                            ["安静 爵士", "安静 ambient", *retrieval.search_variants], "安静 放松"
+                        ),
+                        "mood_filter": ["安静"],
+                        "entities": [],
+                    }
+                )
+            }
+        )
     # 安全网：LLM 可能把介绍/百科类问题误判为 discuss，检查关键词自动升级
     plan = _upgrade_artist_info(plan, query)
     state = _attach_semantic_recall_if_needed(agent, state, plan)
@@ -208,12 +265,12 @@ def _finish_plan_intent(
     # 让 build_music_dossier / web_knowledge_search 拿到 deadline，避免跑满无界。
     _has_knowledge = _is_knowledge_intent(plan.intent) or any(_is_knowledge_intent(sp.intent) for sp in plan.sub_plans)
     if _has_knowledge:
-        from app.knowledge import knowledge_deadline
-
-        context["deadline_at"] = knowledge_deadline()
+        budget = state.get("turn_budget_limit") or settings.knowledge_turn_budget_seconds
+        context["turn_deadline_at"] = context.get("started_at_monotonic", time.monotonic()) + budget
+        context["deadline_at"] = context["turn_deadline_at"] - min(settings.turn_finalize_reserve_seconds, budget)
         context["latency_budget"] = {
             "kind": "knowledge",
-            "budget_seconds": settings.knowledge_turn_budget_seconds,
+            "budget_seconds": budget,
             "timed_out_tools": [],
             "skipped_due_to_deadline": [],
             "partial": False,
@@ -271,6 +328,15 @@ _GENERIC_ENTITY_WORDS = {
     "更多",
     "还要",
     "还想",
+    "同一个场景",
+    "同样的场景",
+    "换个话题",
+    "换个场景",
+    "沿着这些歌",
+    "这些歌",
+    "日本語",
+    "集中",
+    "紹介",
     "再推",
     "再给",
 }
@@ -302,7 +368,16 @@ def _sanitize_retrieval_entities(plan: AgentPlan) -> AgentPlan:
         is_pure_tag = bool(tags["genre"] or tags["mood"] or tags["scenario"]) and len(value) <= 12
         if not value or key in {_constraint_key(word) for word in _GENERIC_ENTITY_WORDS}:
             continue
-        if is_request_phrase or is_pure_tag:
+        is_preference_reference = re.fullmatch(
+            r"(?:那(?:就)?)?(?:请)?(?:按(?:照)?|根据|结合)(?:我|用户)(?:现在|目前|平时)?的(?:口味|品味|偏好)",
+            value,
+        )
+        if (
+            is_request_phrase
+            or is_pure_tag
+            or is_preference_reference
+            or any(term in value for term in FOCUS_REQUEST_TERMS)
+        ):
             continue
         entities.append(value)
     if entities == plan.retrieval_plan.entities:
@@ -660,6 +735,7 @@ async def plan_with_llm_with_meta_async(
     memory_text: str = "",
     profile_text: str = "",
 ) -> tuple[AgentPlan | None, dict[str, str], dict[str, float | int]]:
+    retrieval_query, requested_language = split_reply_request(query)
     try:
         sections: list[str] = []
         if history_text.strip():
@@ -670,7 +746,7 @@ async def plan_with_llm_with_meta_async(
         # 让 LLM 规划 search_query/entities 时参考「专辑品位」。同样软参考、不覆盖本轮明确要求。
         if profile_text.strip() and not settings.mock_mode:
             sections.append(f"【用户画像·品味仪表盘（软参考，不得覆盖本轮明确要求）】\n{profile_text[:400]}")
-        sections.append(f"【本轮输入】\n{query}" if sections else query)
+        sections.append(f"【本轮输入】\n{retrieval_query}" if sections else retrieval_query)
         # 从 nodes 模块读取，使外部对 nodes.select_llm 的 monkeypatch 生效。
         from app.graph.nodes import select_llm
 
@@ -694,7 +770,9 @@ async def plan_with_llm_with_meta_async(
     metrics = capture_llm_stats(llm)
     if payload is None:
         return None, {}, metrics
-    plan = _plan_from_query_payload(payload, query)
+    plan = _plan_from_query_payload(payload, retrieval_query)
+    if requested_language:
+        plan = plan.model_copy(update={"response_language": requested_language})
     return plan, {"query_plan": QUERY_PLAN_VERSION}, metrics
 
 
@@ -717,11 +795,12 @@ def _plan_from_query_payload(payload: QueryPlanPayload, query: str) -> AgentPlan
         language_filter=payload.language.strip().lower(),
         excluded_terms=exclusions,
     )
+    explicit_count = _infer_count(query, allow_approximate=False)
     return AgentPlan(
         intent=intent,
         strategy=spec.strategy_for(retrieval.use_web),
         tools_needed=spec.tools_for(retrieval.use_web),
-        target_count=payload.target_count or _infer_count(query),
+        target_count=explicit_count if explicit_count is not None else payload.target_count or _infer_count(query),
         online_required=retrieval.use_web,
         reasoning_summary=payload.reasoning.strip() or spec.summary,
         retrieval_plan=retrieval,

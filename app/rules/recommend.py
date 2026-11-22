@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.answer import infer_count
 from app.config import settings
 from app.media.pipeline import netease_song_id
 from app.models import Asset, ExternalTrack
@@ -16,10 +17,7 @@ def _netease_song_id(url: str) -> str | None:
 
 
 def _infer_playlist_count(text: str) -> int | None:
-    match = re.search(r"(\d{1,3})\s*(?:首|个|tracks?|songs?)?", text, re.IGNORECASE)
-    if not match:
-        return None
-    return max(1, min(int(match.group(1)), 100))
+    return infer_count(text)
 
 
 def get_time_bucket_name() -> str:

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from "vue";
+import { ref, onMounted, watch } from "vue";
 import { store } from "../store.js";
 import { api } from "../api.js";
 import SongCard from "./SongCard.vue";
@@ -10,6 +10,12 @@ const instruction = ref("");
 const generating = ref(false);
 const msg = ref("");
 const expanded = ref(null);
+const draft = ref(null);
+const picked = ref([]);
+const draftName = ref("");
+const saving = ref(false);
+const revising = ref(false);
+const adjustment = ref("");
 
 // ── 多选删除 ──
 const selectMode = ref(false);
@@ -55,26 +61,88 @@ async function deleteSelected() {
 }
 
 async function load() {
+  const owner = store.userId;
   loading.value = true;
   try {
     const data = await api.listPlaylists(store.userId);
-    playlists.value = data.playlists || [];
+    if (owner === store.userId) playlists.value = data.playlists || [];
   } catch { msg.value = "加载歌单失败。"; }
   finally { loading.value = false; }
 }
 
 async function generate() {
   const ins = instruction.value.trim();
-  if (!ins) return;
+  if (!ins || generating.value || saving.value || revising.value) return;
+  const owner = store.userId;
   generating.value = true;
   msg.value = "";
   try {
-    await api.generatePlaylist(store.userId, ins);
-    instruction.value = "";
-    await load();
+    const preview = await api.previewPlaylist(owner, ins);
+    if (store.userId !== owner) return;
+    draft.value = preview.tracks.length ? preview : null;
+    picked.value = preview.tracks.map((_, index) => index);
+    draftName.value = preview.name.slice(0, 200);
+    adjustment.value = "";
+    if (!draft.value) msg.value = "没有找到合适的曲目，试试换一个场景或曲风。";
   } catch { msg.value = "生成失败，请稍后重试。"; }
   finally { generating.value = false; }
 }
+
+async function revise(keepSelected) {
+  if (!draft.value || generating.value || saving.value || revising.value) return;
+  const owner = store.userId;
+  const kept = keepSelected ? picked.value : [];
+  const note = adjustment.value.trim();
+  msg.value = "";
+  revising.value = true;
+  try {
+    const result = await api.revisePlaylist(owner, draft.value.playlist_id, kept, note);
+    if (owner !== store.userId) return;
+    if (!result.added_count) {
+      msg.value = "暂时没有找到新的候选，当前草稿已保留。可以试试更具体的曲风。";
+      return;
+    }
+    draft.value = result.draft;
+    picked.value = result.draft.tracks.map((_, index) => index);
+    adjustment.value = "";
+    const target = result.draft.target_count;
+    const count = result.draft.tracks.length;
+    msg.value = `保留 ${kept.length} 首，找到 ${result.added_count} 首新候选。`
+      + (count < target ? `当前共有 ${count} 首，目标 ${target} 首，可继续补歌。` : "");
+  } catch (error) {
+    if (owner !== store.userId) return;
+    msg.value = error.message === "HTTP 409" ? "草稿已变更，请重新预览。" : "换歌失败，可以重试。";
+  } finally { revising.value = false; }
+}
+
+async function saveSelection() {
+  if (!draft.value || !picked.value.length || saving.value || generating.value || revising.value) return;
+  const owner = store.userId;
+  saving.value = true;
+  try {
+    const result = await api.confirmPlaylist(owner, draft.value.playlist_id, picked.value, draftName.value);
+    if (store.userId !== owner) return;
+    draft.value = null;
+    expanded.value = result.playlist_id;
+    msg.value = `已保存《${result.name}》，共 ${result.tracks.length} 首。`;
+    await load();
+  } catch (error) {
+    if (owner !== store.userId) return;
+    msg.value = error.message === "HTTP 409" ? "草稿已变更，请重新预览。" : "保存失败，可以重试。";
+  } finally { saving.value = false; }
+}
+
+watch(() => store.userId, () => {
+  draft.value = null;
+  picked.value = [];
+  adjustment.value = "";
+  selectedIds.value = new Set();
+  playlists.value = [];
+  instruction.value = "";
+  msg.value = "";
+  expanded.value = null;
+  load();
+});
 
 async function autoClassify() {
   generating.value = true;
@@ -97,6 +165,7 @@ async function remove(pl) {
 function toCard(t) {
   return {
     title: t.title, artist: t.artist || "", source: t.source || "local",
+    asset_id: t.asset_id, playback_url: t.playback_url,
     source_id: t.source_id || t.external_id || "", cover_url: t.cover_url,
   };
 }
@@ -146,8 +215,8 @@ onMounted(load);
   <div class="playlist-view">
     <div class="pl-page-head">
       <div>
-        <p class="eyebrow">My Playlists</p>
-        <h1>我的歌单</h1>
+        <h1>为此刻挑一份歌单</h1>
+        <p class="curation-intro">告诉我你在做什么，先看看候选曲目，再留下想听的。</p>
       </div>
       <div v-if="playlists.length" class="pl-head-actions">
         <template v-if="selectMode">
@@ -169,24 +238,48 @@ onMounted(load);
     <!-- generator -->
     <div class="gen-block">
       <div class="gen-input-wrap">
-        <input v-model="instruction" class="gen-input" placeholder="用一句话描述歌单，如「雨天 city pop 20首」" @keyup.enter="generate" />
-        <button class="gen-send" :disabled="generating || !instruction.trim()" @click="generate">
+        <input v-model="instruction" aria-label="听歌场景" class="gen-input" placeholder="用一句话描述歌单，如「雨天 city pop 20首」" @keyup.enter="generate" />
+        <button class="gen-send" :disabled="generating || saving || revising || !instruction.trim()" @click="generate">
           <svg v-if="!generating" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
           <svg v-else class="spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><path d="M21 3v6h-6"/></svg>
-          {{ generating ? "生成中" : "生成" }}
+          {{ generating ? "整理中" : "预览歌单" }}
         </button>
       </div>
-      <button class="gen-auto" :disabled="generating" @click="autoClassify">
+      <button class="gen-auto" :disabled="generating || saving || revising" @click="autoClassify">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4l3 3"/></svg>
         自动分类
       </button>
     </div>
 
-    <div v-if="msg" class="pl-toast">{{ msg }}</div>
+    <section v-if="draft" class="draft-panel" aria-label="歌单草稿">
+      <label class="draft-title">草稿名称
+        <input v-model="draftName" class="gen-input" maxlength="200" :disabled="saving || generating || revising" />
+      </label>
+      <span class="draft-count">候选 {{ draft.tracks.length }} 首 · 已选 {{ picked.length }} 首</span>
+      <label v-for="(track, i) in draft.tracks" :key="i" class="draft-row">
+        <input v-model="picked" type="checkbox" :value="i" :disabled="saving || generating || revising" />
+        <span>{{ track.title }} <small>{{ track.artist }}</small></span>
+      </label>
+      <div class="draft-adjust">
+        <label class="draft-title">调整要求 <small>可选</small>
+          <input v-model="adjustment" class="gen-input" maxlength="300" placeholder="例如少一点人声，偏爵士" :disabled="saving || generating || revising" />
+        </label>
+        <div class="draft-actions">
+          <button class="sel-btn" :disabled="saving || generating || revising || picked.length >= draft.target_count" @click="revise(true)">
+            {{ revising ? "寻找新曲目…" : "保留已选，其余换歌" }}
+          </button>
+          <button class="sel-btn" :disabled="saving || generating || revising" @click="revise(false)">全部换一批</button>
+          <button class="gen-send draft-save" :disabled="!picked.length || saving || generating || revising" @click="saveSelection">
+            {{ saving ? "保存中…" : "保存选中的曲目" }}
+          </button>
+        </div>
+      </div>
+    </section>
+    <div v-if="msg" role="status" class="pl-toast">{{ msg }}</div>
     <div v-if="loading || generating" class="loading-hint">{{ generating ? "生成中…" : "加载中…" }}</div>
 
     <!-- empty state -->
-    <div v-if="!loading && !playlists.length" class="pl-empty">
+    <div v-if="!loading && !playlists.length && !draft && !generating" class="pl-empty">
       <svg class="pl-empty-icon" viewBox="0 0 120 100" fill="none" xmlns="http://www.w3.org/2000/svg">
         <rect x="10" y="20" width="60" height="8" rx="4" fill="currentColor" opacity="0.2"/>
         <rect x="10" y="36" width="45" height="8" rx="4" fill="currentColor" opacity="0.15"/>
@@ -195,13 +288,14 @@ onMounted(load);
         <path d="M90 33v12.5M90 33c0-1.1.9-2 2-2h5v5h-5c-1.1 0-2-.9-2-2z" stroke="currentColor" stroke-width="2" stroke-linecap="round" opacity="0.3"/>
         <circle cx="88" cy="47" r="3" stroke="currentColor" stroke-width="2" opacity="0.3"/>
       </svg>
-      <p>还没有歌单，让我来帮你生成一个</p>
+      <p>试试用一个场景开始</p>
       <div class="pl-empty-actions">
         <button class="empty-btn" @click="instruction = '推荐 20 首适合深夜的治愈歌单'">🌙 深夜治愈</button>
-        <button class="empty-btn" @click="instruction = '帮我做 20 首跑步歌单，节奏感强'">>🏃 跑步节奏</button>
+        <button class="empty-btn" @click="instruction = '帮我做 20 首跑步歌单，节奏感强'">🏃 跑步节奏</button>
       </div>
     </div>
 
+    <h2 v-if="playlists.length">我的歌单</h2>
     <!-- playlist cards -->
     <div v-for="(pl, idx) in playlists" :key="pl.playlist_id" class="pl-card stagger-item" :class="{ selecting: selectMode, selected: selectedIds.has(pl.playlist_id) }" :style="{ animationDelay: `${idx * 55}ms` }">
       <div class="pl-head">
@@ -274,6 +368,27 @@ onMounted(load);
   padding: 28px clamp(18px, 4vw, 42px) calc(var(--player-h) + 40px);
 }
 
+.curation-intro, .draft-count, .draft-row small { color: var(--text-sub); }
+.curation-intro { margin: .5rem 0 0; }
+.draft-panel {
+  display: grid; gap: 12px; padding: 20px; margin-bottom: 24px;
+  border: 1px solid var(--border); border-left: 3px solid var(--accent);
+  border-radius: var(--radius); background: var(--bg-card);
+}
+.draft-title { display: grid; gap: 6px; font-weight: 700; }
+.draft-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.draft-row input { accent-color: var(--accent); }
+.draft-row small { margin-left: 6px; }
+.draft-adjust { display: grid; gap: 12px; }
+.draft-adjust .draft-title { display: block; }
+.draft-adjust .draft-title small { margin-left: 4px; color: var(--text-sub); font-weight: 400; }
+.draft-adjust .gen-input { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; }
+.draft-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.draft-save { margin-left: auto; }
+@media (max-width: 600px) {
+  .draft-save { margin-left: 0; }
+}
+.gen-input { min-width: 0; }
 .pl-page-head {
   margin-bottom: 24px;
   display: flex;

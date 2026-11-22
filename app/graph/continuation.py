@@ -67,7 +67,9 @@ def _apply_dialogue_continuation(
         return _mount_excluded(plan), ""
 
     # 继承上一轮意图（除非本轮 LLM 给了更具体的非 chat 意图）。
-    intent = plan.intent if plan.intent not in {"chat"} else prev_intent
+    intent = prev_intent if plan.intent == "chat" else plan.intent
+    if plan.intent == "discuss" and prev_intent in {"recommend", "search", "playlist"} and "同一个场景" in query:
+        intent = prev_intent
     spec = get_intent(intent)
     use_web = plan.online_required or spec.online_default
     merged = RetrievalPlan(
@@ -276,8 +278,9 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
     """
     plan = state["plan"]
     user_id = state["user_id"]
+    thread_id = state.get("dialogue_thread_id") or state.get("thread_id")
     if plan.intent == "chat":
-        agent.memory.clear_dialogue_state(user_id)
+        agent.memory.clear_dialogue_state(user_id, thread_id=thread_id)
         return
     rp = plan.retrieval_plan
     # DialogueState must not depend solely on LLM-populated plan fields.  Recover
@@ -341,4 +344,5 @@ def _persist_dialogue_state(agent: AudioVisualAgent, state: AgentState) -> None:
         scenario_tags=scenario_tags,
         shown_tracks=merged_shown,
         shown_artists=merged_shown_artists,
+        thread_id=thread_id,
     )

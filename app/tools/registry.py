@@ -75,6 +75,27 @@ class ToolSpec:
 
 
 TOOL_REGISTRY: dict[str, ToolSpec] = {
+    "image_library_lookup": ToolSpec(
+        name="image_library_lookup",
+        description="Look up tracks credited to an artist in the local library.",
+        args_schema={"artist": {"type": "string"}},
+        required=("artist",),
+        llm_visible=False,
+        timeout_seconds=2.0,
+        max_retries=0,
+        max_concurrency=4,
+    ),
+    "image_catalog_lookup": ToolSpec(
+        name="image_catalog_lookup",
+        description="Check screenshot evidence and retrieve candidate tracks from NetEase.",
+        args_schema={"query": {"type": "string"}, "limit": {"type": "integer"}},
+        required=("query", "limit"),
+        llm_visible=False,
+        timeout_seconds=6.0,
+        max_retries=0,  # HTTP transport owns retries and circuit breaking.
+        max_concurrency=4,
+        source="netease",
+    ),
     "recommend": ToolSpec(
         name="recommend",
         aliases=("recommend_music",),
@@ -198,7 +219,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         args_schema={"query": {"type": "string", "description": "用户原始音乐知识问题"}},
         required=("query",),
         llm_visible=False,
-        timeout_seconds=3.0,
+        timeout_seconds=15.0,
         max_retries=0,
     ),
     "review_search": ToolSpec(

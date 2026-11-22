@@ -8,11 +8,11 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 
@@ -38,8 +38,12 @@ from app.models import (
     ListenRequest,
     LyricsRequest,
     MemoryUpdateRequest,
+    PlaylistDraftSelection,
+    PlaylistDraftView,
     PlaylistFromAssetsRequest,
     PlaylistRequest,
+    PlaylistRevisionRequest,
+    PlaylistRevisionResult,
     ProfileInsightFeedbackRequest,
     RatingRequest,
     RecommendationHistoryRequest,
@@ -128,8 +132,10 @@ async def _enforce_rate_limit(request, call_next):
     鉴权绑定的 user_id；未鉴权时退回按 IP 限流。
     body 里的 user_id 不进 key（客户端可伪造，playback 漏洞正是它）。
     """
+    path = request.url.path
+    if path.startswith("/agent/stream"):
+        request.state.turn_started_at = time.monotonic()
     if settings.rate_limit_enabled:
-        path = request.url.path
         if path.startswith(("/chat", "/agent/run", "/agent/stream")):
             tier = "chat"
         elif path.startswith("/api/playback/"):
@@ -362,6 +368,7 @@ async def _localize_artist_bio(artist: str, bio: str, tags: list[str], fallback_
 
 
 # ---- 挂载 Web 前端 & Bot 路由 ----
+from app.api.web_routes import _read_capped, _sniff_image_mime
 from app.api.web_routes import router as _web_router
 
 app.include_router(_web_router)
@@ -401,6 +408,7 @@ def health() -> dict[str, Any]:
     llm_mode = "mock" if agent.llm.__class__.__name__ == "MockLLM" else "configured"
     checks["llm"] = llm_mode == "mock" or bool(settings.llm_api_key)
     details["llm_mode"] = llm_mode
+    details["image_turn_enabled"] = settings.agent_image_enabled
     details["store_root"] = str(agent.store.root)
     details["store_candidates"] = settings.store_candidates
     details["duplicate_store_warning"] = sum(count > 0 for count in settings.store_candidates.values()) > 1
@@ -678,40 +686,98 @@ async def agent_run(payload: ChatRequest, request: Request):
     )
 
 
+_active_chat_streams: set[tuple[str, str]] = set()
+
+
 @app.post("/agent/stream")
 async def agent_stream(payload: ChatRequest, request: Request):
+    return _agent_stream_response(payload, request, started=request.state.turn_started_at)
+
+
+@app.post("/agent/stream/image")
+async def agent_image_stream(
+    request: Request,
+    file: UploadFile = File(...),
+    message: str = Form("", max_length=4000),
+    thread_id: str | None = Form(None, max_length=200),
+    user_id: str = Form("web_user"),
+    history: str = Form("[]", max_length=24000),
+):
+    started = request.state.turn_started_at
+    if not settings.agent_image_enabled:
+        raise HTTPException(status_code=404, detail="图片对话已关闭")
+    try:
+        payload = ChatRequest(user_id=user_id, thread_id=thread_id, message=message, history=json.loads(history))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="无效的聊天历史") from exc
+    try:
+        raw = await _read_capped(file, settings.album_cover_max_bytes)
+    finally:
+        await file.close()
+    if not raw:
+        raise HTTPException(status_code=400, detail="空文件")
+    mime = _sniff_image_mime(raw)
+    if mime is None:
+        raise HTTPException(status_code=415, detail="请选择一张 PNG、JPEG 或 WebP 图片")
+    return _agent_stream_response(payload, request, started=started, image=(raw, mime))
+
+
+def _agent_stream_response(
+    payload: ChatRequest, request: Request, *, started: float, image: tuple[bytes, str] | None = None
+) -> StreamingResponse:
     uid = _effective_user_id(request, payload.user_id)
     thread_id = payload.thread_id or f"{uid}:default"
     history = [{"role": m.role, "content": m.content} for m in payload.history]
+    key = (uid, thread_id)
+    if key in _active_chat_streams:
+        raise HTTPException(status_code=409, detail="该会话已有正在处理的消息")
 
     async def events():
         from app.services.tools import checkpoint_store, trace_store
 
+        if key in _active_chat_streams:
+            yield 'data: {"type":"error","content":"该会话已有正在处理的消息","payload":{}}\n\n'
+            return
+        _active_chat_streams.add(key)
         run_id = hashlib.sha256(f"{thread_id}:{time.time_ns()}".encode()).hexdigest()[:24]
-        started = time.monotonic()
-        checkpoint_store.touch_thread(thread_id)
-        trace_store.start_run(run_id, thread_id, uid, payload.message)
         status = "ok"
+        first_result_ms = None
+        final = False
         try:
-            async for event in agent.stream_chat_async(
-                uid, payload.message, history=history or None, thread_id=thread_id, run_id=run_id
-            ):
-                if await request.is_disconnected():
-                    status = "cancelled"
-                    break
-                yield f"data: {json.dumps(event.model_dump(mode='json'), ensure_ascii=False)}\n\n"
-                yield ": heartbeat\n\n"
+            checkpoint_store.touch_thread(thread_id)
+            trace_store.start_run(run_id, thread_id, uid, payload.message)
+            stream = agent.stream_chat_async(
+                uid, payload.message, history=history or None, thread_id=thread_id, run_id=run_id,
+                image=image, turn_started_at=started,
+            )
+            async with aclosing(stream):
+                async for event in stream:
+                    if await request.is_disconnected():
+                        status = "cancelled"
+                        break
+                    if first_result_ms is None and (
+                        event.type in {"song_card", "dossier", "album_card", "artist_card", "library_preview"}
+                        or (event.type in {"candidates", "final"} and event.payload.get("cards"))
+                    ):
+                        first_result_ms = round((time.monotonic() - started) * 1000, 2)
+                    final = final or event.type == "final"
+                    yield f"data: {json.dumps(event.model_dump(mode='json'), ensure_ascii=False)}\n\n"
+                    yield ": heartbeat\n\n"
         except asyncio.CancelledError:
             status = "cancelled"
             raise
         except Exception:
             status = "error"
             logger.exception("Agent stream failed")
-            raise
+            yield 'data: {"type":"error","content":"请求处理失败，请重试","payload":{}}\n\n'
         finally:
-            trace_store.finish_run(run_id, status, (time.monotonic() - started) * 1000)
+            _active_chat_streams.discard(key)
+            trace_store.finish_run(
+                run_id, status, (time.monotonic() - started) * 1000,
+                first_result_ms=first_result_ms, final=final, image=image is not None,
+            )
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/history/chat/{user_id}")
@@ -1529,7 +1595,9 @@ def delete_taste_experiment(user_id: str, experiment_id: str, request: Request):
 def taste_experiment_regenerate(payload: TasteExperimentRegenerateRequest, request: Request):
     uid = _effective_user_id(request, payload.user_id)
     try:
-        exp = agent.regenerate_taste_experiment_bucket(uid, payload.experiment_id, payload.bucket)
+        exp = agent.regenerate_taste_experiment_bucket(
+            uid, payload.experiment_id, payload.bucket, online_only=payload.online_only
+        )
         return exp.model_dump(mode="json")
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1598,6 +1666,36 @@ def library_tracks(limit: int = Query(default=100, ge=1, le=500)):
 def generate_playlist(payload: PlaylistRequest, request: Request):
     playlist = agent.generate_playlist(_effective_user_id(request, payload.user_id), payload.instruction)
     return playlist
+
+
+@app.post("/playlist/preview", response_model=PlaylistDraftView)
+def preview_playlist(payload: PlaylistRequest, request: Request):
+    instruction = payload.instruction.strip()
+    if not instruction:
+        raise HTTPException(status_code=422, detail="请输入听歌场景")
+    return agent.generate_playlist(_effective_user_id(request, payload.user_id), instruction, preview=True)
+
+
+@app.post("/playlist/revise", response_model=PlaylistRevisionResult)
+def revise_playlist(payload: PlaylistRevisionRequest, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    try:
+        return agent.revise_playlist_draft(uid, payload.draft_id, payload.kept_indices, payload.adjustment.strip())
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/playlist/confirm")
+def confirm_playlist(payload: PlaylistDraftSelection, request: Request):
+    uid = _effective_user_id(request, payload.user_id)
+    try:
+        return agent.confirm_playlist_draft(uid, payload.draft_id, payload.indices, payload.name)
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.post("/playlist/from_assets")

@@ -66,3 +66,28 @@ def test_concurrency_actually_parallel():
     elapsed = time.monotonic() - start
     assert out == [1, 1]
     assert elapsed < 0.18  # 并发，远小于串行 0.2s
+
+
+def test_top_level_pool_saturation_respects_batch_deadline(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import BoundedSemaphore, Event
+
+    from app import concurrency
+
+    started = Event()
+    finished = Event()
+
+    def busy():
+        started.set()
+        finished.wait(1.0)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        monkeypatch.setattr(concurrency, "_shared_executor", lambda: (pool, semaphore))
+        semaphore = BoundedSemaphore(1)
+        try:
+            assert run_parallel([("busy", busy)], timeout=0.04) == [None]
+            assert started.is_set()
+            assert run_parallel([("full", lambda: "ran")], timeout=0.04) == [None]
+        finally:
+            finished.set()
+        assert run_parallel([("recovered", lambda: "ran")], timeout=0.4) == ["ran"]

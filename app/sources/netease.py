@@ -475,7 +475,9 @@ def search_netease_many(query: str, limit: int = 20, offset: int = 0) -> list[di
     return _normalize_netease_songs(songs)
 
 
-async def asearch_netease_many(query: str, limit: int = 20, offset: int = 0) -> list[dict[str, Any]]:
+async def asearch_netease_many(
+    query: str, limit: int = 20, offset: int = 0, *, report_failure: bool = False
+) -> list[dict[str, Any]]:
     """Async pooled NetEase search with cancellation, source limits, retries and circuit breaking."""
     from app.sources.http_transport import source_transport
 
@@ -492,14 +494,37 @@ async def asearch_netease_many(query: str, limit: int = 20, offset: int = 0) -> 
                 retries=_SEARCH_RETRIES,
                 concurrency=4,
             )
+            if report_failure:
+                response.raise_for_status()
             payload = response.json()
             return payload.get("result", {}).get("songs", []) or []
         except asyncio.CancelledError:
             raise
         except Exception:
+            if report_failure:
+                raise
             logger.debug("Async NetEase search failed for %s via %s", query, endpoint, exc_info=True)
             return []
 
+    if report_failure:
+        pending = [asyncio.create_task(fetch(endpoint)) for endpoint in _SEARCH_ENDPOINTS]
+        errors: list[Exception] = []
+        try:
+            for finished in asyncio.as_completed(pending):
+                try:
+                    batch = await finished
+                except Exception as exc:
+                    errors.append(exc)
+                    continue
+                if batch:
+                    return _normalize_netease_songs(batch)
+            if len(errors) == len(pending):
+                raise errors[0]
+            return []
+        finally:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
     batches = await asyncio.gather(*(fetch(endpoint) for endpoint in _SEARCH_ENDPOINTS))
     songs = next((batch for batch in batches if batch), [])
     return _normalize_netease_songs(songs)

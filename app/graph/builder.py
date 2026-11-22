@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from typing import TYPE_CHECKING, Any
 
+from app.answer import song_card
 from app.compound import is_compound_task
+from app.config import settings
+from app.graph._shared import _is_knowledge_intent
 from app.graph.decompose import SubTask, decompose_compound_async, summarize_subtasks
+from app.graph.image_turn import run_image_turn
 from app.graph.nodes import (
     execute_tools_async,
     finalize_stream_async,
@@ -17,10 +24,13 @@ from app.graph.nodes import (
     web_fallback_async,
 )
 from app.graph.state import AgentState
+from app.intents import match_intent_by_keywords
 from app.llm.observability import empty_runtime_metrics, format_runtime_metrics, merge_runtime_metrics
 from app.llm.routing import select_llm
 from app.models import AgentAnswer, StreamEvent
 from app.prompts import COMPOUND_SYNTH_SYSTEM, COMPOUND_SYNTH_USER, COMPOUND_SYNTH_VERSION
+from app.services.cover_recognizer import recognize_music_image, synthesize_query
+from app.services.image_music import image_followup, image_topic_changed, recommendation_requested
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +41,8 @@ if TYPE_CHECKING:
 class AgentGraphRunner:
     def __init__(self, agent: AudioVisualAgent) -> None:
         self.agent = agent
-        self.compiled_stream = _try_build_streaming_langgraph(agent)
+        self._ephemeral_stream = _try_build_streaming_langgraph(agent)
+        self.compiled_stream = self._ephemeral_stream
         self._checkpoint_connection = None
 
     async def initialize_checkpointing(self, path: str) -> None:
@@ -112,10 +123,52 @@ class AgentGraphRunner:
         top_k: int = 5,
         thread_id: str | None = None,
         run_id: str | None = None,
+        *,
+        image: tuple[bytes, str] | None = None,
+        turn_started_at: float | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """The sole production execution path."""
         resolved_thread = thread_id or f"{user_id}:default"
-        if is_compound_task(query):
+        started = turn_started_at if turn_started_at is not None else time.monotonic()
+        image_branch = False
+        observation = None
+        session = None
+        vision_calls = 0
+        if settings.agent_image_enabled:
+            if image is not None:
+                self.agent.memory.save_image_dialogue(user_id, resolved_thread, None)
+                yield StreamEvent(type="thinking", content="正在识别音乐图片…")
+                reserve = min(settings.turn_finalize_reserve_seconds, settings.turn_budget_seconds)
+                is_recommendation = recommendation_requested(query)
+                recognition_budget = settings.turn_budget_seconds if query else settings.knowledge_turn_budget_seconds
+                recognition_deadline = min(started + recognition_budget - reserve, time.monotonic() + 7)
+                vision_calls = int(settings.vision_enabled and recognition_deadline > time.monotonic())
+                recognition = await recognize_music_image(*image, deadline_at=recognition_deadline)
+                summary = {**recognition.to_dict(), "track": recognition.track, "image_kind": recognition.image_kind}
+                # A blank cover upload defaults to the existing album dossier route.
+                cover_query = (
+                    synthesize_query(recognition)
+                    if not is_recommendation and recognition.image_kind != "player" and (recognition.album or recognition.raw_text)
+                    else None
+                )
+                yield StreamEvent(
+                    type="image_recognition",
+                    payload={"method": recognition.method, "album": recognition.album, "artist": recognition.artist,
+                             "track": recognition.track, "confidence": recognition.confidence},
+                )
+                if cover_query and (not query or "专辑" in query or "album" in query.lower()):
+                    query = cover_query if not query else f"{cover_query}\n{query}"
+                else:
+                    image_branch = True
+                    observation = {**summary, "collaborators": recognition.collaborators}
+            else:
+                previous = self.agent.memory.get_image_dialogue(user_id, resolved_thread)
+                if previous and image_followup(query, previous):
+                    image_branch = True
+                    session = previous.model_dump(mode="json")
+                elif previous and image_topic_changed(query):
+                    self.agent.memory.save_image_dialogue(user_id, resolved_thread, None)
+        if not image_branch and image is None and is_compound_task(query):
             async for event in self._astream_compound(
                 user_id,
                 asset_id,
@@ -124,10 +177,11 @@ class AgentGraphRunner:
                 top_k,
                 resolved_thread,
                 run_id or "",
+                started,
             ):
                 yield event
             return
-        async for event in self._astream_single(
+        stream = self._astream_single(
             user_id,
             asset_id,
             query,
@@ -135,8 +189,15 @@ class AgentGraphRunner:
             top_k,
             resolved_thread,
             run_id or "",
-        ):
-            yield event
+            turn_started_at=started,
+            image_turn=image_branch,
+            image_observation=observation,
+            image_session=session,
+            image_vision_calls=vision_calls,
+        )
+        async with aclosing(stream):
+            async for event in stream:
+                yield event
 
     async def _astream_single(
         self,
@@ -147,27 +208,46 @@ class AgentGraphRunner:
         top_k: int,
         thread_id: str,
         run_id: str,
+        *,
+        dialogue_thread_id: str | None = None,
+        turn_started_at: float | None = None,
+        turn_budget_limit: float | None = None,
+        image_turn: bool = False,
+        image_observation: dict[str, Any] | None = None,
+        image_session: dict[str, Any] | None = None,
+        image_vision_calls: int = 0,
     ) -> AsyncIterator[StreamEvent]:
         state: AgentState = {
             "user_id": user_id,
             "run_id": run_id,
             "thread_id": thread_id,
+            "dialogue_thread_id": dialogue_thread_id or thread_id,
             "asset_id": asset_id,
             "query": query,
+            "turn_started_at": turn_started_at if turn_started_at is not None else time.monotonic(),
+            "turn_budget_limit": turn_budget_limit,
+            "image_turn": image_turn,
+            "image_observation": image_observation,
+            "image_session": image_session,
+            "image_vision_calls": image_vision_calls,
             "history": history,
             "top_k": top_k,
             "_refine_count": 0,
             "_interrupt_enabled": self.checkpointing_ready,
         }
-        if self.compiled_stream is None:
+        # Raw OCR evidence is ephemeral. Cross-turn corrections use the verified
+        # data saved by the image branch rather than a LangGraph checkpoint.
+        compiled = self._ephemeral_stream if image_turn else self.compiled_stream
+        if compiled is None:
             raise RuntimeError("LangGraph is unavailable; no secondary orchestrator is configured")
-        config = {"configurable": {"thread_id": state["thread_id"]}}
+        config = {"configurable": {"thread_id": thread_id}}
         try:
-            async for chunk in self.compiled_stream.astream(state, config=config, stream_mode="custom"):
-                if isinstance(chunk, StreamEvent):
-                    yield chunk
-                elif isinstance(chunk, dict):
-                    yield StreamEvent.model_validate(chunk)
+            async with aclosing(compiled.astream(state, config=config, stream_mode="custom")) as stream:
+                async for chunk in stream:
+                    if isinstance(chunk, StreamEvent):
+                        yield chunk
+                    elif isinstance(chunk, dict):
+                        yield StreamEvent.model_validate(chunk)
         except Exception:  # noqa: BLE001
             logger.exception("LangGraph stream execution failed")
             trace = ["[graph_error] 本轮图执行失败，已输出保守兜底回答。"]
@@ -190,18 +270,37 @@ class AgentGraphRunner:
         top_k: int,
         thread_id: str,
         run_id: str,
+        started: float,
     ) -> AsyncIterator[StreamEvent]:
-        subtasks, decompose_versions, decompose_metrics = await decompose_compound_async(
-            self.agent,
-            query,
-            history,
+        budget = (
+            settings.knowledge_turn_budget_seconds
+            if _is_knowledge_intent(match_intent_by_keywords(query) or "")
+            else settings.turn_budget_seconds
         )
+        deadline = started + budget
+        try:
+            async with asyncio.timeout(max(0, deadline - time.monotonic())):
+                subtasks, decompose_versions, decompose_metrics = await decompose_compound_async(
+                    self.agent, query, history,
+                )
+        except TimeoutError:
+            async for event in self._astream_single(
+                user_id, asset_id, query, history, top_k, thread_id, run_id, turn_started_at=started,
+            ):
+                yield event
+            return
+        if any(_is_knowledge_intent(task.intent) for task in subtasks):
+            budget = settings.knowledge_turn_budget_seconds
+            deadline = started + budget
         yield StreamEvent(type="plan", content=summarize_subtasks(subtasks))
         scratchpad: dict[str, Any] = {}
         answers: list[AgentAnswer] = []
         cards: list[dict[str, Any]] = []
         trace = [f"[compound_plan] {summarize_subtasks(subtasks)}"]
         for index, task in enumerate(subtasks, start=1):
+            if time.monotonic() >= deadline:
+                trace.append("[budget] 剩余子任务因预算用尽而跳过。")
+                break
             task_query = _hydrate_subtask_query(task, scratchpad)
             final: StreamEvent | None = None
             async for event in self._astream_single(
@@ -212,6 +311,9 @@ class AgentGraphRunner:
                 top_k,
                 f"{thread_id}:sub:{index}",
                 f"{run_id}:sub:{index}" if run_id else "",
+                dialogue_thread_id=thread_id,
+                turn_started_at=started,
+                turn_budget_limit=budget,
             ):
                 if event.type == "final":
                     final = event
@@ -225,12 +327,15 @@ class AgentGraphRunner:
             _update_compound_scratchpad(scratchpad, task, answer, index, len(subtasks))
             trace.append(f"[compound_step] {index}/{len(subtasks)} {task.intent}: {task_query}")
             trace.extend(f"[subtask {index}] {line}" for line in answer.agent_trace)
-        text, synth_versions, synth_metrics = await _compose_compound_answer_async(
-            self.agent,
-            query,
-            subtasks,
-            answers,
-        )
+        try:
+            remaining = max(0, deadline - time.monotonic())
+            async with asyncio.timeout(remaining):
+                text, synth_versions, synth_metrics = await _compose_compound_answer_async(
+                    self.agent, query, subtasks, answers,
+                )
+        except TimeoutError:
+            text = "\n\n".join(answer.answer for answer in answers) or "本轮时间预算已用完，请重试。"
+            synth_versions, synth_metrics = {}, empty_runtime_metrics()
         last = answers[-1] if answers else AgentAnswer(answer="", evidences=[])
         versions = _merge_prompt_version_maps(
             *[answer.prompt_versions for answer in answers],
@@ -311,14 +416,44 @@ def _try_build_streaming_langgraph(agent: AudioVisualAgent, checkpointer=None):
                 pass
         return state
 
+    async def image_recommend(state: AgentState) -> AgentState:
+        writer = get_stream_writer()
+
+        def emit(event: StreamEvent) -> None:
+            writer(event.model_dump(mode="json"))
+
+        answer = await run_image_turn(agent, state, emit)
+        payload = answer.model_dump(mode="json")
+        payload["cards"] = [song_card(track) for track in answer.recommended_tracks]
+        emit(StreamEvent(type="final", content=answer.answer, payload=payload))
+        return {"answer": answer}
+
     graph = StateGraph(AgentState)
     graph.add_node("load_context", emitting(load_context))
     graph.add_node("plan_intent", emitting_async(plan_intent_async))
-    graph.add_node("execute_tools", emitting_async(execute_tools_async))
+    async def execute(state: AgentState) -> AgentState:
+        writer = get_stream_writer()
+        before = len(state.get("events", []))
+
+        def emit(event: StreamEvent) -> None:
+            writer(event.model_dump(mode="json"))
+
+        output = await execute_tools_async(agent, state, emit_progress=emit)
+        for event in output.get("events", [])[before:]:
+            if event.type not in {"tool_result", "library_preview"}:
+                emit(event)
+        return output
+
+    graph.add_node("execute_tools", execute)
     graph.add_node("web_fallback", emitting_async(web_fallback_async))
     graph.add_node("reflect", emitting_async(reflect_async))
     graph.add_node("finalize", stream_finalize)
-    graph.set_entry_point("load_context")
+    graph.add_node("image_recommend", image_recommend)
+    graph.set_conditional_entry_point(
+        lambda state: "image_recommend" if state.get("image_turn") else "load_context",
+        {"image_recommend": "image_recommend", "load_context": "load_context"},
+    )
+    graph.add_edge("image_recommend", END)
     graph.add_edge("load_context", "plan_intent")
     graph.add_edge("plan_intent", "execute_tools")
     graph.add_conditional_edges(

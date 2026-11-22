@@ -161,8 +161,8 @@ def test_collect_candidates_online_only_drops_local_and_listened(agent, monkeypa
     svc = agent._taste_experiment_service()
 
     local_track = ExternalTrack(external_id="loc-1", title="本地曲", artist="A", source="local")
-    listened = ExternalTrack(external_id="netease-listened", title="听过的", artist="B", source="netease")
-    fresh = ExternalTrack(external_id="netease-fresh", title="全新曲", artist="C", source="netease")
+    listened = ExternalTrack(external_id="30901", title="听过的", artist="B", source="netease")
+    fresh = ExternalTrack(external_id="30902", title="全新曲", artist="C", source="netease")
 
     # 库内推荐路径若被调用就报错——online_only 必须完全跳过它。
     def _boom(*args, **kwargs):
@@ -181,10 +181,39 @@ def test_collect_candidates_online_only_drops_local_and_listened(agent, monkeypa
     monkeypatch.setattr(svc, "_rerank_tracks", lambda u, q, tracks, top_k: [(t, _BD()) for t in tracks])
 
     # 标记 "听过的" 已在听歌历史里
-    agent.memory.record_listen("explore-user", "netease-listened", 200, True, context="player")
+    agent.memory.record_listen("explore-user", "30901", 200, True, context="player")
 
     result = svc.collect_taste_candidates("explore-user", ["neo soul"], 9, online_only=True)
     titles = {getattr(t, "title", "") for t, *_ in result}
     assert "全新曲" in titles
     assert "本地曲" not in titles  # source==local 被剔除
     assert "听过的" not in titles  # 已在 listening_history 被剔除
+
+
+def test_explore_uses_prompt_and_keeps_refresh_inside_direction(agent, monkeypatch):
+    service = agent._taste_experiment_service()
+    prompt = "日语爵士钢琴纯音乐，不要摇滚"
+    first = ExternalTrack(external_id="1001", title="Early Summer", artist="福居良", source="netease")
+    second = ExternalTrack(external_id="1002", title="I Want to Talk About You", artist="Ryo Fukui", source="netease")
+    off_topic = ExternalTrack(external_id="1003", title="Blinding Lights", artist="The Weeknd", source="netease")
+    in_library = ExternalTrack(external_id="1004", title="Scenery", artist="福居良", source="netease")
+    recognized_cover = ExternalTrack(external_id="1005", title="Scenery", artist="福居良", source="netease")
+    fetched = [first, off_topic, recognized_cover]
+    searches = []
+
+    def search(query, **kwargs):
+        searches.append((query, kwargs))
+        return fetched
+
+    monkeypatch.setattr(service, "_list_assets", lambda: [in_library])
+    monkeypatch.setattr(service, "_search_web_music", search)
+    exp = agent.generate_taste_experiment("explore", prompt, online_only=True)
+    assert [item.track.source_id for segment in exp.segments for item in segment.tracks] == ["1001"]
+    assert any(query == "福居良" and kwargs["catalog_only"] for query, kwargs in searches)
+
+    fetched.append(second)
+    exp = agent.regenerate_taste_experiment_bucket("explore", exp.experiment_id, "stretch")
+    assert [track.track.source_id for track in exp.segments[1].tracks] == ["1002"]
+    exp = agent.regenerate_taste_experiment_bucket("explore", exp.experiment_id, "stretch")
+    assert [track.track.source_id for track in exp.segments[1].tracks] == ["1002"]
+    assert "已保留" in exp.result_summary

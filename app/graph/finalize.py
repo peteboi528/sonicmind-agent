@@ -5,6 +5,7 @@ nodes.py 仅作为门面 re-export 本模块的符号，业务逻辑收敛于此
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -23,8 +24,11 @@ from app.graph._shared import (
 )
 from app.graph.budget import _latency_budget_summary
 from app.graph.continuation import _persist_dialogue_state
+from app.intents import is_playlist_definition
+from app.llm.mock import MockLLM
 from app.llm.observability import format_runtime_metrics
 from app.models import AgentAnswer, AgentPlan, StreamEvent
+from app.reply_language import reply_language_name, reply_text, split_reply_request
 from app.tools.contracts import ToolStatus
 from app.tools.registry import get_handler
 
@@ -81,11 +85,17 @@ async def _finalize_tail_async(
         from app.graph.nodes import guard_answer
 
         answer_text, removed = guard_answer(answer_text, known)
-    memory_updated = await agent.memory.auto_learn_from_turn_async(
-        state["user_id"],
-        state["query"],
-        state.get("results", []),
-    )
+    memory_updated = False
+    deadline = (state.get("context") or {}).get("turn_deadline_at")
+    remaining = max(0, deadline - time.monotonic()) if deadline else None
+    if remaining is None or remaining > 0:
+        try:
+            async with asyncio.timeout(remaining):
+                memory_updated = await agent.memory.auto_learn_from_turn_async(
+                    state["user_id"], state["query"], state.get("results", []),
+                )
+        except TimeoutError:
+            logger.info("Skipped memory update after turn deadline")
     goal = None
     if state["plan"].intent != "chat":
         goal = agent.memory.ensure_goal(state["user_id"], state["query"])
@@ -161,32 +171,34 @@ async def finalize_stream_async(agent: AudioVisualAgent, state: AgentState):
         context = state.get("context") or {}
         parts: list[str] = []
         deadline_at = context.get("deadline_at")
-        # 普通请求将 execution deadline 留给最终回答；一旦前序耗尽这段预算，
-        # 直接走已有确定性组装，保证本轮仍有标准 final 事件。
-        use_deterministic = bool(
-            deadline_at and not _is_knowledge_intent(state["plan"].intent) and time.monotonic() >= float(deadline_at)
-        )
+        query, results, plan = state["query"], state.get("results", []), state["plan"]
+        turn_deadline = context.get("turn_deadline_at")
+        remaining = max(0, turn_deadline - time.monotonic()) if turn_deadline else None
+        use_deterministic = bool(deadline_at and time.monotonic() >= deadline_at)
+        if not use_deterministic:
+            try:
+                async with asyncio.timeout(remaining):
+                    async for delta in compose_answer_stream_async(
+                        query, results, plan, agent=agent,
+                        memory_query=context.get("memory_query", ""),
+                        history_text=context.get("history_text", ""),
+                        user_id=state["user_id"],
+                    ):
+                        if delta:
+                            parts.append(delta)
+                            yield StreamEvent(type="token", content=delta)
+            except TimeoutError:
+                use_deterministic = True
         if use_deterministic:
+            already_streamed = bool(parts)
             state = {
                 **state,
-                "trace": [*state.get("trace", []), "[budget] 最终回答预留时间已到，使用确定性组装。"],
+                "trace": [*state.get("trace", []), "[budget] 答案整理使用确定性组装。"],
             }
-            chunks = _chunk_for_stream(_compose_deterministic_answer(state.get("results", []), state["plan"]))
-            for delta in chunks:
-                parts.append(delta)
-                yield StreamEvent(type="token", content=delta)
-        else:
-            async for delta in compose_answer_stream_async(
-                state["query"],
-                state.get("results", []),
-                state["plan"],
-                agent=agent,
-                memory_query=context.get("memory_query", ""),
-                history_text=context.get("history_text", ""),
-                user_id=state["user_id"],
-            ):
-                if delta:
-                    parts.append(delta)
+            # The final SSE event replaces any partial preview emitted before timeout.
+            parts = [part async for part in compose_answer_stream_async(query, results, plan)]
+            if not already_streamed:
+                for delta in parts:
                     yield StreamEvent(type="token", content=delta)
         answer, final_payload, _trace = await _finalize_tail_async(agent, state, "".join(parts))
         yield StreamEvent(type="final", content=answer.answer, payload=final_payload)
@@ -223,8 +235,13 @@ def _finalize_fallback(state: AgentState) -> AgentState:
         *state.get("trace", []),
         "[final_error] finalize 失败，已输出保守兜底回答。",
     ]
+    language = getattr(state.get("plan"), "response_language", None) or split_reply_request(query)[1] or "zh"
     answer_text = (
-        f"这轮我已经尽量处理了“{query}”，但最后整理答案时遇到错误。你可以先查看上方候选结果，我没有编造额外歌曲。"
+        reply_text("error", language)
+        if language != "zh"
+        else (
+            f"这轮我已经尽量处理了“{query}”，但最后整理答案时遇到错误。你可以先查看上方候选结果，我没有编造额外歌曲。"
+        )
     )
     answer = AgentAnswer(
         answer=answer_text,
@@ -328,6 +345,8 @@ def _trace_summary(
     artist_cards = 0
     sample_cards = 0
     compare_cards = 0
+    library_match_count = 0
+    dossier_delivered = False
     for result in results:
         if result.get("type") == "taste_experiment":
             exp = result.get("experiment")
@@ -353,6 +372,8 @@ def _trace_summary(
                 )
         elif result.get("type") in {"music_dossier", "music_compare"}:
             dossier = result.get("dossier") or {}
+            dossier_delivered = dossier_delivered or bool(dossier)
+            library_match_count += len(dossier.get("library_matches") or [])
             for citation in dossier.get("citations") or []:
                 if citation.get("source"):
                     sources.add(citation.get("source"))
@@ -407,6 +428,8 @@ def _trace_summary(
     empty = [tool for tool, status in tool_statuses.items() if status == "empty"]
     if not planned:
         execution_state = "not_planned"
+    elif dossier_delivered and (errors or empty):
+        execution_state = "partial"
     elif errors:
         execution_state = "error"
     elif empty:
@@ -418,6 +441,7 @@ def _trace_summary(
     latency_budget = _latency_budget_summary(context or {}, outcomes or [], results)
     return {
         "intent": plan.intent,
+        "response_language": plan.response_language,
         "strategy": plan.strategy,
         "tools": completed,
         "tools_planned": planned,
@@ -426,6 +450,8 @@ def _trace_summary(
         "tool_errors": errors,
         "tool_error_details": error_details,
         "empty_results": empty,
+        "library_match_count": library_match_count,
+        "tool_candidate_count": sum(int(item.get("card_count") or 0) for item in outcomes or []),
         "tool_execution_state": execution_state,
         "sources": sorted(sources),
         "used_fallback": any("fallback" in line.lower() for line in trace),
@@ -607,7 +633,19 @@ async def compose_answer_stream_async(
 
     llm = select_llm(agent, "default") if agent is not None else None
 
+    clean_query, requested_language = split_reply_request(query)
+    language = plan.response_language or requested_language or "zh"
+
     async def stream_llm(prompt: str, fallback: str, temp: float = settings.dialog_temperature):
+        # The offline model uses fixed Chinese templates. Localized replies use real result counts.
+        if language != "zh" and isinstance(llm, MockLLM):
+            yield fallback
+            return
+        prompt += (
+            "\n请用中文回复，保留专有名称。"
+            if language == "zh"
+            else f"\nWrite your reply in {reply_language_name(language)}. Preserve proper names as provided."
+        )
         got = False
         if llm is not None:
             try:
@@ -634,14 +672,19 @@ async def compose_answer_stream_async(
             yield piece
         return
     if intent == "chat":
+        if is_playlist_definition(clean_query):
+            yield reply_text("playlist_definition", language)
+            return
         async for piece in stream_llm(
-            _chat_prompt(query, agent, history_text, user_id),
-            "你好，我在。有什么音乐上的事可以帮你?",
+            _chat_prompt(clean_query or query, agent, history_text, user_id),
+            reply_text("greeting", language),
         ):
             yield piece
         return
     if intent == "discuss":
-        prompt, refuse = _discussion_prompt(query, _collect_tracks(results), history_text)
+        prompt, refuse = _discussion_prompt(clean_query or query, _collect_tracks(results), history_text)
+        if language != "zh":
+            refuse = reply_text("no_info", language)
         if prompt is None:
             yield refuse
             return
@@ -651,22 +694,38 @@ async def compose_answer_stream_async(
     if intent == "video":
         tracks = _collect_tracks(results)
         if not tracks:
-            yield "这轮没有搜到视频结果。"
+            yield reply_text("no_video", language)
             return
-        prompt, fallback = _video_intro_prompt(query, tracks, history_text)
+        prompt, fallback = _video_intro_prompt(clean_query or query, tracks, history_text)
         async for piece in stream_llm(prompt, fallback):
             yield piece
         yield "\n" + "\n".join(_video_list_lines(tracks))
         return
     if intent == "artist_info":
-        prompt, fallback, source_urls = _artist_info_prompt(query, results, history_text)
+        prompt, fallback, source_urls = _artist_info_prompt(clean_query or query, results, history_text)
         if prompt is None:
-            yield "抱歉，暂时没找到相关信息。"
+            yield reply_text("no_info", language)
             return
         async for piece in stream_llm(prompt, fallback):
             yield piece
         if source_urls:
             yield "\n\n📎 参考来源：\n" + "\n".join(f"- {url}" for url in source_urls[:3])
+        return
+    if language != "zh" and intent == "taste":
+        preferences = agent.memory.get_memory(user_id).structured_preferences if agent is not None else []
+        items = ", ".join(item.text for item in preferences if item.source != "from_search_result")
+        yield reply_text("profile", language, items=items) if items else reply_text("no_profile", language)
+        return
+    if language != "zh" and intent == "artist_albums":
+        albums = [
+            album
+            for result in results
+            if result.get("type") == "artist_albums"
+            for album in (result.get("albums") or [])
+        ]
+        yield reply_text("albums", language, count=len(albums)) if albums else reply_text("no_info", language)
+        if albums:
+            yield "\n" + "\n".join(f"{i}. 《{a['name']}》" for i, a in enumerate(albums, 1) if a.get("name"))
         return
     if intent in {
         "artist_albums",
@@ -690,11 +749,17 @@ async def compose_answer_stream_async(
 
     tracks = _select_listed_tracks(results, plan) or _collect_tracks(results)
     if not tracks:
-        yield "这轮没有拿到可追溯的音乐候选；我不会用未核实歌名硬凑结果。"
+        yield reply_text("no_tracks", language)
         return
     tracks = tracks[: plan.target_count or (30 if intent == "playlist" else 12)]
     shortfall = bool(plan.target_count and len(tracks) < plan.target_count)
-    prompt, fallback = _intro_prompt(query, tracks, plan, memory_query, shortfall, history_text)
+    prompt, fallback = _intro_prompt(clean_query or query, tracks, plan, memory_query, shortfall, history_text)
+    if language != "zh":
+        fallback = (
+            reply_text("shortfall", language, count=len(tracks), target=plan.target_count)
+            if shortfall
+            else reply_text("intro", language, count=len(tracks))
+        )
     async for piece in stream_llm(prompt, fallback):
         yield piece
     if intent == "playlist":
@@ -776,7 +841,7 @@ def _chat_prompt(query: str, agent: AudioVisualAgent | None, history_text: str =
         f"{history_hint}"
         f"{taste_hint}"
         f"用户说：{query}\n\n"
-        "你是用户的私人音乐搭子，用中文自然、友好地回复。"
+        "你是用户的私人音乐搭子，自然、友好地回复。"
         "如果用户只是在打招呼，友好回应并提示你可以帮他做什么音乐相关的事。"
         "如果用户提到了某个歌手/歌曲/风格，可以结合用户偏好简短聊聊你的看法。"
         "不要每次用同一句话，语气要自然口语化。50-100字。\n"
@@ -809,7 +874,7 @@ def _discussion_prompt(
         f"{history_hint}"
         f"{track_hint}"
         f"用户问：{query}\n\n"
-        "请用中文自然地回答，像一个懂音乐的朋友在聊天。\n"
+        "请自然地回答，像一个懂音乐的朋友在聊天。\n"
         "严格规则：\n"
         "1. 只讨论上面列出的真实曲目和你能确认的事实\n"
         "2. 不要编造专辑评价、歌曲细节、发行时间、排名、销量等你不确定的信息\n"
@@ -1075,7 +1140,7 @@ def _artist_info_prompt(
         f"{history_hint}"
         f"用户问：{query}\n\n"
         f"以下是搜索引擎返回的真实资料：\n{search_context}\n\n"
-        "请用中文基于以上真实资料写一段介绍，像一个懂音乐的朋友在讲解（200-400字）。\n"
+        "请基于以上真实资料写一段介绍，像一个懂音乐的朋友在讲解（200-400字）。\n"
         "严格规则：\n"
         '1. 只使用上面列出的真实信息，不确定的说"我不太确定"\n'
         "2. 不要编造排名、销量、具体日期等未提及的数据\n"

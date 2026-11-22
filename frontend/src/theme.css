@@ -280,6 +280,8 @@ body::before {
   .tab-content.chat-mode { padding: 0; }
   .top-bar { padding: 0 12px; gap: 8px; }
   .brand-name { display: none; }
-  .tab-pills { gap: 0; }
-  .pill { width: 34px; height: 34px; }
+  .top-icon { flex: 0 0 36px; }
+  .tab-pills { min-width: 0; overflow-x: auto; scrollbar-width: none; }
+  .pill { flex: 0 0 auto; min-height: 34px; padding: 6px 8px; }
+  .pill-icon { flex: 0 0 16px; }
 }

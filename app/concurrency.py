@@ -12,22 +12,17 @@
 - 进程级**共享有界** ThreadPoolExecutor + BoundedSemaphore(W)，W=concurrency_max_workers。
 - 旧实现每次 run_parallel 新建 len(tasks) 个非守护线程，超时后 shutdown(wait=False) 仅返回、
   已进入阻塞 syscall 的线程无法取消，长跑会逐渐积压线程与连接。改为共享池后总量被 W 封顶。
-- **caller-runs 防嵌套死锁**：run_parallel 存在嵌套调用（变体并行 → search_web_music →
-  netease 多端点并行）。共享池饱和时若仍排队，内层任务会因外层 worker 占满而饿死（退化为
-  超时空结果）。故 sem.acquire(blocking=False) 失败时，该 thunk 在调用方线程内联执行——
-  外层 worker 自行完成工作，向前推进，永不死锁。
-- 超时未完成的 thunk 仍占用槽位直到其自身 socket 超时（netease _SEARCH_TIMEOUT / httpx
-  per-request Timeout / AsyncSourceTransport 8s 均已存在且有界）——「请求返回 ≠ 后台停止」
-  的诚实边界，但被 W 封顶，积压有上界。
+- 顶层调用的排队时间计入批次预算。只有池内 worker 的子任务可以在饱和时内联执行。
+- 已开始的同步 I/O 直到自身超时才退出。在它退出前保留对应槽位。
 """
 
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from collections.abc import Callable
 from concurrent.futures import ALL_COMPLETED, Future, ThreadPoolExecutor, wait
-from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -37,6 +32,7 @@ T = TypeVar("T")
 _SHARED_POOL: ThreadPoolExecutor | None = None
 _SHARED_SEM: threading.BoundedSemaphore | None = None
 _INIT_LOCK = threading.Lock()
+_WORKER = threading.local()
 
 
 def _shared_executor() -> tuple[ThreadPoolExecutor, threading.BoundedSemaphore]:
@@ -86,36 +82,57 @@ def run_parallel(
     if not tasks:
         return []
     results: list[Any] = [default] * len(tasks)
+    deadline = time.monotonic() + max(0.0, timeout)
+    inherited_deadline = getattr(_WORKER, "deadline", None)
+    nested = inherited_deadline is not None
+    if nested:
+        deadline = min(deadline, inherited_deadline)
     pool, sem = _shared_executor()
     future_to_idx: dict[Future, tuple[int, str]] = {}
-    for idx, (label, thunk) in enumerate(tasks):
-        if sem.acquire(blocking=False):
-            # 拿到槽位 → 提交到池；完成时释放槽位（含超时/异常路径，_runner 的 finally 兜底）。
-            def _runner(t: Callable[[], T] = thunk) -> T:
-                try:
-                    return t()
-                finally:
-                    sem.release()
 
-            fut = pool.submit(_runner)
-            future_to_idx[fut] = (idx, label)
-        else:
-            # 池饱和 → 调用方内联执行。嵌套场景下外层 worker 自行完成该 thunk，
-            # 不再排队等空闲 worker，向前推进，避免内层任务饿死。
-            logger.debug("并发池饱和，任务 %s 改内联执行", label)
+    def run(thunk: Callable[[], T]) -> T | Any:
+        previous = getattr(_WORKER, "deadline", None)
+        _WORKER.deadline = deadline
+        try:
+            return thunk() if time.monotonic() < deadline else default
+        finally:
+            _WORKER.deadline = previous
+
+    def release(_future: Future) -> None:
+        sem.release()
+
+    for idx, (label, thunk) in enumerate(tasks):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        acquired = sem.acquire(blocking=False) if nested else sem.acquire(timeout=remaining)
+        if acquired:
             try:
-                results[idx] = thunk()
-            except (FuturesTimeout, Exception):
+                future = pool.submit(run, thunk)
+            except RuntimeError:
+                sem.release()
+                logger.debug("并发池已关闭，任务 %s 取默认值", label)
+                break
+            future.add_done_callback(release)
+            future_to_idx[future] = (idx, label)
+        elif nested:
+            # Pool workers may run child work inline to avoid waiting for themselves.
+            try:
+                results[idx] = run(thunk)
+            except Exception:
                 logger.debug("内联任务 %s 失败，取默认值", label, exc_info=True)
+        else:
+            logger.debug("并发池没有在预算内释放槽位，任务 %s 取默认值", label)
+            break
     if future_to_idx:
-        done, not_done = wait(future_to_idx, timeout=timeout, return_when=ALL_COMPLETED)
-        for fut, (idx, label) in future_to_idx.items():
-            if fut in not_done:
-                fut.cancel()
+        _, not_done = wait(future_to_idx, timeout=max(0.0, deadline - time.monotonic()), return_when=ALL_COMPLETED)
+        for future, (idx, label) in future_to_idx.items():
+            if future in not_done:
+                future.cancel()
                 logger.debug("并发任务 %s 超时（%.1fs），取默认值", label, timeout)
                 continue
             try:
-                results[idx] = fut.result(timeout=0)
-            except (FuturesTimeout, Exception):
+                results[idx] = future.result()
+            except Exception:
                 logger.debug("并发任务 %s 失败，取默认值", label, exc_info=True)
     return results

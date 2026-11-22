@@ -14,7 +14,7 @@ from app.tools.trace import LocalTraceStore
 
 _KNOWLEDGE_TOOL_LIMITS = {
     "resolve_music_entity": "knowledge_source_timeout_seconds",
-    "music_metadata_lookup": "knowledge_source_timeout_seconds",
+    "music_metadata_lookup": "knowledge_metadata_timeout_seconds",
     "review_search": "knowledge_review_timeout_seconds",
     "build_music_dossier": "knowledge_dossier_timeout_seconds",
     "sample_relation_search": "knowledge_review_timeout_seconds",
@@ -84,65 +84,114 @@ class ToolRuntime:
             )
             return self._finish(spec, context, span_id, started, started_at, retries, result)
 
+        deadline = started + timeout_seconds
+        if context.deadline_at is not None:
+            deadline = min(deadline, context.deadline_at)
+        handler_context = context.model_copy(update={"deadline_at": deadline})
         semaphore = self._semaphores.setdefault(spec.name, asyncio.Semaphore(spec.max_concurrency))
         attempts = spec.max_retries + 1 if spec.idempotent and spec.risk == ToolRisk.READ else 1
-        async with semaphore:
-            for attempt in range(attempts):
-                try:
-                    if inspect.iscoroutinefunction(handler):
-                        value = await asyncio.wait_for(handler(arguments, context), timeout=timeout_seconds)
-                    else:
-                        value = await asyncio.wait_for(
-                            asyncio.to_thread(handler, arguments, context), timeout=timeout_seconds
+        acquired_at: float | None = None
+        pending: asyncio.Task | None = None
+        phase = "queue"
+
+        def release_after_worker(task: asyncio.Task) -> None:
+            semaphore.release()
+            if not task.cancelled():
+                task.exception()
+
+        def run_sync() -> ToolResult:
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            return handler(arguments, handler_context)
+
+        try:
+            if deadline <= time.monotonic():
+                raise TimeoutError
+            async with asyncio.timeout(deadline - time.monotonic()):
+                await semaphore.acquire()
+                acquired_at = time.monotonic()
+                for attempt in range(attempts):
+                    phase = "execution"
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError
+                    try:
+                        if inspect.iscoroutinefunction(handler):
+                            value = await handler(arguments, handler_context)
+                        else:
+                            pending = asyncio.create_task(asyncio.to_thread(run_sync))
+                            value = await asyncio.shield(pending)
+                        result = (
+                            value
+                            if isinstance(value, ToolResult)
+                            else ToolResult(tool=spec.name, status=ToolStatus.OK, data=value or {})
                         )
-                    result = (
-                        value
-                        if isinstance(value, ToolResult)
-                        else ToolResult(tool=spec.name, status=ToolStatus.OK, data=value or {})
-                    )
-                    return self._finish(spec, context, span_id, started, started_at, retries, result)
-                except asyncio.CancelledError:
-                    result = ToolResult(tool=spec.name, status=ToolStatus.CANCELLED, summary="工具调用已取消。")
-                    return self._finish(spec, context, span_id, started, started_at, retries, result)
-                except TimeoutError:
-                    if spec.name in _KNOWLEDGE_TOOL_LIMITS:
-                        result = ToolResult(
-                            tool=spec.name,
-                            status=ToolStatus.EMPTY,
-                            summary=f"{spec.name} 在知识链路预算内未返回，已降级继续。",
-                            data={"type": spec.name, "timed_out_tools": [spec.name]},
-                            metrics={"deadline_skipped": False, "timeout_as_degraded": True},
-                        )
-                        return self._finish(spec, context, span_id, started, started_at, retries, result)
-                    result = ToolResult(
-                        tool=spec.name,
-                        status=ToolStatus.ERROR,
-                        error=ToolError(
-                            kind="timeout",
-                            message=f"{spec.name} timed out after {timeout_seconds:.1f}s",
-                            retryable=False,
-                        ),
-                    )
-                    return self._finish(spec, context, span_id, started, started_at, retries, result)
-                except (ConnectionError, OSError) as exc:
-                    if attempt + 1 < attempts:
+                        break
+                    except TimeoutError:
+                        raise
+                    except (ConnectionError, OSError) as exc:
+                        delay = min(0.2 * (2**attempt), 1.0)
+                        if attempt + 1 >= attempts or time.monotonic() + delay >= deadline:
+                            result = ToolResult(
+                                tool=spec.name,
+                                status=ToolStatus.ERROR,
+                                error=ToolError(kind=type(exc).__name__, message=str(exc), retryable=True),
+                            )
+                            break
+                        phase = "retry_backoff"
                         retries += 1
-                        await asyncio.sleep(min(0.2 * (2**attempt), 1.0))
-                        continue
-                    result = ToolResult(
-                        tool=spec.name,
-                        status=ToolStatus.ERROR,
-                        error=ToolError(kind=type(exc).__name__, message=str(exc), retryable=True),
-                    )
-                    return self._finish(spec, context, span_id, started, started_at, retries, result)
-                except Exception as exc:  # noqa: BLE001
-                    result = ToolResult(
-                        tool=spec.name,
-                        status=ToolStatus.ERROR,
-                        error=ToolError(kind=type(exc).__name__, message=str(exc)),
-                    )
-                    return self._finish(spec, context, span_id, started, started_at, retries, result)
-        raise AssertionError("unreachable")
+                        await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            self._finish(
+                spec, context, span_id, started, started_at, retries,
+                ToolResult(
+                    tool=spec.name, status=ToolStatus.CANCELLED,
+                    metrics={
+                        "cancel_phase": phase,
+                        "queue_wait_ms": round(((acquired_at or time.monotonic()) - started) * 1000, 2),
+                        "worker_still_running": bool(pending and not pending.done()),
+                    },
+                ),
+            )
+            raise
+        except TimeoutError:
+            metrics = {"timeout_phase": phase, "worker_still_running": bool(pending and not pending.done())}
+            if spec.name in _KNOWLEDGE_TOOL_LIMITS:
+                result = ToolResult(
+                    tool=spec.name,
+                    status=ToolStatus.EMPTY,
+                    summary=f"{spec.name} 在知识链路预算内未返回，已降级继续。",
+                    data={"type": spec.name, "timed_out_tools": [spec.name]},
+                    metrics={**metrics, "deadline_skipped": False, "timeout_as_degraded": True},
+                )
+            else:
+                result = ToolResult(
+                    tool=spec.name,
+                    status=ToolStatus.ERROR,
+                    error=ToolError(
+                        kind="timeout", message=f"{spec.name} timed out in {phase} after {timeout_seconds:.1f}s"
+                    ),
+                    metrics=metrics,
+                )
+        except Exception as exc:  # noqa: BLE001
+            result = ToolResult(
+                tool=spec.name,
+                status=ToolStatus.ERROR,
+                error=ToolError(kind=type(exc).__name__, message=str(exc)),
+            )
+        finally:
+            if acquired_at is not None:
+                if pending is None:
+                    semaphore.release()
+                else:
+                    # A timed-out sync call holds its permit until its thread exits.
+                    pending.add_done_callback(release_after_worker)
+        result.metrics.update(
+            {
+                "queue_wait_ms": round(((acquired_at or time.monotonic()) - started) * 1000, 2),
+                "budget_ms": round(timeout_seconds * 1000, 2),
+            }
+        )
+        return self._finish(spec, context, span_id, started, started_at, retries, result)
 
     async def close(self) -> None:
         return None
@@ -163,7 +212,7 @@ class ToolRuntime:
         if context.deadline_at:
             remaining = max(0.0, context.deadline_at - time.monotonic())
             timeout = min(timeout, remaining)
-        skipped = (
+        skipped = (remaining is not None and remaining <= 0) or (
             spec.name in _KNOWLEDGE_TOOL_LIMITS
             and spec.name not in {"build_music_dossier", "build_sample_dossier"}
             and remaining is not None
@@ -199,6 +248,11 @@ class ToolRuntime:
                     "risk": spec.risk.value,
                     "source": spec.source,
                     "cards": len(result.cards),
+                    "queue_wait_ms": result.metrics.get("queue_wait_ms"),
+                    "budget_ms": result.metrics.get("budget_ms"),
+                    "timeout_phase": result.metrics.get("timeout_phase"),
+                    "cancel_phase": result.metrics.get("cancel_phase"),
+                    "worker_still_running": result.metrics.get("worker_still_running"),
                     "error_kind": result.error.kind if result.error else "",
                     "error_message": result.error.message if result.error else "",
                 },

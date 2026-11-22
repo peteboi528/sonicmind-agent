@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, nextTick, watch, onMounted } from "vue";
+import { ref, reactive, nextTick, watch, onMounted, onBeforeUnmount } from "vue";
 import { store } from "../store.js";
 import { api } from "../api.js";
 import SongCard from "./SongCard.vue";
@@ -14,6 +14,9 @@ const isStreaming = ref(false);
 const thinking = ref("");
 const scroller = ref(null);
 const savedAlbumIds = ref(new Set());
+const pendingImage = ref(null);
+const imageEnabled = ref(false);
+let sentPreview = null;
 const history = [];
 let msgId = 0;
 let abortController = null;
@@ -93,6 +96,7 @@ function saveToStorage() {
         artists: m.artists || [],
         dossier: m.dossier || null,
         sampleDossier: m.sampleDossier || null,
+        libraryPreview: m.libraryPreview || [],
         traceSummary: m.traceSummary || null,
         tasteExperiment: m.tasteExperiment || null,
         pendingActions: m.pendingActions || [],
@@ -176,6 +180,8 @@ async function restoreLatestBackendThread() {
 }
 
 function clearHistory() {
+  cancelStream();
+  discardPreview();
   messages.value = [];
   history.length = 0;
   msgId = 0;
@@ -290,6 +296,7 @@ onMounted(async () => {
   const restoredLocal = loadFromStorage();
   if (!restoredLocal) await restoreLatestBackendThread();
   loadSavedAlbumIds();
+  api.imageTurnEnabled().then(enabled => { imageEnabled.value = enabled; }).catch(() => {});
   scrollDown();
 });
 
@@ -298,7 +305,8 @@ onMounted(async () => {
 watch(() => store.navigate?.nonce, async () => {
   const nav = store.navigate;
   if (!nav || nav.tab !== "chat" || !nav.threadId) return;
-  if (isStreaming.value && abortController) abortController.abort();
+  cancelStream();
+  discardPreview();
   try {
     const thread = await api.getChatThread(store.userId, nav.threadId);
     await loadThread(thread);
@@ -308,18 +316,45 @@ watch(() => store.navigate?.nonce, async () => {
 // ── Send ──
 const fileInput = ref(null);
 
-async function send(text) {
-  const msg = (text ?? input.value).trim();
-  if (!msg || isStreaming.value) return;
-  input.value = "";
-  messages.value.push({ id: ++msgId, role: "user", text: msg, cards: [], albums: [], tasteExperiment: null });
-  history.push({ role: "user", content: msg });
-  await streamTurn(msg);
+function clearPendingImage() {
+  if (pendingImage.value) URL.revokeObjectURL(pendingImage.value.preview);
+  pendingImage.value = null;
 }
 
-// 流式一轮的核心：发 message → 收 SSE → 维护 botMsg → 存历史。
-// 从 send 里抽出来，让「上传封面识别」也能复用：识别拿到 query 后直接 streamTurn(query)，
-// 于是整条 album_deep_dive 知识链路原样复用，前端不必重复实现流式。
+function discardPreview() {
+  clearPendingImage();
+  if (sentPreview) URL.revokeObjectURL(sentPreview);
+  sentPreview = null;
+}
+
+onBeforeUnmount(() => {
+  cancelStream();
+  discardPreview();
+});
+
+async function send(text) {
+  const msg = (text ?? input.value).trim();
+  const attachment = text == null ? pendingImage.value : null;
+  if ((!msg && !attachment) || isStreaming.value) return;
+  input.value = "";
+  if (attachment) {
+    if (sentPreview) {
+      URL.revokeObjectURL(sentPreview);
+      const previous = messages.value.find(item => item.image === sentPreview);
+      if (previous) previous.image = "";
+    }
+    sentPreview = attachment.preview;
+    pendingImage.value = null;
+  }
+  const userMessage = msg || "[音乐图片]";
+  messages.value.push({
+    id: ++msgId, role: "user", text: userMessage, cards: [], albums: [],
+    image: attachment?.preview || "",
+  });
+  history.push({ role: "user", content: userMessage });
+  await streamTurn(msg, { file: attachment?.file, userLabel: userMessage });
+}
+
 async function streamTurn(message, opts = {}) {
   isStreaming.value = true;
   thinking.value = opts.thinking || "思考中...";
@@ -331,11 +366,15 @@ async function streamTurn(message, opts = {}) {
   const botMsg = reactive({ id: ++msgId, role: "bot", text: "", cards: [], albums: [], artists: [], dossier: null, sampleDossier: null, traceSummary: null, tasteExperiment: null, pendingActions: [], recognition: opts.recognition || null });
   let finalText = "";
   let finalPayload = null;
-  abortController = new AbortController();
+  const controller = new AbortController();
+  abortController = controller;
+  const activeThread = threadId;
 
   try {
-    await api.streamChat({ userId: store.userId, threadId, message, history }, {
+    const stream = opts.file ? api.streamImageChat : api.streamChat;
+    await stream({ userId: store.userId, threadId: activeThread, message, history, file: opts.file }, {
       onEvent: (event) => {
+        if (controller.signal.aborted || threadId !== activeThread) return;
         if (event.type === "thinking" || event.type === "tool_start" || event.type === "plan") {
           thinking.value = event.content || "思考中...";
         } else if (event.type === "refine") {
@@ -344,7 +383,10 @@ async function streamTurn(message, opts = {}) {
         } else if (event.type === "eval") {
           // 自省/核对节点：剔除违反约束的候选。仅在思考态提示，不污染最终气泡。
           if (event.content) thinking.value = event.content;
+        } else if (event.type === "image_recognition") {
+          botMsg.recognition = event.payload || null;
         } else if (event.type === "candidates") {
+          thinking.value = "";
           for (const c of event.payload?.cards || []) botMsg.cards.push(c);
           if (event.payload?.taste_experiment) botMsg.tasteExperiment = event.payload.taste_experiment;
           if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
@@ -357,6 +399,10 @@ async function streamTurn(message, opts = {}) {
           scrollDown();
         } else if (event.type === "artist_card") {
           botMsg.artists.push(event.payload || {});
+          if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
+          scrollDown();
+        } else if (event.type === "library_preview") {
+          botMsg.libraryPreview = event.payload?.matches || [];
           if (!messages.value.includes(botMsg)) messages.value.push(botMsg);
           scrollDown();
         } else if (event.type === "dossier") {
@@ -397,7 +443,8 @@ async function streamTurn(message, opts = {}) {
           finalText = "⚠️ " + (event.content || "出错了，请重试");
         }
       },
-    }, abortController.signal);
+    }, controller.signal);
+    if (controller.signal.aborted || threadId !== activeThread) return;
     thinking.value = "";
     // final 事件是权威文本（可能经 guard_answer 清理过幻觉歌名），覆盖流式预览。
     botMsg.text = finalText || botMsg.text;
@@ -427,71 +474,34 @@ async function streamTurn(message, opts = {}) {
       // 后端历史保存失败不影响本轮对话；localStorage 仍会兜底保存当前窗口。
     }
   } catch (err) {
-    thinking.value = "";
-    if (err.name !== "AbortError") {
-      toast("⚠️ 连接失败，请检查服务是否启动。");
+    if (err.name !== "AbortError" && threadId === activeThread) {
+      toast(opts.file ? err.message : "⚠️ 连接失败，请检查服务是否启动。");
     }
   } finally {
-    isStreaming.value = false;
-    abortController = null;
-    scrollDown();
-    saveToStorage();
-  }
-}
-
-// ── 上传专辑封面 → 识别 → 走知识链路 ──
-function pickImage() {
-  if (isStreaming.value) return;
-  fileInput.value?.click();
-}
-
-async function onImagePicked(e) {
-  const file = e.target.files?.[0];
-  // 重置 value，保证同一张图能再次触发 change。
-  if (e.target) e.target.value = "";
-  if (!file) return;
-  if (!file.type || !file.type.startsWith("image/")) { toast("请选择图片文件（PNG/JPEG/WebP）"); return; }
-  if (isStreaming.value) return;
-
-  // 即时本地预览；识别回来后替换成后端缩略图 data URI（可持久化进 localStorage）。
-  const previewUrl = URL.createObjectURL(file);
-  const userMsg = reactive({ id: ++msgId, role: "user", text: "", image: previewUrl, cards: [], albums: [], tasteExperiment: null });
-  messages.value.push(userMsg);
-  history.push({ role: "user", content: "[上传专辑封面]" });
-  scrollDown();
-
-  isStreaming.value = true;
-  thinking.value = "识别封面中…";
-  abortController = new AbortController();
-  try {
-    const data = await api.identifyAlbum(file, store.userId, threadId, abortController.signal);
-    // 后端缩略图替换临时预览；无缩略图则清空——绝不留下 blob: 死引用（reload 后失效且占内存）。
-    URL.revokeObjectURL(previewUrl);
-    userMsg.image = data.thumbnail_url || "";
-    thinking.value = "";
-    const rec = data.recognized || {};
-    if (data.query) {
-      // 识别成功 → 把改写好的 query 喂进现有流式，复用 album_deep_dive 知识链路；
-      // recognition 挂到 bot 气泡顶部做「已识别」chip；userLabel 让后端历史记「上传封面」而非内部 query。
-      await streamTurn(data.query, { recognition: rec, thinking: "正在整理专辑资料…", userLabel: "[上传专辑封面]" });
-    } else {
-      // 没认出来：提示用户直接输入专辑名/歌手（OCR 读到文字时把文字也带上）。
+    if (abortController === controller) {
+      thinking.value = "";
       isStreaming.value = false;
       abortController = null;
-      const hint = rec.method === "ocr" && rec.raw_text
-        ? `封面上读到「${rec.raw_text}」，但没把握是哪张专辑，麻烦直接告诉我专辑名或歌手～`
-        : "没认出这是哪张专辑，麻烦直接告诉我专辑名或歌手～";
-      toast(hint);
+      scrollDown();
       saveToStorage();
     }
-  } catch (err) {
-    thinking.value = "";
-    isStreaming.value = false;
-    abortController = null;
-    URL.revokeObjectURL(previewUrl);
-    if (err.name !== "AbortError") toast("⚠️ 封面识别失败，请检查服务是否启动。");
-    saveToStorage();
   }
+}
+
+function pickImage() {
+  if (!isStreaming.value) fileInput.value?.click();
+}
+
+function onImagePicked(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file || isStreaming.value) return;
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+    toast("请选择一张 PNG、JPEG 或 WebP 图片。");
+    return;
+  }
+  clearPendingImage();
+  pendingImage.value = { file, preview: URL.createObjectURL(file) };
 }
 
 async function resolveAction(action, approved) {
@@ -566,12 +576,14 @@ function onKey(e) {
             "></div>
             <div class="body">
               <div v-if="m.image" class="user-image-wrap">
-                <img class="user-image" :src="m.image" alt="专辑封面" loading="lazy" />
+                <img class="user-image" :src="m.image" alt="上传的音乐图片" loading="lazy" />
               </div>
-              <div v-if="m.recognition && m.recognition.method && m.recognition.method !== 'none'" class="recognition-chip">
+              <div v-if="m.recognition && (m.recognition.track || m.recognition.album || m.recognition.artist || m.recognition.raw_text)" class="recognition-chip">
                 <span class="rec-icon">{{ m.recognition.method === 'vision' ? '🎵' : '🔍' }}</span>
                 <span class="rec-text">
-                  <template v-if="m.recognition.album">{{ m.recognition.album }}<em v-if="m.recognition.artist"> — {{ m.recognition.artist }}</em></template>
+                  <template v-if="m.recognition.track || m.recognition.album || m.recognition.artist">
+                    {{ m.recognition.track || m.recognition.album || m.recognition.artist }}<em v-if="(m.recognition.track || m.recognition.album) && m.recognition.artist"> — {{ m.recognition.artist }}</em>
+                  </template>
                   <template v-else-if="m.recognition.raw_text">读到封面文字：{{ m.recognition.raw_text }}</template>
                   <em class="rec-conf" v-if="m.recognition.confidence"> · {{ Math.round((m.recognition.confidence || 0) * 100) }}%</em>
                 </span>
@@ -580,6 +592,9 @@ function onKey(e) {
                    renderMarkdown 内部先 HTML 转义再做受控替换，v-html 安全。 -->
               <div v-if="m.text && m.role === 'bot'" class="text markdown" v-html="renderMarkdown(m.text)"></div>
               <div v-else-if="m.text" class="text">{{ m.text }}</div>
+              <div v-if="m.id === messages[messages.length - 1]?.id && m.traceSummary?.image_choices?.length" class="image-choices">
+                <button v-for="artist in m.traceSummary.image_choices" :key="artist" type="button" :disabled="isStreaming" @click="send('artist: ' + artist)">{{ artist }}</button>
+              </div>
               <div v-for="action in m.pendingActions || []" :key="action.action_id" class="confirmation-card">
                 <span>{{ action.text || "需要确认账号操作" }}</span>
                 <div v-if="!action.resolved">
@@ -607,7 +622,7 @@ function onKey(e) {
                     <span class="dossier-kicker">{{ m.dossier.entity?.type || "music" }}</span>
                     <h3>{{ m.dossier.entity?.name || "音乐档案" }}</h3>
                     <p v-if="m.dossier.entity?.artist">{{ m.dossier.entity.artist }}</p>
-                    <span v-if="m.dossier.is_parametric" class="dossier-source-badge">AI 知识库·未联网核实</span>
+                    <span v-if="m.dossier.is_parametric" class="dossier-source-badge">AI 解读 · 正文未联网核实</span>
                   </div>
                   <img v-if="m.dossier.entity?.image" :src="m.dossier.entity.image" alt="" loading="lazy" />
                   <div v-else class="dossier-disc">◎</div>
@@ -660,8 +675,8 @@ function onKey(e) {
                   </ol>
                 </div>
                 <div v-if="!m.dossier.compare && m.dossier.library_matches?.length" class="library-matches">
-                  <strong>🎧 你的曲库里有 <span class="reco-tag">推荐</span></strong>
-                  <p class="lib-match-hint">结合你听过的歌——介绍的这位歌手/风格，你库里已经有了，可以直接对照着听。</p>
+                  <strong>曲库内可试听</strong>
+                  <p class="lib-match-hint">来自你的曲库，包含艺人、合作曲或风格匹配。</p>
                   <SongCard
                     v-for="(lm, idx) in m.dossier.library_matches.slice(0, 8)"
                     :key="(lm.asset_id || lm.title) + '-' + idx"
@@ -676,6 +691,12 @@ function onKey(e) {
                     <span>{{ c.kind }}</span>{{ c.title || c.source || c.url }}
                   </a>
                 </div>
+              </div>
+              <div v-if="m.libraryPreview?.length && !m.dossier?.library_matches?.length" class="library-matches">
+                <strong>曲库内可试听</strong>
+                <p class="lib-match-hint">按艺人署名在曲库中找到的作品。</p>
+                <SongCard v-for="match in m.libraryPreview" :key="match.asset_id || match.title"
+                  :card="libMatchToCard(match)" :show-reason="false" @toast="(t) => store.showToast(t)" />
               </div>
               <div v-if="m.sampleDossier" class="sample-card" :class="{ partial: m.sampleDossier.partial }">
                 <div class="sample-head">
@@ -710,14 +731,19 @@ function onKey(e) {
                 <div class="trace-grid">
                   <span>意图</span><strong>{{ m.traceSummary.intent }}</strong>
                   <span>策略</span><strong>{{ m.traceSummary.strategy }}</strong>
-                  <span>工具状态</span><strong>{{ ({ ok: "执行成功", empty: "已执行，0 个候选", error: "执行失败", not_planned: "本轮未规划工具", planned_not_executed: "已规划但未执行" })[m.traceSummary.tool_execution_state] || "未知" }}</strong>
+                  <span>工具状态</span><strong>{{ ({ ok: "执行成功", partial: "部分来源未返回，已保留有效结果", empty: "部分工具返回空结果", error: "执行失败", not_planned: "本轮未规划工具", planned_not_executed: "已规划但未执行" })[m.traceSummary.tool_execution_state] || "未知" }}</strong>
                   <span>已规划</span><strong>{{ (m.traceSummary.tools_planned || []).join(" / ") || "—" }}</strong>
                   <span>已执行</span><strong>{{ (m.traceSummary.tools_executed || m.traceSummary.tools || []).join(" / ") || "—" }}</strong>
                   <span v-if="m.traceSummary.empty_results?.length">空结果</span><strong v-if="m.traceSummary.empty_results?.length">{{ m.traceSummary.empty_results.join(" / ") }}</strong>
                   <span v-if="m.traceSummary.tool_errors?.length">失败</span><strong v-if="m.traceSummary.tool_errors?.length">{{ m.traceSummary.tool_errors.join(" / ") }}</strong>
                   <span v-if="m.traceSummary.tool_error_details?.length">错误详情</span><strong v-if="m.traceSummary.tool_error_details?.length">{{ m.traceSummary.tool_error_details.map(item => `${item.tool}: ${item.message}`).join("；") }}</strong>
-                  <span>来源</span><strong>{{ (m.traceSummary.sources || []).join(" / ") || "无候选来源" }}</strong>
-                  <span>卡片</span><strong>{{ m.traceSummary.final_cards }}</strong>
+                  <span>来源</span><strong>{{ (m.traceSummary.sources || []).join(" / ") || "暂无外部来源" }}</strong>
+                  <template v-if="m.traceSummary.tool_candidate_count != null">
+                    <span>工具候选</span><strong>{{ m.traceSummary.tool_candidate_count }}</strong>
+                  </template>
+                  <span>新推荐卡片</span><strong>{{ m.traceSummary.final_cards }}</strong>
+                  <span v-if="m.traceSummary.library_match_count">曲库匹配</span><strong v-if="m.traceSummary.library_match_count">{{ m.traceSummary.library_match_count }} 首</strong>
+                  <span v-if="m.traceSummary.latency_budget?.timed_out_tools?.length">超时工具</span><strong v-if="m.traceSummary.latency_budget?.timed_out_tools?.length">{{ m.traceSummary.latency_budget.timed_out_tools.join(" / ") }}</strong>
                   <span v-if="m.traceSummary.latency_budget">耗时预算</span><strong v-if="m.traceSummary.latency_budget">{{ m.traceSummary.latency_budget.elapsed_seconds }}s / {{ m.traceSummary.latency_budget.budget_seconds }}s<span v-if="m.traceSummary.latency_budget.partial"> · 部分降级</span></strong>
                 </div>
               </details>
@@ -785,7 +811,12 @@ function onKey(e) {
 
     <!-- ── Floating Composer ── -->
     <div class="composer-wrap">
-      <div class="composer" :class="{ streaming: isStreaming }">
+      <div class="composer" :class="{ streaming: isStreaming, 'has-image': pendingImage }">
+        <div v-if="pendingImage" class="composer-attachment">
+          <img :src="pendingImage.preview" alt="待发送的音乐图片" />
+          <span>{{ pendingImage.file.name }}</span>
+          <button type="button" aria-label="移除图片" title="移除图片" @click="clearPendingImage">×</button>
+        </div>
         <textarea
           v-model="input" class="composer-input" rows="1"
           placeholder="描述你想听的音乐…"
@@ -794,10 +825,10 @@ function onKey(e) {
         <input ref="fileInput" type="file" accept="image/png,image/jpeg,image/webp" class="hidden-file" @change="onImagePicked" />
         <div class="composer-actions">
           <span class="composer-hint">Ctrl+Enter</span>
-          <button v-if="!isStreaming" class="upload-btn" title="上传专辑封面识别" @click="pickImage">
+          <button v-if="!isStreaming && imageEnabled" class="upload-btn" title="添加音乐截图或专辑封面" aria-label="添加音乐图片" @click="pickImage">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
           </button>
-          <button v-if="!isStreaming" class="send-btn" :disabled="!input.trim()" @click="send()">
+          <button v-if="!isStreaming" class="send-btn" :disabled="!input.trim() && !pendingImage" aria-label="发送" @click="send()">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/></svg>
           </button>
           <button v-else class="stop-btn" @click="cancelStream">
@@ -1698,6 +1729,36 @@ function onKey(e) {
 }
 .composer-input::placeholder { color: var(--text-muted); }
 
+.composer.has-image {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.composer-attachment {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px 8px 4px 4px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  border-radius: 10px;
+}
+.composer-attachment img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; }
+.composer-attachment span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .82rem; }
+.composer-attachment button, .image-choices button {
+  color: var(--text);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  cursor: pointer;
+}
+.composer-attachment button { width: 28px; height: 28px; font-size: 1rem; flex-shrink: 0; }
+.image-choices { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.image-choices button { padding: 6px 12px; }
+.image-choices button:hover { border-color: currentColor; }
 .composer-actions {
   display: flex; align-items: center; gap: 8px; flex-shrink: 0;
 }

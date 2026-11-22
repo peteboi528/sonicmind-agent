@@ -525,9 +525,57 @@ def _is_explicit_journey_query(query: str) -> bool:
     return phase_hits >= 2 and any(connector in query for connector in ("->", "→", "再", "然后", "最后", "先"))
 
 
+def is_album_reference(query: str) -> bool:
+    return bool(re.match(r"\s*(?:这张|那张)(?:专辑|唱片)(?:的|有|怎么|从|先|是|该)", query))
+
+
+def is_playlist_definition(query: str) -> bool:
+    return bool(
+        re.search(
+            r"歌单是什么|什么是歌单|\bwhat (?:a playlist is|is an? playlist)\b|"
+            r"プレイリストとは|qu[eé] es una lista de reproducci[oó]n",
+            query,
+            re.I,
+        )
+    )
+
+
+def artist_work_reference(query: str) -> tuple[str, str] | None:
+    # A named work and a request about its style/background are separate from an artist bio.
+    match = re.search(
+        r"^(?:请)?(?:讲讲|聊聊|介绍|解读)\s*([^，。?!！？《》]{2,48}?)\s*的\s*《?([^，。?!！？《》]{2,48})》?[，,]\s*"
+        r"(?:特别是|主要是|想了解)?\s*(?:它的|这张的|作品的)?(?:风格|背景|制作)",
+        query.strip(),
+    )
+    if match and not any(cue in query for cue in ("这首", "单曲", "歌词")):
+        return tuple(part.strip() for part in match.groups())
+    return None
+
+
 def match_intent_by_keywords(query: str) -> str | None:
     """关键词 fallback：按优先级遍历 keyword_signals，命中返回意图名，否则 None。"""
+    from app.reply_language import split_reply_request
+
+    query, _ = split_reply_request(query)
     lowered = query.lower()
+    if is_playlist_definition(query):
+        return "chat"
+    if artist_work_reference(query):
+        return "album_deep_dive"
+    if re.search(r"(?:和|与|跟)[^，。！？]{1,60}的(?:音乐|风格)?区别", query):
+        return "music_compare"
+    if re.search(
+        r"\b(?:my|mia?)\s+(?:(?:music|listening)\s+)?(?:taste|preferences|profile)\b|いまの好み|今の好み", lowered
+    ):
+        return "taste"
+    if re.search(r"このアーティストのアルバム|この歌手のアルバム", query):
+        return "artist_albums"
+    if re.search(r"(?:谁是|是谁|\bwho is\b|[¿]?quién es\b)", lowered):
+        return "artist_info"
+    if re.search(r"分析[^，。！？,!?]{0,16}(?:平时喜欢什么|口味|偏好)", query):
+        return "taste"
+    if re.search(r"在哪(?:个|些)?平台(?:能听|可以听|有)", query):
+        return "find_on_platform"
     explicit_journey = _is_explicit_journey_query(query)
     has_playlist_signal = any(sig in lowered or sig in query for sig in INTENT_REGISTRY["playlist"].keyword_signals)
     for name in _INTENT_PRIORITY:
@@ -602,7 +650,7 @@ _COREFERENCE_PATTERNS = [
 
 _CONTENT_NEGATION = re.compile(
     r"(?:不要|别放|别推|别推荐|不想听|排除|避开|去掉|no\s+|without\s+|exclude\s+|avoid\s+)"
-    r"\s*([^，。,.!?！？]{1,24})",
+    r"\s*([^，。,.!?！？;；\n]+)",
     re.IGNORECASE,
 )
 _NON_CONTENT_NEGATIONS = {
@@ -659,7 +707,7 @@ def extract_content_negations(query: str) -> list[str]:
         value = re.sub(r"(?:的)?(?:歌曲|音乐|风格|语种|语言|歌)?[吧呀啊啦了呢]*$", "", value).strip()
         value = re.sub(r"\s+(?:songs?|music|tracks?)$", "", value, flags=re.IGNORECASE).strip()
         value = normalize_content_negation(value)
-        if value in _NON_CONTENT_NEGATIONS or not value:
+        if value in _NON_CONTENT_NEGATIONS or not value or len(value) > 48:
             continue
         if any(token in value for token in ("重复", "重样", "一样", "相同")):
             continue
@@ -694,7 +742,15 @@ def is_continuation(query: str) -> bool:
     即使含指代也不判为延续——用户是在切换意图。
     """
     q = query.strip().lower()
-    if len(query.strip()) > 30:
+    # 明确的换歌表达不受附加语言要求或句长影响。
+    explicit_repeat = bool(
+        re.search(
+            r"\b(?:avoid|no) repeats?\b|\bsin repetir\b|\b(?:dame|busca) otras canciones\b|"
+            r"さっきの曲は除いて|別の曲を|(?:刚才|上一轮|上一批)[^，。！？]{0,12}(?:不要|换)",
+            q,
+        )
+    )
+    if len(query.strip()) > 30 and not explicit_repeat:
         return False
 
     # 检查是否包含明确的新意图信号——有则不是延续，而是意图切换
@@ -735,7 +791,8 @@ def is_continuation(query: str) -> bool:
     # 明确延续信号 / 指代 / 纯数量：哪怕本轮带了英文实体（用户重提歌手名+"再来几首"），
     # 也是延续——否则英文实体守卫会提前 return，去重永不触发。
     has_continuation_signal = (
-        any(sig in q or sig in query for sig in _CONTINUATION_SIGNALS)
+        explicit_repeat
+        or any(sig in q or sig in query for sig in _CONTINUATION_SIGNALS)
         or any(pat.search(query) for pat in _COREFERENCE_PATTERNS)
         or _is_count_continuation(query)
         or bool(extract_content_negations(query))

@@ -5,9 +5,11 @@ import os
 import shutil
 import sys
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_DIR = ROOT / "artifacts"
@@ -155,7 +157,7 @@ def synthetic_tracks():
     ]
 
 
-def install_fakes() -> None:
+def install_fakes(stack: ExitStack) -> None:
     from app.agent import AudioVisualAgent
     from app.models import Asset, ExternalTrack
     from app.sources import netease as netease_module
@@ -313,17 +315,19 @@ def install_fakes() -> None:
             "tracks": tracks,
         }
 
-    AudioVisualAgent.search_web_music = fake_search_web_music
-    AudioVisualAgent.search_videos = fake_search_videos
-    AudioVisualAgent.search_artist_info = fake_search_artist_info
-    AudioVisualAgent.import_netease_playlist = fake_import_playlist
-    AudioVisualAgent.get_audio_url = fake_get_audio_url
-    AudioVisualAgent.get_mv_url = fake_get_mv_url
+    stack.enter_context(patch.object(AudioVisualAgent, "search_web_music", fake_search_web_music))
+    stack.enter_context(patch.object(AudioVisualAgent, "search_videos", fake_search_videos))
+    stack.enter_context(patch.object(AudioVisualAgent, "search_artist_info", fake_search_artist_info))
+    stack.enter_context(patch.object(AudioVisualAgent, "import_netease_playlist", fake_import_playlist))
+    stack.enter_context(patch.object(AudioVisualAgent, "get_audio_url", fake_get_audio_url))
+    stack.enter_context(patch.object(AudioVisualAgent, "get_mv_url", fake_get_mv_url))
 
-    netease_module.search_netease_artist_albums = fake_artist_albums
-    netease_module.search_netease_album = fake_album_search
-    netease_module.fetch_netease_album_tracks = fake_album_tracks
-    netease_module.search_netease_artist_image = lambda artist: "https://example.com/artist.jpg"
+    stack.enter_context(patch.object(netease_module, "search_netease_artist_albums", fake_artist_albums))
+    stack.enter_context(patch.object(netease_module, "search_netease_album", fake_album_search))
+    stack.enter_context(patch.object(netease_module, "fetch_netease_album_tracks", fake_album_tracks))
+    stack.enter_context(
+        patch.object(netease_module, "search_netease_artist_image", return_value="https://example.com/artist.jpg")
+    )
 
 
 def dialogue_cases() -> list[DialogueCase]:
@@ -840,8 +844,18 @@ def main() -> int:
         sys.path.insert(0, str(ROOT))
     reset_runtime_dir()
 
+    with ExitStack() as stack:
+        return _run_smoke(stack)
+
+
+def _run_smoke(stack: ExitStack) -> int:
+    from tests.offline_fakes import configure_offline_env, seed_random, start_offline_patches
+
+    configure_offline_env()
+    seed_random()
     try:
-        install_fakes()
+        stack.enter_context(start_offline_patches())
+        install_fakes(stack)
     except ModuleNotFoundError as exc:
         missing = exc.name or str(exc)
         result = CaseResult(

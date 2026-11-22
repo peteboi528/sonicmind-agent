@@ -5,9 +5,10 @@ import re
 from typing import Any
 
 from app.answer import song_card
-from app.intents import expand_content_negation, extract_content_negations, normalize_content_negation
+from app.intents import extract_content_negations
 from app.models import ExternalTrack, ResultHygieneReport, TrackRef
 from app.recommend.hygiene import filter_music_tracks, is_valid_music_track
+from app.rules.content import filter_content_exclusions as _filter_content_exclusions
 from app.tools.actions import AUX_TOOL_NAMES, execute_aux_tool
 from app.tools.contracts import ToolContext, ToolResult, ToolStatus
 from app.tools.registry import bind_async_tool_handler, bind_tool_handler
@@ -106,46 +107,6 @@ def _apply_language_filter(tracks: list[Any], language_filter: str, target: int)
     return kept
 
 
-def _filter_content_exclusions(tracks: list[Any], exclusions: list[str]) -> list[Any]:
-    """Hard-filter rewritten negative constraints from every result-producing path."""
-    if not tracks or not exclusions:
-        return tracks
-    import re
-
-    from app.recommend.rerank import detect_language
-
-    canonical = {normalize_content_negation(item) for item in exclusions if item.strip()}
-    aliases = {alias.lower() for item in canonical for alias in expand_content_negation(item) if alias.strip()}
-
-    def blocked(track: Any) -> bool:
-        text = " ".join(
-            [
-                str(getattr(track, "title", "") or ""),
-                str(getattr(track, "artist", "") or ""),
-                str(getattr(track, "album", "") or ""),
-                *[str(item) for item in getattr(track, "genre", []) or []],
-                *[str(item) for item in getattr(track, "mood", []) or []],
-            ]
-        ).lower()
-        if any(alias in text for alias in aliases):
-            return True
-        if "中文" in canonical and detect_language(track) == "zh":
-            return True
-        if "英文" in canonical and detect_language(track) == "en":
-            return True
-        if "日语" in canonical and re.search(r"[\u3040-\u30ff]", text):
-            return True
-        if "韩语" in canonical and re.search(r"[\uac00-\ud7af]", text):
-            return True
-        if "越南" in canonical and re.search(
-            r"[ăâđêôơưáàảãạấầẩẫậắằẳẵặéèẻẽẹếềểễệíìỉĩịóòỏõọốồổỗộớờởỡợúùủũụứừửữựýỳỷỹỵ]", text
-        ):
-            return True
-        return False
-
-    return [track for track in tracks if not blocked(track)]
-
-
 # Track Hygiene（教程/合集/歌单/节目/新闻/vlog 等非歌曲实体的结构性拦截）已统一到
 # app.recommend.hygiene.is_valid_music_track —— 与 is_structural_reject/classify_candidate 同源，
 # 单一事实来源。这里 re-export 保持旧导入路径（tests/test_track_hygiene 等）兼容。
@@ -170,8 +131,34 @@ def _hygiene_suffix(report: ResultHygieneReport) -> str:
     return f"（原始 {report.raw_count}，剔除 {'、'.join(parts)}）"
 
 
+def _image_library_lookup(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.services.image_music import artist_credits, normalized
+
+    key = normalized(args["artist"])
+    tracks = [
+        track for track in ctx.agent.list_assets()
+        if key in {normalized(name) for name in artist_credits(track.artist or "")}
+        and is_valid_music_track(track)
+    ]
+    cards = [song_card(track) for track in tracks[:100]]
+    return ToolResult(tool="image_library_lookup", status=ToolStatus.OK if cards else ToolStatus.EMPTY, cards=cards)
+
+
+async def _image_catalog_lookup(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    from app.sources.netease import asearch_netease_many
+
+    items = await asearch_netease_many(args["query"], limit=args["limit"], report_failure=True)
+    tracks = [
+        ctx.agent.search_service._netease_track(item)
+        for item in items if str(item.get("song_id") or "").isdigit()
+    ]
+    cards = [song_card(track) for track in tracks if is_valid_music_track(track)]
+    return ToolResult(tool="image_catalog_lookup", status=ToolStatus.OK if cards else ToolStatus.EMPTY, cards=cards)
+
+
 def install_default_handlers() -> None:
     handlers = {
+        "image_library_lookup": _image_library_lookup,
         "recommend": _recommend,
         "search": _search,
         "playlist": _playlist,
@@ -205,6 +192,7 @@ def install_default_handlers() -> None:
     }
     for name, handler in handlers.items():
         bind_tool_handler(name, handler)
+    bind_async_tool_handler("image_catalog_lookup", _image_catalog_lookup)
     bind_async_tool_handler("web_music_search", _web_music_search_async)
     bind_async_tool_handler("artist_albums", _artist_albums_async)
     bind_async_tool_handler("video_search", _video_search_async)
@@ -721,7 +709,7 @@ def _knowledge_entities_from_prior(ctx: ToolContext) -> list[Any]:
 
 
 def _resolve_music_entity(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    from app.knowledge import canonicalize_entities, resolve_music_entities
+    from app.knowledge import _match_library_to_entity, canonicalize_entities, resolve_music_entities
 
     plan = ctx.plan or {}
     intent = str(args.get("intent") or plan.get("intent") or "")
@@ -730,13 +718,36 @@ def _resolve_music_entity(args: dict[str, Any], ctx: ToolContext) -> ToolResult:
     # 下游 metadata/review 全部继承，避免各源对同名作品各自解析出不同实体。
     # 但 sample_lookup 例外——采样溯源的证据匹配依赖用户给的逐字曲名，
     # MB 把标题改写成规范名(如 "Bound 2"→release-group 名)会打断 canonical 证据匹配。
-    if intent != "sample_lookup":
+    if intent == "artist_deep_dive" and entities:
+        from app.concurrency import run_parallel
+        from app.knowledge import remaining_seconds
+
+        # The parsed name remains usable while MusicBrainz enrichment is optional.
+        remaining = remaining_seconds(ctx.deadline_at)
+        timeout = min(2.0, remaining) if remaining is not None else 2.0
+        if timeout > 0:
+            copies = [entity.model_copy(deep=True) for entity in entities]
+            (enriched,) = run_parallel(
+                [("canonical_artist", lambda: canonicalize_entities(copies, ctx.deadline_at))],
+                timeout=timeout,
+                default=None,
+            )
+            entities = enriched or entities
+    elif intent != "sample_lookup":
         entities = canonicalize_entities(entities, ctx.deadline_at)
     data = {
         "type": "music_entity_resolution",
         "entities": [entity.model_dump(mode="json") for entity in entities],
         "partial": not bool(entities),
     }
+    if (
+        intent == "artist_deep_dive" and len(entities) == 1
+        and entities[0].type == "artist" and entities[0].ambiguity != "ambiguous"
+    ):
+        data["library_preview"] = [
+            match.model_dump(mode="json")
+            for match in _match_library_to_entity(ctx.agent, ctx.user_id, entities[0], [], limit=4)
+        ]
     summary = f"解析到 {len(entities)} 个音乐实体。" if entities else "未能稳定解析音乐实体。"
     return ToolResult(
         tool="resolve_music_entity", status=ToolStatus.OK if entities else ToolStatus.EMPTY, data=data, summary=summary

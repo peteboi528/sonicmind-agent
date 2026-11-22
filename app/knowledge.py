@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.concurrency import run_parallel
 from app.config import settings
+from app.intents import artist_work_reference, is_album_reference
 from app.llm.structured import extract_json_dict
 from app.models import (
     CareerPhase,
@@ -132,7 +133,7 @@ def read_cached_dossier(
 
 
 def write_cached_dossier(agent: Any, dossier: MusicDossier, *, intent: str = "") -> None:
-    if dossier.partial:
+    if dossier.partial or (dossier.is_parametric and not dossier.citations):
         return
     try:
         related = dossier.related_entities[:1] if intent == "music_compare" else []
@@ -161,6 +162,18 @@ def resolve_music_entities(query: str, intent: str, plan: dict[str, Any] | None 
                 for name in names
                 if name
             ][:2]
+    named_work = artist_work_reference(query) if intent == "album_deep_dive" else None
+    if named_work:
+        artist, release = named_work
+        return [MusicEntity(type="album", name=_canonical_music_name(release), artist=artist, source="query")]
+    if intent == "album_deep_dive" and is_album_reference(query):
+        entities = (plan.get("retrieval_plan") or {}).get("entities") or []
+        if entities:
+            return [
+                MusicEntity(
+                    type="album", name=entities[0], artist=entities[1] if len(entities) > 1 else "", source="context"
+                )
+            ]
     structured = _structured_entity_from_query(query, intent)
     if structured:
         return [structured]
@@ -398,8 +411,10 @@ def _canonicalize_artist_entity(client: Any, entity: MusicEntity) -> None:
         return
     name_key = _match_norm(entity.name)
     exact = [h for h in hits if _match_norm(h.get("name", "")) == name_key]
-    pool = exact or hits
-    best = max(pool, key=lambda h: h.get("score", 0))
+    if not exact:
+        entity.candidates = hits[:5]
+        return
+    best = max(exact, key=lambda h: h.get("score", 0))
     if best.get("name"):
         entity.name = best["name"]
         if not entity.query_origin:
@@ -808,7 +823,7 @@ def lookup_metadata(agent: Any, entities: list[MusicEntity], deadline_at: float 
         timeout = min(budget_for_meta, remaining - 0.3)
     else:
         timeout = floor
-    timeout = max(0.5, timeout)
+    timeout = max(0.5, timeout - 0.8)
     tasks: list[tuple[str, Any]] = []
     for entity in entities:
         tasks.append((f"metadata:{entity.name}", lambda e=entity: _metadata_for_entity(agent, e, timeout=timeout)))
@@ -1356,7 +1371,12 @@ def _match_library_to_entity(
         (artist_hits if is_artist_hit else genre_hits).append(match)
 
     # 排序：artist 命中优先于 genre；同级里 taste_aligned 优先。
-    artist_hits.sort(key=lambda m: not m.taste_aligned)
+    artist_hits.sort(
+        key=lambda match: (
+            entity.type == "artist" and _split_artists(match.artist) != _split_artists(entity.name),
+            not match.taste_aligned,
+        )
+    )
     genre_hits.sort(key=lambda m: not m.taste_aligned)
     return (artist_hits + genre_hits)[:limit]
 
@@ -1393,7 +1413,7 @@ def build_dossier(
         related=entities[1:2] if is_compare else None,
         intent=intent,
     )
-    if cached and not skipped:
+    if cached and not skipped and not (cached.is_parametric and metadata_citations and not cached.citations):
         # library_matches 是 per-user 的，缓存按实体+意图共享、不含用户维度——命中后
         # 必须用当前 user_id 重算，否则会把别的用户/旧用户的库命中带出来。
         refreshed_matches = (
@@ -2446,7 +2466,9 @@ def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None 
         ("discogs", lambda: _discogs_metadata(entity)),
     ]
     if entity.type == "artist":
-        tasks.append(("netease_albums", lambda: agent.recommend_artist_albums("", entity.name, limit=4)))
+        from app.sources.netease import search_netease_artist_albums
+
+        tasks.insert(0, ("netease_albums", lambda: search_netease_artist_albums(entity.name, limit=4)))
         tasks.append(("lastfm", _lastfm_bundle))
     elif entity.type == "album":
         tasks.append(("netease_album", _netease_album_bundle))
@@ -2472,7 +2494,9 @@ def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None 
                 MusicCitation(
                     source="netease",
                     title=album.get("name", ""),
-                    url="",
+                    url=f"https://music.163.com/#/album?id={album['id']}"
+                    if str(album.get("id") or "").isdigit()
+                    else "",
                     kind="platform",
                     excerpt=f"网易云专辑结果：{album.get('name', '')}",
                     confidence=0.8,
@@ -2562,7 +2586,9 @@ def _metadata_for_entity(agent: Any, entity: MusicEntity, timeout: float | None 
 
 def _guess_entity_name(query: str) -> str:
     text = re.sub(r"[《》“”\"']", " ", query or "")
-    text = _strip_entity_noise(text)
+    while (stripped := _strip_entity_noise(text)) != text:
+        text = stripped
+    text = re.sub(r"(?:\s*的\s*)?(?:音乐生涯|职业生涯|创作生涯|生涯|的音乐风格).*$", "", text)
     text = re.sub(
         r"(区别在哪|有什么区别|区别|不同|系统|音乐路线|是什么|怎么样|如何|风格差异|差异在哪)", " ", text, flags=re.I
     )
@@ -2577,7 +2603,7 @@ def _guess_entity_name(query: str) -> str:
 def _compare_names(query: str) -> list[str]:
     raw = re.sub(r"[《》“”\"']", " ", query or "")
     raw = re.sub(r"^\s*(比较一下|比较|对比一下|对比)\s*", "", raw, flags=re.I)
-    parts = re.split(r"\s+(?:vs|VS|Vs)\s+|\s+和\s+|和|对比|比较", raw)
+    parts = re.split(r"\s+(?:vs|VS|Vs)\s+|和|与|跟|对比|比较", raw)
     names: list[str] = []
     seen: set[str] = set()
     for part in parts:
@@ -2836,7 +2862,9 @@ def _infer_entity_type(query: str, intent: str) -> str:
             return "album"
         if any(k in q for k in ["这首", "歌曲", "track", "single", "单曲"]):
             return "track"
-        if any(k in q for k in ["歌手", "艺人", "乐队", "artist", "风格", "路线", "入门歌", "代表作", "各自"]):
+        if any(
+            k in q for k in ["歌手", "艺人", "乐队", "artist", "风格", "路线", "入门歌", "代表作", "各自"]
+        ) or re.search(r"(?:和|与|跟)[^，。！？]{1,60}的区别", query):
             return "artist"
         return "album"
     if intent == "artist_deep_dive" or any(k in q for k in ["歌手", "艺人", "乐队", "音乐路线", "artist"]):

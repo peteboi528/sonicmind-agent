@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -67,7 +68,7 @@ def _contains(items: list[str], needle: str) -> bool:
 def evaluate_turn(agent: Any, user_id: str, turn: dict[str, Any], answer: Any) -> list[Check]:
     expect = turn.get("expect") or {}
     memory = agent.memory.get_memory(user_id)
-    dialogue = agent.memory.get_dialogue_state(user_id)
+    dialogue = agent.memory.get_dialogue_state(user_id, thread_id=turn["session"])
     positive = [entry.text for entry in memory.structured_preferences]
     exclusions = list(memory.exclusion_rules)
     episodes = [entry.text for entry in memory.episodic_memory]
@@ -117,7 +118,7 @@ def run_scenario(agent: Any, scenario: dict[str, Any]) -> list[TurnResult]:
             history = []
             current_session = session
         try:
-            answer = asyncio.run(agent.chat_async(user_id, turn["message"], history=history))
+            answer = asyncio.run(agent.chat_async(user_id, turn["message"], history=history, thread_id=session))
             checks = evaluate_turn(agent, user_id, turn, answer)
             results.append(
                 TurnResult(
@@ -198,16 +199,16 @@ def render_report(scenario: dict[str, Any], results: list[TurnResult]) -> str:
     return "\n".join(lines)
 
 
-def _install_library(library: str) -> None:
+def _install_library(library: str, stack: ExitStack) -> None:
     """按场景声明的库选择假数据源。默认 small=install_fakes；large_messy=大而杂压测库。"""
     if library == "large_messy":
         from scripts.large_messy_library import install_large_messy
 
-        install_large_messy()
+        install_large_messy(stack)
     else:
         from scripts.long_dialogue_smoke import install_fakes
 
-        install_fakes()
+        install_fakes(stack)
 
 
 def run_eval(scenario_name: str = "realistic_memory") -> int:
@@ -215,22 +216,30 @@ def run_eval(scenario_name: str = "realistic_memory") -> int:
         sys.path.insert(0, str(ROOT))
     scenario_path, report_json, report_md = scenario_paths(scenario_name)
     runtime_dir = ARTIFACT_DIR / f"{scenario_name}_eval_runtime"
+    from tests.offline_fakes import block_external_network, configure_offline_env, seed_random, start_offline_patches
+
     configure_environment(runtime_dir)
+    configure_offline_env()
+    seed_random()
     if runtime_dir.exists():
         shutil.rmtree(runtime_dir)
     runtime_dir.mkdir(parents=True, exist_ok=True)
     ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
 
     scenario = json.loads(scenario_path.read_text(encoding="utf-8"))
-    _install_library(scenario.get("library", "small"))
+    with ExitStack() as stack:
+        network_attempts = stack.enter_context(block_external_network())
+        stack.enter_context(start_offline_patches())
+        _install_library(scenario.get("library", "small"), stack)
 
-    from app.agent import AudioVisualAgent
-    from app.storage import JsonStore
+        from app.agent import AudioVisualAgent
+        from app.storage import JsonStore
 
-    agent = AudioVisualAgent(JsonStore(runtime_dir / "store"))
-    results = run_scenario(agent, scenario)
+        agent = AudioVisualAgent(JsonStore(runtime_dir / "store"))
+        results = run_scenario(agent, scenario)
     payload = {
         "scenario": scenario["name"],
+        "external_network_attempts": sorted(set(network_attempts)),
         "score": sum(item.ok for item in results) / max(1, len(results)),
         "results": [
             {
@@ -246,7 +255,9 @@ def run_eval(scenario_name: str = "realistic_memory") -> int:
     print(f"{scenario_name} eval: {len(results) - len(failed)}/{len(results)} passed")
     print(f"Markdown report: {report_md}")
     print(f"JSON report: {report_json}")
-    return 1 if failed else 0
+    if network_attempts:
+        print(f"Unexpected network access: {', '.join(sorted(set(network_attempts)))}")
+    return 1 if failed or network_attempts else 0
 
 
 def main() -> int:

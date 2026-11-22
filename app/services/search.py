@@ -7,7 +7,7 @@ from collections.abc import Callable
 from typing import Any
 
 from app.config import settings
-from app.graph.tag_rules import extract_tags
+from app.graph.tag_rules import extract_genre_from_artist, extract_tags
 from app.models import ExternalTrack, ResourceTrack
 from app.recommend.hygiene import is_structural_reject
 from app.sources import youtube as youtube_source
@@ -55,6 +55,23 @@ class SearchService:
         except Exception:
             logger.warning("resource library cache write failed", exc_info=True)
 
+    def _netease_track(self, item: dict[str, Any]) -> ExternalTrack:
+        track_id = item["song_id"]
+        title = item["title"]
+        artist = item.get("artist") or ""
+        return ExternalTrack(
+            external_id=track_id,
+            title=title,
+            artist=artist,
+            album=item.get("album"),
+            cover_url=item.get("cover"),
+            genre=item.get("genre") or extract_genre_from_artist(artist),
+            mood=item.get("mood") or [],
+            source="netease",
+            candidate_kind=self._classify_candidate_kind(title, "netease"),
+            playback_url=f"https://music.163.com/song?id={track_id}",
+        )
+
     def search_web_music(
         self,
         query: str,
@@ -63,6 +80,8 @@ class SearchService:
         include_video_sources: bool = False,
         offset: int = 0,
         variants: list[str] | None = None,
+        *,
+        catalog_only: bool = False,
     ) -> list[ExternalTrack]:
         query_list = self._merge_search_queries(query, variants)
         if len(query_list) > 1:
@@ -78,6 +97,7 @@ class SearchService:
                         include_video_sources=include_video_sources,
                         offset=offset if idx == 0 else 0,
                         variants=None,
+                        catalog_only=catalog_only,
                     ),
                 )
                 for idx, q in enumerate(query_list)
@@ -93,23 +113,16 @@ class SearchService:
         try:
             from app.sources.netease import search_netease_many
 
-            for meta in search_netease_many(query, limit=top_k, offset=offset):
-                if not meta.get("title"):
-                    continue
-                tracks.append(
-                    ExternalTrack(
-                        external_id=meta["song_id"],
-                        title=meta["title"],
-                        artist=meta.get("artist", ""),
-                        album=meta.get("album"),
-                        cover_url=meta.get("cover"),
-                        source="netease",
-                        candidate_kind=self._classify_candidate_kind(meta["title"], "netease"),
-                        playback_url=f"https://music.163.com/song?id={meta['song_id']}",
-                    )
-                )
+            tracks.extend(
+                self._netease_track(meta)
+                for meta in search_netease_many(query, limit=top_k, offset=offset)
+                if meta.get("title")
+            )
         except Exception:
             logger.debug("NetEase web music search failed for query=%s", query, exc_info=True)
+
+        if catalog_only:
+            return self._unique_source_tracks(tracks)[:top_k]
 
         if include_video_sources:
             self._extend_video_tracks(tracks, query, top_k)
@@ -173,20 +186,7 @@ class SearchService:
                 offset=offset,
                 variants=variants,
             )
-        tracks = [
-            ExternalTrack(
-                external_id=item["song_id"],
-                title=item["title"],
-                artist=item.get("artist", ""),
-                album=item.get("album"),
-                cover_url=item.get("cover"),
-                source="netease",
-                candidate_kind=self._classify_candidate_kind(item["title"], "netease"),
-                playback_url=f"https://music.163.com/song?id={item['song_id']}",
-            )
-            for item in metadata
-            if item.get("title")
-        ]
+        tracks = [self._netease_track(item) for item in metadata if item.get("title")]
         if include_video_sources and len(tracks) < top_k:
             video_tracks = await self._search_videos_async(query, top_k=top_k - len(tracks))
             tracks.extend(video_tracks)

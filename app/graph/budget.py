@@ -19,18 +19,21 @@ logger = logging.getLogger(__name__)
 def _turn_budget_exceeded(state: AgentState) -> bool:
     """通用路径单轮墙钟预算是否耗尽。
 
-    knowledge intent 走自己的 tool 层 deadline_at，不在此卡；context 无 turn_deadline_at
-    （旧 checkpoint state）时返回 False，向后兼容。
+    兼容缺少 turn_deadline_at 的旧 checkpoint。
     """
-    deadline = (state.get("context") or {}).get("turn_deadline_at")
-    if not deadline or _is_knowledge_intent(state["plan"].intent):
+    context = state.get("context") or {}
+    deadline = context.get("turn_deadline_at")
+    legacy_knowledge = _is_knowledge_intent(state["plan"].intent) and not context.get("latency_budget")
+    if not deadline or legacy_knowledge:
         return False
     return time.monotonic() >= float(deadline)
 
 
 def _remaining_turn_budget_seconds(state: AgentState) -> float | None:
-    deadline = (state.get("context") or {}).get("turn_deadline_at")
-    if not deadline or _is_knowledge_intent(state["plan"].intent):
+    context = state.get("context") or {}
+    deadline = context.get("turn_deadline_at")
+    legacy_knowledge = _is_knowledge_intent(state["plan"].intent) and not context.get("latency_budget")
+    if not deadline or legacy_knowledge:
         return None
     return max(0.0, float(deadline) - time.monotonic())
 
@@ -106,7 +109,11 @@ def _latency_budget_summary(
             return None
     started = context.get("started_at_monotonic")
     elapsed = round(max(0.0, time.monotonic() - float(started)), 3) if started else 0
-    timed_out = [str(item.get("tool") or "") for item in outcomes if (item.get("error") or {}).get("kind") == "timeout"]
+    timed_out = [
+        str(item.get("tool") or "")
+        for item in outcomes
+        if (item.get("error") or {}).get("kind") == "timeout" or (item.get("metrics") or {}).get("timeout_as_degraded")
+    ]
     skipped = []
     for item in outcomes:
         metrics = item.get("metrics") or {}

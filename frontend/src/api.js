@@ -12,13 +12,17 @@ async function jsonFetch(url, options = {}) {
 }
 
 async function streamSse(url, body, handlers, signal) {
+  const multipart = body instanceof FormData;
   const resp = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    headers: multipart ? undefined : { "Content-Type": "application/json" },
+    body: multipart ? body : JSON.stringify(body),
     signal,
   });
-  if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok || !resp.body) {
+    const data = await resp.json().catch(() => null);
+    throw new Error(typeof data?.detail === "string" ? data.detail : `HTTP ${resp.status}`);
+  }
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
@@ -45,6 +49,16 @@ export const api = {
     streamSse("/agent/stream", {
       user_id: userId, thread_id: threadId, message, history: (history || []).slice(-10),
     }, handlers, signal),
+  imageTurnEnabled: async () => !!(await jsonFetch("/health")).details?.image_turn_enabled,
+  streamImageChat: ({ file, userId, threadId, message, history }, handlers, signal) => {
+    const data = new FormData();
+    data.set("file", file);
+    data.set("user_id", userId);
+    data.set("thread_id", threadId);
+    data.set("message", message);
+    data.set("history", JSON.stringify((history || []).slice(-10)));
+    return streamSse("/agent/stream/image", data, handlers, signal);
+  },
   // 上传专辑封面 → 识别专辑/歌手 → 返回可直接喂给 streamChat 的 query（null 则提示用户输入）。
   // 注意：用 FormData，不要手动设 Content-Type（浏览器自动带 multipart boundary）。
   identifyAlbum: (file, userId, threadId, signal) => {
@@ -112,6 +126,14 @@ export const api = {
   // ---- 歌单 ----
   generatePlaylist: (userId, instruction) =>
     jsonFetch("/playlist/generate", { method: "POST", body: JSON.stringify({ user_id: userId, instruction }) }),
+  previewPlaylist: (userId, instruction) =>
+    jsonFetch("/playlist/preview", { method: "POST", body: JSON.stringify({ user_id: userId, instruction }) }),
+  revisePlaylist: (userId, draftId, keptIndices, adjustment) =>
+    jsonFetch("/playlist/revise", { method: "POST", body: JSON.stringify({
+      user_id: userId, draft_id: draftId, kept_indices: keptIndices, adjustment,
+    }) }),
+  confirmPlaylist: (userId, draftId, indices, name) =>
+    jsonFetch("/playlist/confirm", { method: "POST", body: JSON.stringify({ user_id: userId, draft_id: draftId, indices, name }) }),
   createPlaylistFromAssets: (userId, name, assetIds, description = "") =>
     jsonFetch("/playlist/from_assets", { method: "POST", body: JSON.stringify({ user_id: userId, name, asset_ids: assetIds, description }) }),
   autoPlaylists: (userId) =>
@@ -137,8 +159,8 @@ export const api = {
     }) }),
   tasteExperimentReport: (userId, experimentId) =>
     jsonFetch("/taste/experiment/report", { method: "POST", body: JSON.stringify({ user_id: userId, experiment_id: experimentId }) }),
-  regenerateTasteBucket: (userId, experimentId, bucket) =>
-    jsonFetch("/taste/experiment/regenerate", { method: "POST", body: JSON.stringify({ user_id: userId, experiment_id: experimentId, bucket }) }),
+  regenerateTasteBucket: (userId, experimentId, bucket, onlineOnly = null) =>
+    jsonFetch("/taste/experiment/regenerate", { method: "POST", body: JSON.stringify({ user_id: userId, experiment_id: experimentId, bucket, online_only: onlineOnly }) }),
   deleteTasteExperiment: (userId, experimentId) =>
     jsonFetch(`/taste/experiment/${encodeURIComponent(userId)}/${encodeURIComponent(experimentId)}`, { method: "DELETE" }),
   getRatings: (userId) => jsonFetch(`/ratings/${encodeURIComponent(userId)}`),

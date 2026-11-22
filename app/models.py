@@ -328,6 +328,7 @@ class AgentPlan(BaseModel):
     tools_needed: list[str] = Field(default_factory=list)
     stages: list[ToolStage] = Field(default_factory=list)
     response_mode: Literal["grounded", "conversational", "cards"] = "grounded"
+    response_language: Literal["zh", "en", "ja", "es"] | None = None
     target_count: int | None = None
     online_required: bool = True
     reasoning_summary: str = ""
@@ -479,6 +480,7 @@ class RankingBreakdown(BaseModel):
 class TrackRef(BaseModel):
     title: str
     artist: str = ""
+    cover_url: str = ""
     source: str = "local"
     source_id: str = ""
     genre: list[str] = Field(default_factory=list)
@@ -691,6 +693,8 @@ class TasteExperiment(BaseModel):
     hypothesis: str
     status: Literal["collecting", "ready", "reported"] = "collecting"
     prompt: str = ""
+    online_only: bool = False
+    previous_tracks: list[TrackRef] = Field(default_factory=list)
     segments: list[TasteExperimentSegment] = Field(default_factory=list)
     result_summary: str = ""
     report: TasteExperimentReport | None = None
@@ -706,6 +710,9 @@ class StreamEvent(BaseModel):
         "tool_result",
         "candidates",
         "song_card",
+        "library_preview",
+        "image_recognition",
+        "image_choices",
         "album_card",
         "artist_card",
         "dossier",
@@ -763,6 +770,7 @@ class TasteExperimentRegenerateRequest(BaseModel):
     user_id: str = "demo-user"
     experiment_id: str
     bucket: Literal["safe", "stretch", "bold"]
+    online_only: bool | None = None
 
 
 class DislikeRequest(BaseModel):
@@ -1034,9 +1042,38 @@ class Playlist(BaseModel):
     updated_at: str = Field(default_factory=utc_now_iso)
 
 
+class PlaylistDraftView(Playlist):
+    target_count: int = 0
+
+
+class PlaylistDraft(PlaylistDraftView):
+    instruction: str = ""
+    adjustments: list[str] = Field(default_factory=list)
+    seen_track_keys: set[str] = Field(default_factory=set)
+
+
 class PlaylistRequest(BaseModel):
     user_id: str = "demo-user"
     instruction: str
+
+
+class PlaylistDraftSelection(BaseModel):
+    user_id: str = "demo-user"
+    draft_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    indices: list[int] = Field(min_length=1, max_length=100)
+    name: str = Field(default="", max_length=200)
+
+
+class PlaylistRevisionRequest(BaseModel):
+    user_id: str = "demo-user"
+    draft_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    kept_indices: list[int] = Field(default_factory=list, max_length=100)
+    adjustment: str = Field(default="", max_length=300)
+
+
+class PlaylistRevisionResult(BaseModel):
+    draft: PlaylistDraftView
+    added_count: int
 
 
 class PlaylistFromAssetsRequest(BaseModel):

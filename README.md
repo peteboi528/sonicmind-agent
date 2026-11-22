@@ -1,6 +1,6 @@
 <div align="center">
 
-# SonicMind
+# SonicMind —— 智能音乐推荐 Agent
 
 **把一句听歌需求变成一份自己挑过、下次还能打开的场景歌单。**
 

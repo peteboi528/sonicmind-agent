@@ -1,4 +1,4 @@
-# SonicMind —— 智能音乐推荐 Agent（原 MusicAgent）
+# SonicMind —— 智能音乐推荐 Agent
 
 一个**可解释、记忆驱动、反幻觉**的音乐推荐 Agent。核心不是单次 LLM 对话，而是一个围绕用户品味持续工作、决策全程可追溯的智能体。
 
@@ -175,4 +175,4 @@ CI 会跑 ruff、pytest coverage 和 long dialogue smoke；真实源 eval 不进
 - **标签走规则不走 LLM**：降低幻觉和成本，LLM 只做它擅长的意图判断。
 - **关键词 fallback + LLM 双保险**：LLM 不可用时关键词信号兜底；LLM 误判时安全网自动纠正。
 
-更多面试向架构讲解见 [docs/EXPLAINER.md](docs/EXPLAINER.md)。
+架构讲解见 [docs/EXPLAINER.md](docs/EXPLAINER.md)。
